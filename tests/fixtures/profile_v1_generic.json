@@ -1,0 +1,47 @@
+{
+  "project_name": "GenericLegacyApp",
+  "code_path_prefixes": [
+    "src/",
+    "lib/"
+  ],
+  "code_extensions": [
+    ".py",
+    ".ts",
+    ".tsx"
+  ],
+  "build_extensions": [
+    ".ts",
+    ".tsx"
+  ],
+  "extra_requests_file": ".agents/docs/EXTRA_REQUESTS.md",
+  "verify_command": "npm test",
+  "verify_non_code_command": "python3 scripts/check_docs.py",
+  "custom_owner_note": "preserve-me-losslessly",
+  "domains": {
+    "payments": {
+      "module_id": "MOD-PAYMENTS",
+      "module_title": "Billing, Webhooks & Idempotency",
+      "keywords": [
+        "stripe*",
+        "webhook*",
+        "billing"
+      ],
+      "checklist": [
+        "Verify webhook signature and idempotency keys before updating ledger."
+      ],
+      "is_ship": false
+    },
+    "release-ops": {
+      "module_id": "MOD-RELEASE-OPS",
+      "module_title": "Release Tag & Publish",
+      "keywords": [
+        "publish",
+        "tag*"
+      ],
+      "checklist": [
+        "Confirm changelog before tagging."
+      ],
+      "is_ship": true
+    }
+  }
+}

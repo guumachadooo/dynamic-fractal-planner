@@ -1,0 +1,302 @@
+{
+  "project_name": "Cavern / CavernizeAndroid",
+  "code_path_prefixes": [
+    "Cavern/",
+    "Cavern.Format/",
+    "CavernSamples/",
+    ".github/workflows/"
+  ],
+  "code_extensions": [
+    ".cs",
+    ".csproj",
+    ".xml",
+    ".resx",
+    ".axml",
+    ".yml",
+    ".yaml"
+  ],
+  "build_extensions": [
+    ".cs",
+    ".csproj"
+  ],
+  "extra_requests_file": ".agents/docs/EXTRA_REQUESTS.md",
+  "session": {
+    "version_files": [
+      {
+        "label": "csproj",
+        "path": "CavernSamples/CavernizeAndroid/CavernizeAndroid.csproj",
+        "regex": "<ApplicationDisplayVersion>([^<]+)</ApplicationDisplayVersion>",
+        "sync_prefix": true
+      },
+      {
+        "label": "CI",
+        "path": ".github/workflows/BuildAndroid.yml",
+        "regex": "-p:ApplicationDisplayVersion=([^\\n\\\\]+)",
+        "sync_prefix": true
+      }
+    ],
+    "env_notes": [
+      {
+        "conditions": {
+          "exists_path": "/root/.dotnet/dotnet"
+        },
+        "text": "Termux ARM64 PRoot env: `/root/.dotnet/dotnet` requires `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_GCHeapHardLimit=20000000 DOTNET_EnableDiagnostics=0 ... -m:1 /p:UseSharedCompilation=false`; final signed APK builds via `.github/workflows/BuildAndroid.yml`."
+      }
+    ],
+    "watch_paths": [
+      {
+        "label": "Latest APK in Downloads",
+        "path": "/sdcard/Download/Cavernize-Android.apk",
+        "show_size_mb": true
+      },
+      {
+        "label": "Shared device log available at",
+        "path": "/sdcard/Download/Cavernize/Logs/cavernize_log.txt"
+      }
+    ],
+    "extra_docs": [
+      ".agents/docs/ONEUI9_REFERENCE.md"
+    ]
+  },
+  "memory_feedback": {
+    "enabled": true,
+    "min_code_files": 2,
+    "docs": [
+      ".agents/docs/PROJECT_HISTORY.md",
+      ".agents/docs/ONEUI9_REFERENCE.md",
+      "AGENTS.md",
+      "CavernSamples/CavernizeAndroid/AGENTS.md"
+    ],
+    "message": "Memory Feedback Reminder: multiple code files are modified in this commit without a recent update to `.agents/docs/PROJECT_HISTORY.md`. If this cycle fixed a non-obvious bug, changed UX/architecture, or shipped a new version, prepend a concise 1–4 line summary under `## 3. Version History (Newest First)` in `PROJECT_HISTORY.md` (and update `ONEUI9_REFERENCE.md` / `AGENTS.md` if applicable) before committing — or retry `git commit` if no new entry is needed."
+  },
+  "file_guards": [
+    {
+      "path_suffix": "CavernSamples/CavernizeAndroid/Properties/AndroidManifest.xml",
+      "check_when_touching_regex": "targetSdkVersion",
+      "must_contain_regex": "android:targetSdkVersion\\s*=\\s*\"28\"",
+      "decision": "force_ask",
+      "verify_severity": "fail",
+      "reason": "PROJECT SAFETY GUARD: AndroidManifest.xml must keep android:targetSdkVersion=\"28\" (SELinux untrusted_app_27 domain) so static binaries (ffmpeg/truehdd) can execute inside FilesDir. Confirm manually only if intentional."
+    }
+  ],
+  "command_guards": [
+    {
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet",
+        "not_exists_glob": "/root/.dotnet/packs/Microsoft.Android*"
+      },
+      "match_regex": "^(?:/root/\\.dotnet/)?dotnet\\s+(?:build|publish|test|pack|restore|run)\\b",
+      "forbid_args_regex": "(?:CavernizeAndroid\\.csproj|net11\\.0-android|InstallAndroidDependencies)",
+      "reason": "Local Termux ARM64 PRoot lacks the Android SDK / `net11.0-android` workload. Validate shared logic locally by building `CavernSamples/Reusable/Cavernize.Logic/Cavernize.Logic.csproj` (or `Cavern`/`Cavern.Format`), and build the signed APK via GitHub Actions (`.github/workflows/BuildAndroid.yml`)."
+    },
+    {
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet"
+      },
+      "match_regex": "^(?:/root/\\.dotnet/)?dotnet\\s+(?:build|publish|test|pack|restore|run)\\b",
+      "require_env_vars": [
+        "DOTNET_GCHeapHardLimit",
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"
+      ],
+      "reason": "CoreCLR fails in Termux ARM64 PRoot without required env vars ({missing}). Run with:\nDOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_GCHeapHardLimit=20000000 DOTNET_EnableDiagnostics=0 /root/.dotnet/dotnet <subcommand> -m:1 /p:UseSharedCompilation=false"
+    }
+  ],
+  "diff_rules": [
+    {
+      "path_prefix": "Cavern.Format/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\bis\\s+not\\b",
+      "severity": "fail",
+      "message": "C# 9+ `is not` is forbidden in `Cavern.Format` (targets netstandard2.1 / C# 8.0)."
+    },
+    {
+      "path_prefix": "Cavern.Format/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "^\\s*namespace\\s+[A-Za-z0-9_.]+\\s*;\\s*$",
+      "severity": "fail",
+      "message": "File-scoped namespace is C# 10+ and forbidden in `Cavern.Format` (C# 8.0)."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\bAlertDialog\\b",
+      "severity": "fail",
+      "message": "Legacy `AlertDialog` detected; use `OneUiModalDialog` instead."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\bnew\\s+(?:Android\\.Widget\\.)?Spinner\\s*\\(",
+      "severity": "fail",
+      "message": "Stock `Spinner` detected; use `OneUiInlineSelector` instead."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "trigger_regex": "Orientation\\.Horizontal",
+      "require_if_any_regex": "(?:Button|Pill|AddView|SetSingleLine|Ellipsize)",
+      "must_match_window_regex": "BaselineAligned\\s*=\\s*false",
+      "window_before": 5,
+      "window_after": 13,
+      "severity": "warn",
+      "message": "Horizontal LinearLayout near buttons/pills without visible `BaselineAligned = false` in local window."
+    }
+  ],
+  "key_parity_rules": [
+    {
+      "path": "CavernSamples/CavernizeAndroid/Language/AndroidStrings.cs",
+      "added_key_regex": "^\\s*\\[\"([^\"]+)\"\\]\\s*=",
+      "target_section_regex": "static\\s+void\\s+ApplyPortuguese\\b(.*?)(?=^\\s*static\\s+void\\s+Apply|\\Z)",
+      "target_key_template": "d[\"{key}\"]",
+      "severity": "fail",
+      "message": "Added English key `[\"{key}\"]` is missing in `ApplyPortuguese`."
+    }
+  ],
+  "build_rules": [
+    {
+      "label": "Cavern.Format/Cavern.Format.csproj",
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet"
+      },
+      "trigger_path_prefixes": [
+        "Cavern.Format/"
+      ],
+      "trigger_extensions": [
+        ".cs",
+        ".csproj"
+      ],
+      "run_on_force": false,
+      "command": "/root/.dotnet/dotnet build Cavern.Format/Cavern.Format.csproj -c Release -m:1 /p:UseSharedCompilation=false",
+      "env": {
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",
+        "DOTNET_GCHeapHardLimit": "20000000",
+        "DOTNET_EnableDiagnostics": "0"
+      }
+    },
+    {
+      "label": "Cavern/Cavern.csproj",
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet"
+      },
+      "trigger_path_prefixes": [
+        "Cavern/"
+      ],
+      "trigger_extensions": [
+        ".cs",
+        ".csproj"
+      ],
+      "run_on_force": false,
+      "command": "/root/.dotnet/dotnet build Cavern/Cavern.csproj -c Release -m:1 /p:UseSharedCompilation=false",
+      "env": {
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",
+        "DOTNET_GCHeapHardLimit": "20000000",
+        "DOTNET_EnableDiagnostics": "0"
+      }
+    },
+    {
+      "label": "CavernSamples/Reusable/Cavernize.Logic/Cavernize.Logic.csproj",
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet"
+      },
+      "trigger_path_prefixes": [
+        "Cavern/",
+        "Cavern.Format/",
+        "CavernSamples/"
+      ],
+      "trigger_extensions": [
+        ".cs",
+        ".csproj"
+      ],
+      "run_on_force": true,
+      "command": "/root/.dotnet/dotnet build CavernSamples/Reusable/Cavernize.Logic/Cavernize.Logic.csproj -c Release -m:1 /p:UseSharedCompilation=false",
+      "env": {
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",
+        "DOTNET_GCHeapHardLimit": "20000000",
+        "DOTNET_EnableDiagnostics": "0"
+      }
+    }
+  ],
+  "domains": {
+    "ui-oneui9": {
+      "module_id": "MOD-UI-ONEUI9",
+      "module_title": "One UI 9 Interface, Canvas & Localization",
+      "keywords": [
+        "one ui", "oneui", "ui", "layout", "botão", "botoes", "botões", "button*",
+        "aba", "abas", "tab", "tabs", "tela", "screen*", "now playing", "seekbar",
+        "slider*", "switch*", "modal", "dialog*", "ícone*", "icone*", "icon*",
+        "fonte*", "font*", "lyrics", "letra*", "animaç*", "animac*", "animat*",
+        "canvas", "3d room", "roomsimulator*", "tema", "temas", "theme*",
+        "cor", "cores", "color*", "traduç*", "traduc*", "pt-br", "androidstrings*",
+        "clipping", "hud", "mini-player", "miniplayer", "waveform", "mainactivity*",
+        "card", "pill*", "bento"
+      ],
+      "checklist": [
+        "Consult `.agents/docs/ONEUI9_REFERENCE.md` for native One UI 9 / Apple Music / Samsung Video measurements.",
+        "Every horizontal button/pill row MUST set `BaselineAligned = false`, `GravityFlags.CenterVertical`, `SetSingleLine(true)`, `Ellipsize`.",
+        "Use `OneUiModalDialog`, `OneUiInlineSelector`, `OneUiVectorIcons` (no stock `AlertDialog`/`Spinner` or loose emojis).",
+        "Update `AndroidStrings.cs` in BOTH `CreateEnglish()` and `ApplyPortuguese()` (preserving `ApplyHungarian`/`ApplyChinese`)."
+      ]
+    },
+    "dsp-format": {
+      "module_id": "MOD-DSP-FORMAT",
+      "module_title": "Cavern Core / Format & Spatial DSP",
+      "keywords": [
+        "cavern.format", "dsp", "spatial", "espacial", "atmos", "truehd", "damf",
+        "mlp", "flac", "mkv", "matroska", "mp4", "wav", "riff", "codec*",
+        "decoder*", "encoder*", "render*", "upmix*", "matrix", "hrtf", "hrir",
+        "quickeq", "stem", "stems", "channel*", "canal", "canais", "objeto*",
+        "object*", "stream", "streams", "streaming", "seek*", "merge", "juntar",
+        "demux*", "remux*", "realtimeplayerengine*", "cavernize.logic"
+      ],
+      "checklist": [
+        "`Cavern.Format` targets `netstandard2.1` (C# 8.0 ONLY: avoid `is not`, file-scoped namespaces, target-typed `new()`).",
+        "Preserve `Seek(0)` stream invariants, `MatroskaTree` endPosition guards, `FlacAudioConverter` fallback, and original features."
+      ]
+    },
+    "media-native": {
+      "module_id": "MOD-MEDIA-NATIVE",
+      "module_title": "Native Decoders, Services & SELinux",
+      "keywords": [
+        "ffmpeg", "truehdd", "selinux", "targetsdk*", "filesdir", "ndk",
+        "binário*", "binario*", "binary", "permiss*", "notificaç*", "notificac*",
+        "notification*", "mediasession", "foreground", "applogger", "crash*",
+        "bitmap*", "recycle*", "dispose*", "safepipe*", "thread*", "deadlock*",
+        "race condition*", "audiooutput*", "audiotrack*", "androidmanifest*"
+      ],
+      "checklist": [
+        "Keep `android:targetSdkVersion=\"28\"` untouched in `AndroidManifest.xml` (`untrusted_app_27` SELinux for `ffmpeg`/`truehdd`).",
+        "Check `SafePipeHandle` / stream disposal, concurrent bitmap `.Recycle()` safety, and `AppLogger` error diagnostics."
+      ]
+    },
+    "player-library": {
+      "module_id": "MOD-PLAYER-LIB",
+      "module_title": "Media Library, Tags & Online Scrapers",
+      "keywords": [
+        "biblioteca", "library", "álbum", "album", "álbuns", "artista*", "artist*",
+        "faixa*", "track*", "tag", "tags", "audiotag*", "metadata", "capa*", "cover*",
+        "itunes", "lrclib", "opensubtitles", "podnapisi", "legenda*", "subtitle*",
+        "explorer", "pasta*", "folder*", "saf", "mediastore", "fila", "queue",
+        "variante*", "variant*", "lyricsservice*", "onlinemetadata*", "cache*"
+      ],
+      "checklist": [
+        "Keep `MediaStore` + local folder scanning, filter-accurate track counts, and non-blocking background caching safe."
+      ]
+    },
+    "build-deliver": {
+      "module_id": "MOD-SHIP",
+      "module_title": "Version Sync, Commit, CI & APK Delivery",
+      "is_ship": true,
+      "keywords": [
+        "build", "builds", "compil*", "apk", "release*", "github actions",
+        "buildandroid*", "ota", "appupdate*", "versão", "versao", "version*",
+        "commit", "push", "deliver*", "entreg*", "sdcard/download"
+      ],
+      "checklist": [
+        "Read `.agents/docs/EXTRA_REQUESTS.md` FIRST; stop & implement if any pending items exist.",
+        "Keep `ApplicationDisplayVersion` synchronized (`CavernizeAndroid.csproj` & `BuildAndroid.yml`) and preserve all `vX.Y.Z` GitHub releases.",
+        "Prepend milestone to `.agents/docs/PROJECT_HISTORY.md` (and update `README.md` if user-facing).",
+        "Monitor GitHub Actions to success and deliver signed APK to workspace & `/sdcard/Download/Cavernize-Android.apk`."
+      ]
+    }
+  }
+}
