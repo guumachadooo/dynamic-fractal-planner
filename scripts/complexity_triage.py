@@ -214,6 +214,58 @@ def _count_action_clauses(text: str) -> int:
     return active
 
 
+def extract_auto_reqs(prompt: str, max_reqs: int = 8) -> list[str]:
+    """Extract compact `REQ-01: ...` items from a user prompt in pure Python (0 LLM turns)."""
+    text = (prompt or "").strip()
+    if not text:
+        return []
+
+    candidates: list[str] = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*(?:\d{1,2}[\.\)\:]|[-*•])\s+(.+)$", line)
+        if m:
+            item = re.sub(r"\s+", " ", m.group(1).strip().strip("`"))
+            if len(item) >= 6:
+                candidates.append(item)
+
+    if len(candidates) < 2:
+        for line in text.splitlines():
+            m = re.match(r"^\s*#{1,3}\s+(?:STEP|PART|[A-Z]\d+\.?|\d+\.)\s*[-—:]?\s*(.+)$", line, re.IGNORECASE)
+            if m:
+                item = re.sub(r"\s+", " ", m.group(1).strip())
+                if len(item) >= 6 and item not in candidates:
+                    candidates.append(item)
+
+    if not candidates:
+        raw_chunks = re.split(
+            r"(?:[\n;!?]+|\.(?:\s+|$)|,\s+(?:e|and|mas|plus|também|tambem|also)\s+|\s+(?:além disso|alem disso|outra coisa|e também|e tambem|and also)\s+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        for chunk in raw_chunks:
+            c = re.sub(r"\s+", " ", chunk.strip())
+            if len(c) >= 10 and any(pat.search(c.lower()) for pat in _ACTION_PATTERNS):
+                candidates.append(c)
+
+    if not candidates:
+        first_line = re.sub(r"\s+", " ", text.splitlines()[0].strip())
+        if first_line:
+            candidates.append(first_line)
+
+    reqs: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        clean = item[:85].rstrip(" .,;:") + ("..." if len(item) > 85 else "")
+        low = clean.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        reqs.append(f"REQ-{len(reqs) + 1:02d}: {clean}")
+        if len(reqs) >= max_reqs:
+            break
+    return reqs
+
+
 def _detect_domains(lower_text: str, domain_specs: dict[str, dict[str, Any]]) -> list[str]:
     found: list[str] = []
     for dom, spec in domain_specs.items():

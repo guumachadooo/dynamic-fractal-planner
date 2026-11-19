@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
-"""Universal Stop hook: prevents premature finish when plan, verifier, or EXTRA_REQUESTS are incomplete."""
+"""Universal Stop hook: runs fast in-process static auto-verify when `needs_verify` (<0.5s),
+blocks stop on static errors / failed build / missing build / pending plugin tests / EXTRA_REQUESTS.
+"""
 
 from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 HOOKS_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = HOOKS_DIR.parent
-if str(HOOKS_DIR) not in sys.path:
-    sys.path.insert(0, str(HOOKS_DIR))
-
-from planner_state import (  # noqa: E402
-    get_paths,
-    get_pending_extra_requests,
-    has_active_turn_plan,
-    load_json,
-    load_project_profile,
-    resolve_repo_root,
-)
+SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 
 
 def allow_stop() -> None:
@@ -27,6 +20,10 @@ def allow_stop() -> None:
 
 
 def main() -> None:
+    if (PLUGIN_ROOT / ".bypass_gates").exists():
+        allow_stop()
+        return
+
     payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
 
     if payload.get("continuationActive"):
@@ -38,6 +35,20 @@ def main() -> None:
     if payload.get("terminationReason") not in ("NO_TOOL_CALL", "", None):
         allow_stop()
         return
+
+    for p in (str(HOOKS_DIR), str(SCRIPTS_DIR)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    from planner_state import (  # noqa: E402
+        get_paths,
+        get_pending_extra_requests,
+        has_active_turn_plan,
+        load_json,
+        load_project_profile,
+        resolve_repo_root,
+        save_json,
+    )
 
     repo = resolve_repo_root(payload)
     profile = load_project_profile(repo)
@@ -57,36 +68,39 @@ def main() -> None:
         if unverified or open_mods:
             parts = []
             if open_mods:
-                parts.append(f"unfinished module(s): {', '.join(open_mods[:5])}")
+                parts.append(f"open_mods={','.join(open_mods[:5])}")
             if unverified:
-                parts.append(f"unverified requirement(s): {', '.join(unverified[:6])}")
+                parts.append(f"unverified_reqs={','.join(unverified[:6])}")
             reasons.append(
-                "Dynamic plan is still incomplete (" + "; ".join(parts) + "). "
-                "Complete them or call `plan_tool.py pause` if waiting on the user."
+                f"Active plan incomplete ({' | '.join(parts)}) -> run `plan_tool.py finish --evidence \"...\"` or `pause`."
             )
 
-    needs_plugin_tests = bool(hook_state.get("needs_plugin_tests"))
-    if needs_plugin_tests:
+    if bool(hook_state.get("needs_plugin_tests")):
         plugin_tests = PLUGIN_ROOT / "tests" / "run_plugin_tests.py"
-        reasons.append(
-            f"Plugin files were modified without passing regression tests. "
-            f"Run `python3 {plugin_tests}` (or `verify_universal.py --plugin-tests`) first."
-        )
+        reasons.append(f"Plugin edited without passing tests -> run `python3 {plugin_tests}`.")
 
-    needs_verify = bool(hook_state.get("needs_verify"))
-    needs_build = bool(hook_state.get("needs_build"))
-    if needs_verify or needs_build:
-        verify_cli = PLUGIN_ROOT / "scripts" / "verify_universal.py"
-        cmd = f"python3 {verify_cli} --build" if needs_build else f"python3 {verify_cli}"
-        reasons.append(f"Modified files have not been verified since the last edit. Run `{cmd}` first.")
+    # Silent in-process static auto-verify (<0.5s, never heavy build/plugin tests)
+    if bool(hook_state.get("needs_verify")):
+        from verify_universal import run_static_checks  # noqa: E402
+
+        _, static_fails, _ = run_static_checks(repo, profile)
+        if static_fails:
+            reasons.append("Static auto-verify failed:\n  " + "\n  ".join(static_fails[:8]))
+        else:
+            hook_state["needs_verify"] = False
+            hook_state["last_verify_ts"] = time.time()
+            save_json(hook_file, hook_state)
+
+    if bool(hook_state.get("last_build_failed")):
+        reasons.append("Last build/test failed -> fix errors && re-run passing build/tests (or inform user).")
+    elif bool(hook_state.get("needs_build")):
+        verify_cli = SCRIPTS_DIR / "verify_universal.py"
+        reasons.append(f"Compiled code modified without build -> run `python3 {verify_cli} --build` first.")
 
     if hook_state.get("code_files_edited"):
         extra_rel, pending_extra = get_pending_extra_requests(repo, profile)
         if pending_extra:
-            reasons.append(
-                f"`{extra_rel}` has {len(pending_extra)} pending extra request(s). "
-                "Read and resolve them before finishing."
-            )
+            reasons.append(f"`{extra_rel}` has {len(pending_extra)} pending item(s) -> resolve before finishing.")
 
     if not reasons:
         allow_stop()

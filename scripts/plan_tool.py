@@ -224,6 +224,10 @@ def render_markdown(state: dict[str, Any]) -> str:
     for m in mods:
         m_icon = STATUS_ICON.get(m.get("status", "pending"), "[ ]")
         linked = ", ".join(m.get("linked_reqs") or []) or "All"
+        if m.get("status") == "done":
+            n_steps = len(m.get("steps") or [])
+            lines.append(f"- {m_icon} `{m['id']}` | {m['title']} ({n_steps} steps done | REQs: {linked})")
+            continue
         lines.append(f"### {m_icon} `{m['id']}` — {m['title']} (`{m.get('domain', 'general')}` | REQs: {linked})")
         if m.get("checklist"):
             lines.append("**Module Guardrails:**")
@@ -657,6 +661,170 @@ def cmd_audit(artifact_dir: Path) -> int:
     return 1
 
 
+def cmd_finish(args: argparse.Namespace, artifact_dir: Path) -> int:
+    """Close all modules/steps and verify all REQs in 1 turn with observed evidence."""
+    ev = (args.evidence or "").strip()
+    if not ev:
+        raise SystemExit("`finish` requires non-empty `--evidence`.")
+    _, state_file, _ = state_paths(artifact_dir)
+    state = load_state(state_file)
+    state["lifecycle"] = "active"
+    state["pause_reason"] = ""
+    for m in state.get("modules") or []:
+        for s in m.get("steps") or []:
+            s["status"] = "done"
+            if not s.get("evidence"):
+                s["evidence"] = ev
+            for sub in s.get("substeps") or []:
+                sub["status"] = "done"
+                if not sub.get("evidence"):
+                    sub["evidence"] = ev
+        m["status"] = "done"
+    for r in state.get("requirements") or []:
+        if r.get("status") != "verified":
+            r["status"] = "verified"
+            r["evidence"] = ev
+    save_and_render(artifact_dir, state)
+    print(format_compact_status(state))
+    return cmd_audit(artifact_dir)
+
+
+def cmd_handoff(args: argparse.Namespace, ws_root: Path) -> int:
+    """Write or clear a compact <=20L `.agents/docs/HANDOFF.md` for low-quota fresh chats."""
+    handoff_file = ws_root / ".agents" / "docs" / "HANDOFF.md"
+    if getattr(args, "clear", False):
+        if handoff_file.exists():
+            handoff_file.unlink()
+            print(f"HANDOFF_CLEARED|{handoff_file}")
+        else:
+            print(f"HANDOFF_ABSENT|{handoff_file}")
+        return 0
+
+    summary = (args.summary or "").strip().replace("\n", " ")
+    next_act = (args.next or "").strip().replace("\n", " ")
+    if not summary and not next_act:
+        raise SystemExit("`handoff` requires `--summary` or `--next` (or `--clear`).")
+
+    branch, head, dirty = "-", "-", "0"
+    dirty_preview = ""
+    if (ws_root / ".git").exists():
+        def _g(gargs: list[str]) -> str:
+            r = subprocess.run(["git", "-C", str(ws_root), *gargs], capture_output=True, text=True, timeout=3, check=False)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        branch = _g(["branch", "--show-current"]) or "-"
+        head = _g(["rev-parse", "--short", "HEAD"]) or "-"
+        st = [ln.strip() for ln in _g(["status", "--porcelain"]).splitlines() if ln.strip()]
+        dirty = str(len(st))
+        if st:
+            dirty_preview = ", ".join(st[:5]) + (f" (+{len(st) - 5})" if len(st) > 5 else "")
+
+    lines = [
+        "# Session Handoff",
+        f"ts={int(time.time())}|branch={branch}|head={head}|dirty={dirty}",
+    ]
+    if summary:
+        lines.append(f"summary|{summary[:300]}")
+    if next_act:
+        lines.append(f"next|{next_act[:300]}")
+    if dirty_preview:
+        lines.append(f"files|{dirty_preview[:240]}")
+
+    handoff_file.parent.mkdir(parents=True, exist_ok=True)
+    handoff_file.write_text("\n".join(lines[:20]) + "\n", encoding="utf-8")
+    print(f"HANDOFF_WRITTEN|{handoff_file}|lines={len(lines[:20])}")
+    return 0
+
+
+def cmd_undo_turn(args: argparse.Namespace, artifact_dir: Path, ws_root: Path) -> int:
+    """Inspect or roll back code edits made in the active turn using `.hook_state.json` snapshot."""
+    _, _, hook_file = state_paths(artifact_dir)
+    if not hook_file.is_file():
+        print("UNDO_SKIP|no .hook_state.json")
+        return 0
+    hook_state = json.loads(hook_file.read_text(encoding="utf-8"))
+    edited = [str(f).replace("\\", "/") for f in (hook_state.get("code_files_edited") or []) if f]
+    snap_ref = (hook_state.get("turn_snapshot_ref") or "").strip()
+    base_head = (hook_state.get("turn_base_head") or "").strip()
+    pre_dirty = set(str(x).replace("\\", "/") for x in (hook_state.get("turn_preexisting_dirty") or []))
+
+    if not edited:
+        print("UNDO_SKIP|no code_files_edited in turn")
+        return 0
+
+    def _exists_in_ref(ref: str, rel: str) -> bool:
+        if not ref:
+            return False
+        r = subprocess.run(["git", "-C", str(ws_root), "cat-file", "-e", f"{ref}:{rel}"], capture_output=True, text=True, timeout=3, check=False)
+        return r.returncode == 0
+
+    actions: list[tuple[str, str, str]] = []
+    for rel in edited:
+        if snap_ref and _exists_in_ref(snap_ref, rel):
+            actions.append(("RESTORE", rel, snap_ref))
+        elif base_head and _exists_in_ref(base_head, rel):
+            actions.append(("RESTORE", rel, base_head))
+        elif rel not in pre_dirty:
+            actions.append(("DELETE", rel, "new_in_turn"))
+
+    if getattr(args, "dry_run", False):
+        print(f"UNDO_DRY_RUN|snap={snap_ref or '-'}|head={base_head or '-'}|actions={len(actions)}")
+        for act, rel, src in actions:
+            print(f"{act}|{rel}|{src}")
+        return 0
+
+    restored, deleted = 0, 0
+    for act, rel, src in actions:
+        if act == "RESTORE":
+            res = subprocess.run(["git", "-C", str(ws_root), "checkout", src, "--", rel], capture_output=True, text=True, timeout=5, check=False)
+            if res.returncode == 0:
+                restored += 1
+        elif act == "DELETE":
+            p = ws_root / rel
+            if p.is_file():
+                p.unlink()
+                deleted += 1
+
+    hook_state["code_files_edited"] = []
+    hook_state["needs_verify"] = False
+    hook_state["needs_build"] = False
+    hook_file.write_text(json.dumps(hook_state, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"UNDO_APPLIED|restored={restored}|deleted={deleted}")
+    return 0
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    """Aggregate or reset local plugin telemetry events in `.metrics.jsonl`."""
+    metrics_env = os.environ.get("PLANNER_METRICS_FILE", "").strip()
+    metrics_file = Path(metrics_env) if metrics_env else (SCRIPTS_DIR.parent / ".metrics.jsonl")
+    if getattr(args, "reset", False):
+        if metrics_file.exists():
+            metrics_file.unlink()
+        print(f"STATS_RESET|{metrics_file}")
+        return 0
+
+    if not metrics_file.is_file():
+        print("STATS|total=0|empty")
+        return 0
+
+    counts: dict[str, int] = {}
+    total = 0
+    for raw in metrics_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+            ev = str(obj.get("ev") or "unknown")
+            counts[ev] = counts.get(ev, 0) + 1
+            total += 1
+        except Exception:
+            continue
+    print(f"STATS|total={total}|file={metrics_file.name}")
+    for ev, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        print(f"{ev}|{cnt}")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Universal Dynamic Fractal Plan Engine & Project Bootstrapper.")
     parser.add_argument("--dir", default=None, help="Artifact directory override.")
@@ -719,6 +887,20 @@ def main() -> None:
     sub.add_parser("next")
     sub.add_parser("audit")
 
+    p_fin = sub.add_parser("finish", help="Close all modules and verify all requirements in 1 turn.")
+    p_fin.add_argument("--evidence", required=True)
+
+    p_ho = sub.add_parser("handoff", help="Write or clear compact <=20L .agents/docs/HANDOFF.md.")
+    p_ho.add_argument("--summary", default="")
+    p_ho.add_argument("--next", default="")
+    p_ho.add_argument("--clear", action="store_true")
+
+    p_undo = sub.add_parser("undo-turn", help="Preview or revert code edits from the active turn.")
+    p_undo.add_argument("--dry-run", action="store_true")
+
+    p_st = sub.add_parser("stats", help="Show or reset local plugin telemetry stats.")
+    p_st.add_argument("--reset", action="store_true")
+
     args = parser.parse_args()
     ws_root = resolve_workspace_root(args.workspace)
     if args.cmd == "triage":
@@ -736,6 +918,10 @@ def main() -> None:
         return
     if args.cmd == "migrate":
         raise SystemExit(cmd_migrate(args, ws_root))
+    if args.cmd == "handoff":
+        raise SystemExit(cmd_handoff(args, ws_root))
+    if args.cmd == "stats":
+        raise SystemExit(cmd_stats(args))
 
     art_dir = resolve_artifact_dir(args.dir)
     if args.cmd == "init":
@@ -757,6 +943,10 @@ def main() -> None:
         print(format_compact_status(load_state(state_file)))
     elif args.cmd == "audit":
         raise SystemExit(cmd_audit(art_dir))
+    elif args.cmd == "finish":
+        raise SystemExit(cmd_finish(args, art_dir))
+    elif args.cmd == "undo-turn":
+        raise SystemExit(cmd_undo_turn(args, art_dir, ws_root))
 
 
 if __name__ == "__main__":

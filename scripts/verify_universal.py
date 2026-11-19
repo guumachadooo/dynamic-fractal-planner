@@ -24,11 +24,20 @@ for p in (str(SCRIPTS_DIR), str(HOOKS_DIR)):
 from planner_state import (  # noqa: E402
     DEFAULT_EXTRA_REQUESTS_FILE,
     eval_conditions,
+    extract_symbol_map,
     get_pending_extra_requests,
     is_plugin_path,
     load_project_profile_with_warnings,
     resolve_plugin_root,
+    scan_secrets_and_conflicts,
 )
+
+BRACKET_EXTS = (".cs", ".ts", ".tsx", ".js", ".jsx", ".kt", ".java")
+ORPHAN_CHECK_EXTS = (".py", ".cs", ".ts", ".tsx", ".js", ".jsx", ".kt", ".kts", ".java", ".go", ".rs")
+BINARY_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".ttf", ".otf", ".apk", ".dll", ".exe", ".so", ".zip", ".gz", ".tar", ".mp3", ".flac", ".mp4", ".mkv", ".wav")
+GENERIC_ORPHAN_NAMES = frozenset({
+    "main", "update", "run", "init", "dispose", "tostring", "build", "load", "save", "get", "set", "__init__",
+})
 
 
 def resolve_repo_root(cli_ws: str | None = None) -> Path:
@@ -371,6 +380,303 @@ def run_legacy_verify_command(repo: Path, profile: dict[str, Any], build: bool, 
     return True
 
 
+def check_balanced_brackets(repo: Path, files: list[str], fails: list[str], warns: list[str]) -> None:
+    """Fast lexer checking `{}`, `()`, `[]` balance ignoring strings/char literals/comments."""
+    pairs = {"{": "}", "(": ")", "[": "]"}
+    closers = {"}": "{", ")": "(", "]": "["}
+
+    for rel in files:
+        if not rel.lower().endswith(BRACKET_EXTS):
+            continue
+        full = repo / rel
+        if not full.is_file():
+            continue
+        txt = full.read_text(encoding="utf-8", errors="ignore")
+        is_cs = rel.lower().endswith(".cs")
+        is_js_ts = rel.lower().endswith((".ts", ".tsx", ".js", ".jsx"))
+        has_cs_preproc_branch = is_cs and bool(re.search(r"^\s*#if\b", txt, re.M)) and bool(re.search(r"^\s*#(?:else|elif)\b", txt, re.M))
+
+        stack: list[tuple[str, int]] = []
+        mode: str | None = None  # None | 'line' | 'block' | 'dq' | 'sq' | 'vq' | 'tq' | 'tmpl'
+        tmpl_brace_stack: list[int] = []
+        line_no = 1
+        i = 0
+        n = len(txt)
+        err: str | None = None
+
+        while i < n:
+            ch = txt[i]
+            nxt = txt[i + 1] if i + 1 < n else ""
+            if ch == "\n":
+                line_no += 1
+
+            if mode == "line":
+                if ch == "\n":
+                    mode = None
+                i += 1
+                continue
+            if mode == "block":
+                if ch == "*" and nxt == "/":
+                    mode = None
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if mode == "dq":
+                if ch == "\\":
+                    if nxt == "\n":
+                        line_no += 1
+                    i += 2
+                    continue
+                if ch == '"' or ch == "\n":
+                    mode = None
+                i += 1
+                continue
+            if mode == "sq":
+                if ch == "\\":
+                    if nxt == "\n":
+                        line_no += 1
+                    i += 2
+                    continue
+                if ch == "'" or (not is_js_ts and ch == "\n"):
+                    mode = None
+                i += 1
+                continue
+            if mode == "vq":
+                if ch == '"':
+                    if nxt == '"':
+                        i += 2
+                        continue
+                    mode = None
+                i += 1
+                continue
+            if mode == "tq":
+                if txt[i : i + 3] == '"""':
+                    mode = None
+                    i += 3
+                    continue
+                i += 1
+                continue
+            if mode == "tmpl":
+                if ch == "\\":
+                    if nxt == "\n":
+                        line_no += 1
+                    i += 2
+                    continue
+                if ch == "`":
+                    mode = None
+                    i += 1
+                    continue
+                if ch == "$" and nxt == "{":
+                    tmpl_brace_stack.append(len(stack))
+                    stack.append(("{", line_no))
+                    mode = None
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            # Normal code mode
+            if ch == "/" and nxt == "/":
+                mode = "line"
+                i += 2
+                continue
+            if ch == "/" and nxt == "*":
+                mode = "block"
+                i += 2
+                continue
+            if txt[i : i + 3] == '"""':
+                mode = "tq"
+                i += 3
+                continue
+            if is_cs and ch == "@" and nxt == '"':
+                mode = "vq"
+                i += 2
+                continue
+            if is_cs and ch == "$" and nxt == "@" and i + 2 < n and txt[i + 2] == '"':
+                mode = "vq"
+                i += 3
+                continue
+            if ch == '"':
+                mode = "dq"
+                i += 1
+                continue
+            if ch == "'":
+                mode = "sq"
+                i += 1
+                continue
+            if is_js_ts and ch == "`":
+                mode = "tmpl"
+                i += 1
+                continue
+
+            if ch in pairs:
+                stack.append((ch, line_no))
+            elif ch in closers:
+                expected_open = closers[ch]
+                if not stack:
+                    err = f"{rel}:{line_no}: Unbalanced closing `{ch}` (no matching `{expected_open}`)."
+                    break
+                top_open, top_ln = stack.pop()
+                if top_open != expected_open:
+                    err = f"{rel}:{line_no}: Mismatched `{ch}` (expected `{pairs[top_open]}` for `{top_open}` opened at L{top_ln})."
+                    break
+                if tmpl_brace_stack and len(stack) == tmpl_brace_stack[-1]:
+                    tmpl_brace_stack.pop()
+                    mode = "tmpl"
+            i += 1
+
+        if err is None and stack:
+            top_open, top_ln = stack[-1]
+            err = f"{rel}:{top_ln}: Unclosed `{top_open}` (missing `{pairs[top_open]}`)."
+
+        if err:
+            if has_cs_preproc_branch:
+                warns.append(f"{err} (#if/#else C# file -> verify manually)")
+            else:
+                fails.append(err)
+
+
+def check_secrets_and_conflicts_files(repo: Path, files: list[str], profile: dict[str, Any], fails: list[str]) -> None:
+    sg = profile.get("secret_guard") or {}
+    if sg.get("enabled") is False:
+        return
+    for rel in files:
+        if rel.lower().endswith(BINARY_EXTS):
+            continue
+        full = repo / rel
+        if not full.is_file():
+            continue
+        txt = full.read_text(encoding="utf-8", errors="ignore")
+        for hit in scan_secrets_and_conflicts(txt, rel_path=rel, check_filename=True):
+            fails.append(f"{rel}: {hit}")
+
+
+def check_orphan_calls(repo: Path, files: list[str], warns: list[str]) -> None:
+    if not (repo / ".git").exists():
+        return
+    removed_candidates: list[str] = []
+    seen: set[str] = set()
+
+    for rel in files:
+        suf = Path(rel).suffix.lower()
+        if suf not in ORPHAN_CHECK_EXTS:
+            continue
+        res = subprocess.run(
+            ["git", "-C", str(repo), "diff", "-U0", "HEAD", "--", rel],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            continue
+        rem_lines: list[str] = []
+        add_lines: list[str] = []
+        for ln in res.stdout.splitlines():
+            if ln.startswith("-") and not ln.startswith("---"):
+                rem_lines.append(ln[1:])
+            elif ln.startswith("+") and not ln.startswith("+++"):
+                add_lines.append(ln[1:])
+        if not rem_lines:
+            continue
+
+        def _names(lines: list[str]) -> set[str]:
+            out: set[str] = set()
+            for entry in extract_symbol_map(lines, suf, max_entries=100):
+                sym = entry.split("|", 1)[1] if "|" in entry else entry
+                if sym.startswith("..."):
+                    continue
+                if sym.startswith(("class ", "ns ")):
+                    sym = sym.split(" ", 1)[1]
+                sym = sym.rstrip("()")
+                if sym:
+                    out.add(sym)
+            return out
+
+        deleted_syms = _names(rem_lines) - _names(add_lines)
+        for sym in sorted(deleted_syms):
+            if len(sym) < 4 or sym.lower() in GENERIC_ORPHAN_NAMES:
+                continue
+            if sym not in seen:
+                seen.add(sym)
+                removed_candidates.append(sym)
+                if len(removed_candidates) >= 15:
+                    break
+        if len(removed_candidates) >= 15:
+            break
+
+    for sym in removed_candidates:
+        try:
+            g = subprocess.run(
+                ["git", "-C", str(repo), "grep", "-n", "-w", "--", sym],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if g.returncode == 0 and g.stdout.strip():
+                hits = [ln.strip() for ln in g.stdout.splitlines() if ln.strip()]
+                if hits:
+                    preview = "; ".join(hits[:2])
+                    warns.append(f"Orphan-call check: deleted/renamed symbol `{sym}` still referenced ({preview[:140]}).")
+        except Exception:
+            continue
+
+
+def check_memory_weight(repo: Path, profile: dict[str, Any], warns: list[str]) -> None:
+    hist = repo / ".agents" / "docs" / "PROJECT_HISTORY.md"
+    if hist.is_file():
+        n_lines = len(hist.read_text(encoding="utf-8", errors="ignore").splitlines())
+        if n_lines > 150:
+            warns.append(f"`.agents/docs/PROJECT_HISTORY.md` has {n_lines}L (>150L); archive older milestones to `.agents/docs/archive/`.")
+
+    extra_rel = (profile.get("extra_requests_file") or DEFAULT_EXTRA_REQUESTS_FILE).strip()
+    extra_p = repo / extra_rel
+    if extra_p.is_file():
+        txt = extra_p.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(
+            r"^#{1,3}\s+(?:Completed Requests|Conclu[ií]dos|Completed)(?:\s*:)?[ \t]*\r?\n(.*?)(?=^#{1,3}\s+|\Z)",
+            txt,
+            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+        )
+        if m:
+            items = [
+                ln.strip()
+                for ln in m.group(1).splitlines()
+                if ln.strip() and not ln.strip().lower().startswith(("(no completed", "(none", "<!--"))
+            ]
+            if len(items) > 15:
+                warns.append(f"`{extra_rel}` has {len(items)} completed items (>15); archive old entries to `.agents/docs/archive/`.")
+
+
+def run_static_checks(
+    repo: Path,
+    profile: dict[str, Any],
+    changed: list[str] | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    """Run all fast static guardrails (<0.5s; safe for Stop hook auto-verify)."""
+    files = list(changed) if changed is not None else get_changed_files(repo)
+    fails: list[str] = []
+    warns: list[str] = []
+
+    check_universal_syntax(repo, files, fails)
+    check_file_guards_state(repo, profile, fails, warns)
+    check_version_sync(repo, profile, warns)
+    check_diff_rules(repo, files, profile, fails, warns)
+    check_key_parity_rules(repo, files, profile, fails, warns)
+    check_balanced_brackets(repo, files, fails, warns)
+    check_secrets_and_conflicts_files(repo, files, profile, fails)
+    check_orphan_calls(repo, files, warns)
+    check_memory_weight(repo, profile, warns)
+
+    extra_rel, pending_extra = get_pending_extra_requests(repo, profile)
+    if pending_extra:
+        warns.append(f"`{extra_rel}` has {len(pending_extra)} pending item(s) — resolve before committing/shipping.")
+
+    return files, fails, warns
+
+
 def should_run_plugin_tests(
     repo: Path,
     plugin_root: Path,
@@ -390,24 +696,6 @@ def should_run_plugin_tests(
         cand = str(repo / f) if not Path(f).is_absolute() else f
         if is_plugin_path(cand)[1]:
             return True
-    if (plugin_root / ".git").exists():
-        try:
-            res = subprocess.run(
-                ["git", "-C", str(plugin_root), "status", "--porcelain"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-                check=False,
-            )
-            if res.returncode == 0:
-                dirty = [
-                    l for l in res.stdout.splitlines()
-                    if l.strip() and "__pycache__" not in l and not l.strip().endswith(".pyc")
-                ]
-                if dirty:
-                    return True
-        except Exception:
-            pass
     art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
     if art_dir:
         hook_file = Path(art_dir) / "scratch" / ".hook_state.json"
@@ -426,9 +714,12 @@ def run_plugin_tests(plugin_root: Path, fails: list[str]) -> bool:
     if not test_script.is_file():
         fails.append(f"Plugin test runner missing at `{test_script}`.")
         return False
+    cmd = [sys.executable, str(test_script)]
+    if os.environ.get("PLANNER_PLUGIN_TEST_DEPTH") == "1" or os.environ.get("PLANNER_PLUGIN_TEST_FAST") == "1":
+        cmd.append("--fast")
     print(f"Running plugin regression suite: `{test_script}`")
     res = subprocess.run(
-        [sys.executable, str(test_script)],
+        cmd,
         cwd=str(plugin_root),
         capture_output=True,
         text=True,
@@ -459,6 +750,7 @@ def update_hook_verify_stamp(built: bool, plugin_tests_passed: bool = False) -> 
         if built:
             data["last_build_ts"] = now
             data["needs_build"] = False
+            data["last_build_failed"] = False
         if plugin_tests_passed:
             last_pe = float(data.get("last_plugin_edit_ts") or 0.0)
             data["last_plugin_test_ts"] = max(now, last_pe)
@@ -482,18 +774,8 @@ def main() -> None:
     profile, profile_warnings = load_project_profile_with_warnings(repo)
     changed = [f.replace("\\", "/") for f in args.files] if args.files is not None else get_changed_files(repo)
 
-    fails: list[str] = []
-    warns: list[str] = list(profile_warnings)
-
-    check_universal_syntax(repo, changed, fails)
-    check_file_guards_state(repo, profile, fails, warns)
-    check_version_sync(repo, profile, warns)
-    check_diff_rules(repo, changed, profile, fails, warns)
-    check_key_parity_rules(repo, changed, profile, fails, warns)
-
-    extra_rel, pending_extra = get_pending_extra_requests(repo, profile)
-    if pending_extra:
-        warns.append(f"`{extra_rel}` has {len(pending_extra)} pending item(s) — resolve before committing/shipping.")
+    changed, fails, warns = run_static_checks(repo, profile, changed=changed)
+    warns = list(profile_warnings) + warns
 
     built = False
     plugin_tests_ran = False

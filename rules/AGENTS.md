@@ -1,13 +1,15 @@
-# Universal Dynamic Fractal Planning, Memory & Verification Rules
+# Universal Dynamic Fractal Planner & Token-Diet Rules (v3)
 
-Apply adaptive planning and persistent anti-rot memory across every workspace:
+CLI base: `~/.gemini/config/plugins/dynamic-fractal-planner/scripts/` (`plan_tool.py`, `verify_universal.py`, `log_digest.py`, `repo_map.py`).
 
-1. **Phase 0 Before Heavy Exploration:** On multi-item (`>= 3` demands) or high-complexity tasks (`Tier 2` / `Tier 3`), lock every user requirement (`REQ-01..REQ-N`) in the session `TASK_PLAN.md` via `~/.gemini/config/plugins/dynamic-fractal-planner/scripts/plan_tool.py init` **before** reading large source files.
-2. **Dynamic Scaling & Pruning:**
-   - Keep `Tier 0` (questions, tiny 1-line fixes) friction-free.
-   - Decompose even a **single complex task** into specialized modules (`MOD-DISCOVERY -> MOD-CONTRACT -> MOD-IMPL -> MOD-HARDEN -> MOD-AUDIT`).
-   - Expand steps dynamically mid-flight (`expand-step` / `add-module`) whenever scope grows.
-3. **Lean Discovery:** Locate targets with `grep -rn` / `git grep -n` and bounded `read_file` slices (`<= 150` lines), or delegate broad multi-subsystem reconnaissance to a `research` subagent.
-4. **Just-in-Time Checklists & Verification:** Run `plan_tool.py start` before coding each module so its domain guardrails are active; before finishing or committing, run `verify_universal.py` (with `--build` when compiled/tested code changed) and verify every `REQ-XX` with observed evidence via `plan_tool.py audit`.
-5. **Project Memory & Parallel `/btw` Queue:** Never write static `"Current State"` headers (rely on `SessionStart`). Update `.agents/docs/PROJECT_HISTORY.md` (newest first) for non-obvious fixes/milestones, archive deferred ideas in `SAVED_IDEAS.md`, and always resolve pending items in `.agents/docs/EXTRA_REQUESTS.md` before committing or finishing (see `project-memory` skill / `plan_tool.py bootstrap`).
-6. **Plugin Self-Update & Backward-Compatibility Gate:** Whenever editing files inside `~/.gemini/config/plugins/dynamic-fractal-planner/`, never break an older `schema_version` without adding a deterministic chained migrator in `scripts/schema_migrations.py`, keep frozen fixtures in `tests/fixtures/` intact, and verify all regression checks pass via `python3 ~/.gemini/config/plugins/dynamic-fractal-planner/tests/run_plugin_tests.py` (or `verify_universal.py --plugin-tests`) before stopping.
+## Core Rules
+- **Reply language & brevity:** Reply in the user's language concisely (~8-12L routine; expand ONLY when requested).
+- **Batching & subagents:** Batch independent reads/greps in 1 turn && keep subagent replies <=20L.
+- **Termux ARM64 PRoot safety:** `parallel(heavy_tests || dotnet_build || git_push) -> FORBIDDEN` (run sequentially to avoid OOM/PRoot kill).
+- **Mode (`lean` default | `strict` via profile/`PLANNER_MODE=strict`):**
+  - `lean` -> `PreInvocation` injects auto-REQs + JIT checklists (0 plan-init overhead); `Tier <= 1` 4th file triggers Blast Radius `force_ask`.
+  - `strict` -> Phase 0 `plan_tool.py init` before code edits (`PLAN GATE`); close cleanly via `plan_tool.py finish --evidence "..."`.
+- **Token Diet:** Never read `transcript*.jsonl` (use `manage_subagents`) | files `>300L` -> read `<=250L` slices via symbol map or `repo_map.py` | logs `>300L` -> `log_digest.py` | `PROJECT_HISTORY.md` -> lines `1-60` | `ECO_MODE` prompts suppress secondary anchors/reminders.
+- **Shift-Left & Anti-Loop:** Secrets/conflicts/fail-`diff_rules`/destructive `write_file` block pre-disk | `same_cmd_fails>=2 || file_edits>=4` -> Circuit Breaker stop & rethink | `undo-turn` restores active turn.
+- **Memory & Verification:** No static `"Current State"` headers; prepend `PROJECT_HISTORY.md`, archive deferred ideas in `SAVED_IDEAS.md`, resolve `EXTRA_REQUESTS.md` before commit/push, use `handoff` for fresh chats. Stop auto-runs fast static checks; run `--build` when compiled/test files changed.
+- **Plugin Compat Gate:** Edits inside plugin -> never break older `schema_version` (add chained migrator in `schema_migrations.py`), preserve `tests/fixtures/profile_v[12]_*.json`, run `tests/run_plugin_tests.py` before stopping.

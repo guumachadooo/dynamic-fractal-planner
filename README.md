@@ -1,10 +1,13 @@
-# Dynamic Fractal Planner (Global Antigravity Plugin)
+# Dynamic Fractal Planner v3 (`plugin 2.0.0`)
 
-Universal adaptive planning, persistent memory/anti-rot architecture, `/btw` extra request queue, declarative file/command/diff/build guardrails, and pre-finish verification across **any** Antigravity workspace.
+Quota-efficient adaptive planning, token-diet read/terminal guards, shift-left shields, anti-loop circuit breaker, silent static auto-verify & anti-rot memory. Python stdlib only.
 
-## Features Included Globally
-- **Adaptive 4-Tier Fractal Planner (`complexity_triage.py` + `plan_tool.py`):** Locks requirements before heavy file reads, scales dynamically from `Tier 0` (trivial) to `Tier 3` (recursive sub-plans even for a single complex task), and attaches Just-in-Time Guardrails per module.
-- **Universal Live Workspace Briefing (`SessionStart`):** Git branch/dirty status, recent commits, `.agents/docs/` discovery, pending `EXTRA_REQUESTS.md`, plus optional project version/env/file watches.
-- **Universal Memory & `/btw` Queue (`project-memory` skill + `plan_tool.py bootstrap`):** Scaffolds `PROJECT_HISTORY.md`, `SAVED_IDEAS.md`, `EXTRA_REQUESTS.md`, and `.agents/planner_profile.json` in any new repo, plus pre-commit memory feedback reminders.
-- **Universal Lifecycle Guardrails (`PreInvocation`, `PreToolUse`, `PostToolUse`, `Stop`):** Runaway-read containment, working-memory anchors, Pre-Edit Plan Gate, Pre-Commit completeness & `EXTRA_REQUESTS` gate, declarative `file_guards` / `command_guards`, and anti-premature-stop verification.
-- **Universal Declarative Verifier (`verify_universal.py`):** Syntax verification across `.py`/`.json`/`.sh` plus project-configurable `diff_rules`, `key_parity_rules`, `file_guards`, `version_files`, and `build_rules` inside `.agents/planner_profile.json`.
+## Capabilities (`v3`)
+| Area | Mechanism | Behavior |
+| :--- | :--- | :--- |
+| Schema | `scripts/schema_migrations.py` | Chained `v1->v2->v3` in-memory migration (`CURRENT_SCHEMA_VERSION=3`); zero legacy repo mutation |
+| Modes | `lean` (default) \| `strict` | `lean`: pure-Python auto-REQs + JIT checklists (0-turn overhead) + Blast Radius guard \| `strict`: `PLAN GATE` + `plan_tool.py finish` + 1-line done compaction |
+| Token Diet | `planner_guard_read.py`, `log_digest.py`, `repo_map.py`, `planner_guard_command.py` | Deny `transcript*.jsonl`; block `>300L` full reads w/ free symbol map; `log_digest.py` error+5L context + `[repeated Nx]`; cached `/tmp` `repo_map.py`; `dotnet build` auto `--nologo -v:minimal` |
+| Shields | `planner_guard_files.py`, `planner_guard_command.py` | Shift-left `fail` diff_rules; secret/PEM/conflict shield; destructive `write_file` shield (`<70%` `force_ask`, `>=70% >150L` `deny`); `git stash create` + `undo-turn`; pre-push flight check (`untracked` \| `secrets` \| `unbuilt` \| `2s DNS` \| `[skip ci]`) |
+| Reliability | `planner_post_tool.py`, `planner_stop.py`, `verify_universal.py` | Neon handoff turn preservation; Circuit Breaker (`same_cmd_fails>=2` \|\| `edits>=4`); silent `<0.5s` Stop static verify (`syntax`, `brackets`, `orphan_calls`, `diff_rules`, `memory_weight`); universal build/test tracker |
+| Continuity | `plan_tool.py`, `install.sh` | `handoff` (`<=20L` `HANDOFF.md`), `stats` (`.metrics.jsonl`), `bootstrap` (TS/Next/Vite, .NET, Gradle/Kotlin, Flutter/Dart), `.bypass_gates`, `install.sh --rollback` |

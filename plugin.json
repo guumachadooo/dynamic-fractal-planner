@@ -1,22 +1,22 @@
 {
   "name": "dynamic-fractal-planner",
   "displayName": "Dynamic Fractal Planner",
-  "version": "1.0.0",
-  "description": "Adaptive multi-tier planning engine, Phase-0 requirement locking, composable domain modules, and lifecycle verification guardrails that work across any project.",
+  "version": "2.0.0",
+  "description": "v3 quota-efficient lean/strict adaptive planning, read/terminal token diet, shift-left secret/diff shields, circuit breaker, static auto-verify & cross-project memory.",
   "author": {
     "name": "guumachadooo"
   },
   "keywords": [
     "planning",
     "fractal",
-    "anti-drift",
+    "token-diet",
     "guardrails",
     "verification",
-    "workflow"
+    "telemetry"
   ],
   "suggestedPrompts": [
-    "Plan and implement this multi-part feature carefully without missing any requirement",
-    "Decompose this complex single task into architectural, implementation, and audit sub-plans",
-    "Audit all current changes against project guardrails and requirements"
+    "Plan and implement this multi-part feature cleanly with minimal quota",
+    "Decompose this complex task into domain modules and verify every requirement",
+    "Audit all current changes against project guardrails and run static checks"
   ]
 }

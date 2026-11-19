@@ -1,38 +1,27 @@
 #!/usr/bin/env python3
-"""Universal PreToolUse hook for run_command: enforces EXTRA_REQUESTS gate, active plan
-completeness on commit, memory feedback reminder, declarative project command_guards[],
-and transparent PLANNER_ARTIFACT_DIR / tool-path routing.
+"""Universal PreToolUse hook for run_command: terminal diet, EXTRA_REQUESTS gate,
+active plan check on commit, memory feedback, declarative command_guards,
+pre-push flight check, and tool-path/artifact routing.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
-import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 HOOKS_DIR = Path(__file__).resolve().parent
-if str(HOOKS_DIR) not in sys.path:
-    sys.path.insert(0, str(HOOKS_DIR))
+PLUGIN_ROOT = HOOKS_DIR.parent
 
-from planner_state import (  # noqa: E402
-    DEFAULT_CODE_EXTS,
-    DEFAULT_MEMORY_DOCS,
-    eval_conditions,
-    get_paths,
-    get_pending_extra_requests,
-    has_active_turn_plan,
-    load_json,
-    load_project_profile,
-    prompt_hash,
-    resolve_artifact_dir,
-    resolve_plugin_root,
-    resolve_repo_root,
-)
+
+def _ensure_paths() -> None:
+    if str(HOOKS_DIR) not in sys.path:
+        sys.path.insert(0, str(HOOKS_DIR))
 
 
 def allow(overwrite_cmd: str | None = None) -> None:
@@ -42,8 +31,12 @@ def allow(overwrite_cmd: str | None = None) -> None:
         print(json.dumps({"decision": "allow"}))
 
 
+def reply(decision: str, reason: str) -> None:
+    print(json.dumps({"decision": decision, "reason": reason}, ensure_ascii=False))
+
+
 def deny(reason: str) -> None:
-    print(json.dumps({"decision": "deny", "reason": reason}, ensure_ascii=False))
+    reply("deny", reason)
 
 
 def split_shell_segments(cmd: str) -> list[str]:
@@ -106,6 +99,60 @@ def split_shell_segments(cmd: str) -> list[str]:
     return segments
 
 
+def _split_pipelines(cmd: str) -> list[str]:
+    """Split shell command on &&, ||, ;, newline ONLY (preserving `|` pipelines)."""
+    parts: list[str] = []
+    buf: list[str] = []
+    in_sq = False
+    in_dq = False
+    escape = False
+    i = 0
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if escape:
+            buf.append(ch)
+            escape = False
+            i += 1
+            continue
+        if ch == "\\" and not in_sq:
+            buf.append(ch)
+            escape = True
+            i += 1
+            continue
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_sq:
+            in_dq = not in_dq
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_sq and not in_dq:
+            if ch in ";\n":
+                p = "".join(buf).strip()
+                if p:
+                    parts.append(p)
+                buf.clear()
+                i += 1
+                continue
+            if cmd[i : i + 2] in ("&&", "||"):
+                p = "".join(buf).strip()
+                if p:
+                    parts.append(p)
+                buf.clear()
+                i += 2
+                continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
 def strip_env_prefix(segment: str) -> tuple[dict[str, str], str]:
     envs: dict[str, str] = {}
     rest = segment.lstrip()
@@ -119,7 +166,71 @@ def strip_env_prefix(segment: str) -> tuple[dict[str, str], str]:
     return envs, rest
 
 
+def _resolve_target_repo(segments: list[str], default_repo: Path, subcmd_re: str) -> Path:
+    cur_dir = default_repo
+    for seg in segments:
+        _, rest = strip_env_prefix(seg)
+        m_cd = re.match(r"^cd\s+(.+)$", rest)
+        if m_cd:
+            raw_dir = m_cd.group(1).strip().strip("'\"")
+            if raw_dir:
+                cand = (cur_dir / raw_dir) if not raw_dir.startswith(("/", "~")) else Path(raw_dir).expanduser()
+                if cand.is_dir():
+                    cur_dir = cand.resolve()
+            continue
+        m_git = re.match(rf"^git\s+(?:-C\s+('[^']+'|\"[^\"]+\"|\S+)\s+)?{subcmd_re}\b", rest)
+        if m_git:
+            if m_git.group(1):
+                g_dir = m_git.group(1).strip("'\"")
+                cand = (cur_dir / g_dir) if not g_dir.startswith(("/", "~")) else Path(g_dir).expanduser()
+                if cand.is_dir():
+                    return cand.resolve()
+            return cur_dir
+    return default_repo
+
+
+def check_raw_cat_log(cmd: str, repo: Path, profile: dict[str, Any]) -> str | None:
+    max_full = int((profile.get("read_budget") or {}).get("max_full_read_lines") or 300)
+    cur_dir = repo
+    for pipe in _split_pipelines(cmd):
+        _, rest = strip_env_prefix(pipe)
+        m_cd = re.match(r"^cd\s+(.+)$", rest)
+        if m_cd:
+            raw_dir = m_cd.group(1).strip().strip("'\"")
+            cand = (cur_dir / raw_dir) if not raw_dir.startswith(("/", "~")) else Path(raw_dir).expanduser()
+            if cand.is_dir():
+                cur_dir = cand.resolve()
+            continue
+        if "|" in rest:
+            continue
+        if not re.match(r"^cat\s+", rest):
+            continue
+        try:
+            tokens = shlex.split(rest)
+        except Exception:
+            tokens = rest.split()
+        file_args = [t for t in tokens[1:] if not t.startswith("-") and not t.startswith((">", "<", "2>"))]
+        for fa in file_args:
+            p = Path(fa).expanduser() if fa.startswith(("/", "~")) else (cur_dir / fa)
+            if not p.is_file():
+                continue
+            if p.suffix.lower() == ".log" or p.name.lower().endswith("_log.txt"):
+                n_lines = len(p.read_text(encoding="utf-8", errors="ignore").splitlines())
+                if n_lines > max_full:
+                    from planner_state import record_telemetry  # noqa: E402
+
+                    record_telemetry("cmd_blocked_raw_cat_log", {"file": p.name, "lines": n_lines})
+                    digest_cli = PLUGIN_ROOT / "scripts" / "log_digest.py"
+                    return (
+                        f"TERMINAL DIET|Raw `cat` on `{p.name}` ({n_lines}L > {max_full}L) blocked -> "
+                        f"run `python3 {digest_cli} {p}` or `tail -n 120 {p}`."
+                    )
+    return None
+
+
 def check_extra_requests_before_ship(segments: list[str], repo: Path, profile: dict[str, Any]) -> str | None:
+    from planner_state import get_pending_extra_requests  # noqa: E402
+
     is_ship_cmd = any(
         re.match(r"^git(?:\s+-C\s+\S+)?\s+(commit|push)\b", strip_env_prefix(seg)[1])
         for seg in segments
@@ -133,13 +244,15 @@ def check_extra_requests_before_ship(segments: list[str], repo: Path, profile: d
     if len(pending) > 5:
         preview += f"\n  (+{len(pending) - 5} line(s))"
     return (
-        f"BLOCKED BEFORE COMMIT/PUSH: pending extra requests exist in `{rel}` (from parallel `/btw` threads):\n"
-        f"{preview}\n\n"
-        f"Read `{rel}`, plan and implement every item, move them to `## Completed Requests`, and only then commit/push."
+        f"BLOCKED BEFORE COMMIT/PUSH|Pending extra requests in `{rel}`:\n"
+        f"{preview}\n"
+        f"Read `{rel}`, implement & clear before commit/push."
     )
 
 
 def check_plan_before_commit(segments: list[str], payload: dict[str, Any]) -> str | None:
+    from planner_state import get_paths, has_active_turn_plan, load_json  # noqa: E402
+
     commit_seg = None
     for seg in segments:
         _, rest = strip_env_prefix(seg)
@@ -185,11 +298,10 @@ def check_plan_before_commit(segments: list[str], payload: dict[str, Any]) -> st
         return None
 
     return (
-        "BLOCKED BEFORE COMMIT: Active dynamic plan still has unfinished items:\n"
-        + (f"  - Open modules: {', '.join(open_mods)}\n" if open_mods else "")
-        + (f"  - Unverified requirements: {', '.join(unverified_reqs)}\n" if unverified_reqs else "")
-        + "Complete modules (`plan_tool.py done ...`), verify requirements (`plan_tool.py req-verify ...`), "
-        "and run the verifier before committing."
+        "BLOCKED BEFORE COMMIT|Active plan incomplete:\n"
+        + (f"- Open modules: {','.join(open_mods)}\n" if open_mods else "")
+        + (f"- Unverified REQs: {','.join(unverified_reqs)}\n" if unverified_reqs else "")
+        + "Run `plan_tool.py done/req-verify` or `plan_tool.py finish --evidence \"...\"` first."
     )
 
 
@@ -198,7 +310,13 @@ def check_commit_memory_feedback(
     payload: dict[str, Any],
     repo: Path,
     profile: dict[str, Any],
+    hook_state: dict[str, Any],
 ) -> str | None:
+    if hook_state.get("eco_mode"):
+        return None
+
+    from planner_state import DEFAULT_CODE_EXTS, DEFAULT_MEMORY_DOCS  # noqa: E402
+
     commit_seg = None
     for seg in segments:
         _, rest = strip_env_prefix(seg)
@@ -218,6 +336,8 @@ def check_commit_memory_feedback(
     existing_docs = [repo / r for r in doc_rels if (repo / r).is_file()]
     if not existing_docs:
         return None
+
+    import subprocess  # noqa: E402
 
     try:
         res = subprocess.run(
@@ -257,10 +377,8 @@ def check_commit_memory_feedback(
         return custom_msg
     target_doc = next((r for r in doc_rels if (repo / r).is_file()), doc_rels[0])
     return (
-        f"Memory Feedback Reminder: {len(changed_code)} code files are modified in this commit "
-        f"without a recent update to `{target_doc}`. "
-        "If this cycle fixed a non-obvious bug, changed architecture/UX, or uncovered a reusable pitfall, "
-        f"record a concise entry in `{target_doc}` before committing — or retry `git commit` if no new entry is needed."
+        f"Memory Feedback: {len(changed_code)} code files changed without recent update to `{target_doc}`. "
+        f"Record non-obvious fix/milestone in `{target_doc}` or retry `git commit` if N/A."
     )
 
 
@@ -272,6 +390,8 @@ def check_declarative_command_guards(
     guards = profile.get("command_guards") or []
     if not guards:
         return None
+
+    from planner_state import eval_conditions  # noqa: E402
 
     session_envs: set[str] = set()
     for seg in segments:
@@ -302,14 +422,196 @@ def check_declarative_command_guards(
     return None
 
 
+def _fast_dns_check(host: str = "github.com", port: int = 443, timeout_s: float = 2.0) -> bool:
+    if os.environ.get("PLANNER_FORCE_OFFLINE") == "1":
+        return False
+    if os.environ.get("PLANNER_SKIP_DNS_CHECK") == "1":
+        return True
+    import socket  # noqa: E402
+    import threading  # noqa: E402
+
+    ok = False
+
+    def _probe() -> None:
+        nonlocal ok
+        try:
+            socket.getaddrinfo(host, port)
+            ok = True
+        except Exception:
+            ok = False
+
+    t = threading.Thread(target=_probe, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    return ok
+
+
+def check_pre_push_flight(
+    segments: list[str],
+    ws_repo: Path,
+    profile: dict[str, Any],
+    hook_state: dict[str, Any],
+) -> tuple[str, str] | None:
+    push_seg = None
+    for seg in segments:
+        _, rest = strip_env_prefix(seg)
+        if re.match(r"^git(?:\s+-C\s+\S+)?\s+push\b", rest) and "--help" not in rest:
+            push_seg = rest
+            break
+    if not push_seg:
+        return None
+
+    import subprocess  # noqa: E402
+    from planner_state import (  # noqa: E402
+        is_app_code_path,
+        load_project_profile,
+        record_telemetry,
+        scan_secrets_and_conflicts,
+    )
+
+    target_repo = _resolve_target_repo(segments, ws_repo, "push")
+    if not (target_repo / ".git").exists():
+        return None
+
+    t_profile = profile if target_repo.resolve() == ws_repo.resolve() else load_project_profile(target_repo)
+
+    def _git(gargs: list[str]) -> tuple[int, str]:
+        try:
+            r = subprocess.run(["git", "-C", str(target_repo), *gargs], capture_output=True, text=True, timeout=4, check=False)
+            return r.returncode, r.stdout
+        except Exception:
+            return 1, ""
+
+    # 1. Code edited in turn with unbuilt / failed build
+    if target_repo.resolve() == ws_repo.resolve() and hook_state.get("code_files_edited"):
+        if hook_state.get("last_build_failed") or hook_state.get("needs_build"):
+            record_telemetry("guarded_push_blocked", {"why": "needs_build_or_failed"})
+            return (
+                "deny",
+                "PRE-PUSH BLOCKED|Code edited in turn with `needs_build` or `last_build_failed` -> run build/verifier first.",
+            )
+
+    # 2. Untracked code files that could break CI
+    rc_st, st_out = _git(["status", "--porcelain", "-uall"])
+    untracked_code: list[str] = []
+    scan_candidates: set[str] = set()
+    if rc_st == 0:
+        for ln in st_out.splitlines():
+            if len(ln) < 4:
+                continue
+            xy = ln[:2]
+            path_part = ln[3:].strip()
+            if " -> " in path_part:
+                path_part = path_part.split(" -> ", 1)[1].strip()
+            rel = path_part.strip('"').replace("\\", "/")
+            if not rel:
+                continue
+            if xy == "??" and is_app_code_path(rel, target_repo, t_profile):
+                untracked_code.append(rel)
+            if "D" not in xy:
+                scan_candidates.add(rel)
+
+    if untracked_code:
+        record_telemetry("guarded_push_blocked", {"why": "untracked_code", "count": len(untracked_code)})
+        preview = ", ".join(untracked_code[:4])
+        return (
+            "deny",
+            f"PRE-PUSH BLOCKED|Untracked code file(s) could break CI: {preview}. Stage/commit or remove before push.",
+        )
+
+    # 3. Secret & merge-conflict scan on staged/changed/unpushed files
+    sg = t_profile.get("secret_guard") or {}
+    if sg.get("enabled", True):
+        rc_up, up_files = _git(["diff", "--name-only", "@{u}..HEAD"])
+        if rc_up == 0:
+            for f in up_files.splitlines():
+                if f.strip():
+                    scan_candidates.add(f.strip())
+        else:
+            rc_hd, hd_files = _git(["show", "--name-only", "--pretty=", "HEAD"])
+            if rc_hd == 0:
+                for f in hd_files.splitlines():
+                    if f.strip():
+                        scan_candidates.add(f.strip())
+
+        binary_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".ttf", ".apk", ".dll", ".exe", ".zip")
+        for rel in sorted(scan_candidates):
+            if rel.lower().endswith(binary_exts):
+                continue
+            fp = target_repo / rel
+            if not fp.is_file():
+                continue
+            txt = fp.read_text(encoding="utf-8", errors="ignore")
+            hits = scan_secrets_and_conflicts(txt, rel_path=rel, check_filename=True)
+            if hits:
+                record_telemetry("guarded_push_blocked", {"why": "secret_or_conflict", "file": rel})
+                return ("deny", f"PRE-PUSH BLOCKED|`{rel}`: {hits[0]}")
+
+    # 4. Fast 2s DNS check (unless remote is local path)
+    rc_rm, rm_out = _git(["remote", "get-url", "origin"])
+    remote_url = rm_out.strip() if rc_rm == 0 else ""
+    is_local_remote = remote_url.startswith(("/", "file://"))
+    if not is_local_remote and ("github.com" in remote_url or not remote_url or os.environ.get("PLANNER_FORCE_OFFLINE") == "1"):
+        if not _fast_dns_check("github.com", 443, 2.0):
+            record_telemetry("guarded_push_offline")
+            return (
+                "deny",
+                "PRE-PUSH BLOCKED|Offline/DNS resolution for `github.com` failed (<2s check). Retry once online.",
+            )
+
+    # 5. [skip ci] hint when .github/workflows exists & unpushed commit touches ONLY docs/.agents
+    if (target_repo / ".github" / "workflows").is_dir():
+        rc_rng, rng_out = _git(["diff", "--name-only", "@{u}..HEAD"])
+        if rc_rng != 0:
+            rc_rng, rng_out = _git(["show", "--name-only", "--pretty=", "HEAD"])
+        touched = [f.strip().replace("\\", "/") for f in rng_out.splitlines() if f.strip()]
+        rc_msg, msg_out = _git(["log", "-1", "--pretty=%B", "HEAD"])
+        msg_low = msg_out.lower() if rc_msg == 0 else ""
+        if (
+            touched
+            and all(re.match(r"^(?:.+/)?(?:\.agents/.*|AGENTS\.md|README\.md)$", f) for f in touched)
+            and "[skip ci]" not in msg_low
+            and "[ci skip]" not in msg_low
+        ):
+            record_telemetry("guarded_push_skip_ci_hint")
+            return (
+                "force_ask",
+                "PRE-PUSH TIP|`.github/workflows/` present && commit touches ONLY `.agents/|AGENTS.md|README.md` without `[skip ci]`. Confirm push or amend with `[skip ci]`?",
+            )
+
+    return None
+
+
+def _inject_dotnet_minimal(cmd: str) -> str:
+    """Append `--nologo -v:minimal` to `dotnet build` segments lacking verbosity/clp flags."""
+    def _rewrite_seg(match: re.Match[str]) -> str:
+        seg = match.group(0)
+        if re.search(r"(?<!\S)(?:-v\b|-v:|--verbosity\b|-clp\b|-clp:|--consoleloggerparameters\b|-consoleloggerparameters\b|--help\b|-h\b)", seg):
+            return seg
+        # Insert before trailing shell redirect like `2>&1` or `> out.log` if present
+        m_redir = re.search(r"\s+(?:\d*>>?|\&>)\s*\S+(?:\s+2>&1)?\s*$", seg)
+        flags = " --nologo -v:minimal" if "--nologo" not in seg else " -v:minimal"
+        if m_redir:
+            pos = m_redir.start()
+            return seg[:pos] + flags + seg[pos:]
+        return seg + flags
+
+    return re.sub(
+        r"(?:[^\n;|&]*?)(?<![A-Za-z0-9_])(?:/root/\.dotnet/)?dotnet\s+build\b[^\n;|&]*",
+        _rewrite_seg,
+        cmd,
+    )
+
+
 def maybe_rewrite_command(cmd: str, repo: Path, payload: dict[str, Any]) -> str | None:
-    plugin_root = resolve_plugin_root()
-    updated = cmd
+    from planner_state import prompt_hash, resolve_artifact_dir  # noqa: E402
+
+    updated = _inject_dotnet_minimal(cmd)
 
     if ".agents/scripts/plan_tool.py" in updated and not (repo / ".agents/scripts/plan_tool.py").exists():
-        updated = updated.replace(".agents/scripts/plan_tool.py", str(plugin_root / "scripts/plan_tool.py"))
+        updated = updated.replace(".agents/scripts/plan_tool.py", str(PLUGIN_ROOT / "scripts/plan_tool.py"))
     if ".agents/scripts/verify_universal.py" in updated and not (repo / ".agents/scripts/verify_universal.py").exists():
-        updated = updated.replace(".agents/scripts/verify_universal.py", str(plugin_root / "scripts/verify_universal.py"))
+        updated = updated.replace(".agents/scripts/verify_universal.py", str(PLUGIN_ROOT / "scripts/verify_universal.py"))
 
     invokes_tool = any(
         ("plan_tool.py" in seg or "verify_universal.py" in seg or "verify_changes.py" in seg or "run_plugin_tests.py" in seg)
@@ -336,6 +638,10 @@ def maybe_rewrite_command(cmd: str, repo: Path, payload: dict[str, Any]) -> str 
 
 
 def main() -> None:
+    if (PLUGIN_ROOT / ".bypass_gates").exists():
+        allow()
+        return
+
     payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     tool = payload.get("toolCall") or {}
     args = tool.get("args") or {}
@@ -344,9 +650,17 @@ def main() -> None:
         allow()
         return
 
+    _ensure_paths()
+    from planner_state import get_paths, load_json, load_project_profile, resolve_repo_root  # noqa: E402
+
     repo = resolve_repo_root(payload)
     profile = load_project_profile(repo)
     segments = split_shell_segments(cmd)
+
+    cat_msg = check_raw_cat_log(cmd, repo, profile)
+    if cat_msg:
+        deny(cat_msg)
+        return
 
     extra_msg = check_extra_requests_before_ship(segments, repo, profile)
     if extra_msg:
@@ -358,7 +672,10 @@ def main() -> None:
         deny(plan_msg)
         return
 
-    mem_msg = check_commit_memory_feedback(segments, payload, repo, profile)
+    _, _, _, hook_file = get_paths(payload)
+    hook_state = load_json(hook_file)
+
+    mem_msg = check_commit_memory_feedback(segments, payload, repo, profile, hook_state)
     if mem_msg:
         deny(mem_msg)
         return
@@ -366,6 +683,11 @@ def main() -> None:
     cmd_msg = check_declarative_command_guards(segments, repo, profile)
     if cmd_msg:
         deny(cmd_msg)
+        return
+
+    push_hit = check_pre_push_flight(segments, repo, profile, hook_state)
+    if push_hit:
+        reply(push_hit[0], push_hit[1])
         return
 
     allow(maybe_rewrite_command(cmd, repo, payload))

@@ -16,6 +16,16 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "read_file|view_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ./hooks/planner_guard_read.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "edit_file|write_file|replace_file_content|write_to_file",
         "hooks": [
           {
@@ -38,7 +48,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
+        "matcher": "read_file|view_file|edit_file|write_file|replace_file_content|write_to_file|run_command",
         "hooks": [
           {
             "type": "command",

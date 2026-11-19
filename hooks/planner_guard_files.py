@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Universal PreToolUse hook for file edits: evaluates declarative project file_guards[]
-and enforces the universal Pre-Edit Plan Gate.
+"""Universal PreToolUse hook for file edits: declarative file_guards, secret/conflict shield,
+shift-left fail diff_rules, destructive write_file shield, lean blast-radius / strict plan gate,
+and invisible Tier>=2 git snapshot before 1st code edit.
 """
 
 from __future__ import annotations
@@ -8,29 +9,19 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 HOOKS_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = HOOKS_DIR.parent
 SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
-for p in (str(HOOKS_DIR), str(SCRIPTS_DIR)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
-from complexity_triage import analyze_prompt  # noqa: E402
-from planner_state import (  # noqa: E402
-    eval_conditions,
-    get_paths,
-    has_active_turn_plan,
-    is_app_code_path,
-    is_plugin_path,
-    load_json,
-    load_project_profile,
-    normalize_rel_path,
-    resolve_plugin_root,
-    resolve_repo_root,
-)
+
+def _ensure_paths() -> None:
+    for p in (str(HOOKS_DIR), str(SCRIPTS_DIR)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
 
 
 def allow() -> None:
@@ -41,6 +32,28 @@ def reply(decision: str, reason: str) -> None:
     print(json.dumps({"decision": decision, "reason": reason}, ensure_ascii=False))
 
 
+def _strip_line_comment(line: str) -> str:
+    in_str = False
+    esc = False
+    for i, ch in enumerate(line):
+        if esc:
+            esc = False
+            continue
+        if ch == "\\" and in_str:
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if not in_str and line[i : i + 2] == "//":
+            return line[:i]
+    return line
+
+
+def _strip_strings(line: str) -> str:
+    return re.sub(r'"(?:\\.|[^"\\])*"', '""', line)
+
+
 def check_declarative_file_guards(
     tool_name: str,
     args: dict[str, Any],
@@ -48,6 +61,8 @@ def check_declarative_file_guards(
     repo: Path,
     profile: dict[str, Any],
 ) -> tuple[str, str] | None:
+    from planner_state import eval_conditions, normalize_rel_path  # noqa: E402
+
     rel, _ = normalize_rel_path(raw_path, repo)
     norm_raw = raw_path.replace("\\", "/")
 
@@ -80,74 +95,278 @@ def check_declarative_file_guards(
     return None
 
 
+def check_shift_left_diff_rules(
+    tool_name: str,
+    args: dict[str, Any],
+    raw_path: str,
+    repo: Path,
+    profile: dict[str, Any],
+) -> str | None:
+    """Shift-left fail-severity diff_rules BEFORE disk write (never blocks severity=='warn')."""
+    rules = profile.get("diff_rules") or []
+    if not rules:
+        return None
+
+    from planner_state import normalize_rel_path  # noqa: E402
+
+    rel, inside = normalize_rel_path(raw_path, repo)
+    if not inside or not rel:
+        return None
+
+    fail_rules = []
+    for r in rules:
+        if (r.get("severity") or "fail").lower() == "warn":
+            continue
+        pref = (r.get("path_prefix") or "").replace("\\", "/")
+        preg = r.get("path_regex") or ""
+        if pref and not rel.startswith(pref):
+            continue
+        if preg and not re.search(preg, rel):
+            continue
+        fail_rules.append(r)
+    if not fail_rules:
+        return None
+
+    if tool_name in ("edit_file", "replace_file_content"):
+        target = args.get("Target") or args.get("TargetContent") or ""
+        replacement = args.get("Replacement") or args.get("ReplacementContent") or ""
+        tgt_counts = Counter(target.splitlines())
+        added_lines: list[str] = []
+        for ln in replacement.splitlines():
+            if tgt_counts.get(ln, 0) > 0:
+                tgt_counts[ln] -= 1
+            else:
+                added_lines.append(ln)
+        window_base = replacement
+    else:
+        content = args.get("Content") or args.get("CodeContent") or ""
+        added_lines = content.splitlines()
+        window_base = content
+
+    if not added_lines:
+        return None
+
+    for r in fail_rules:
+        strip_comm = r.get("strip_line_comments", True)
+        strip_q = r.get("strip_strings", True)
+        msg_tpl = r.get("message") or "Diff rule violation."
+        forbid = r.get("forbid_regex") or ""
+        trig = r.get("trigger_regex") or ""
+
+        for raw_ln in added_lines:
+            code = _strip_line_comment(raw_ln) if strip_comm else raw_ln
+            if not code.strip():
+                continue
+            target_txt = _strip_strings(code) if strip_q else code
+            if forbid and re.search(forbid, target_txt):
+                return f"SHIFT-LEFT BLOCK|`{rel}`: {msg_tpl}"
+            if trig and re.search(trig, target_txt):
+                req_if = r.get("require_if_any_regex") or ""
+                must_win = r.get("must_match_window_regex") or ""
+                if (not req_if or re.search(req_if, window_base)) and must_win and not re.search(must_win, window_base):
+                    return f"SHIFT-LEFT BLOCK|`{rel}`: {msg_tpl}"
+    return None
+
+
+def check_destructive_write(
+    tool_name: str,
+    args: dict[str, Any],
+    raw_path: str,
+    repo: Path,
+    profile: dict[str, Any],
+    in_plugin: bool,
+    plugin_rel: str,
+) -> tuple[str, str] | None:
+    if tool_name not in ("write_file", "write_to_file"):
+        return None
+    p = Path(raw_path).expanduser()
+    if not p.is_file():
+        return None
+
+    from planner_state import is_app_code_path, is_verifiable_path, normalize_rel_path  # noqa: E402
+
+    is_target = (
+        is_app_code_path(raw_path, repo, profile)
+        or is_verifiable_path(raw_path, repo, profile)
+        or (in_plugin and plugin_rel.lower().endswith((".py", ".json", ".md", ".sh")))
+    )
+    if not is_target:
+        return None
+
+    orig_lines = len(p.read_text(encoding="utf-8", errors="ignore").splitlines())
+    if orig_lines <= 150:
+        return None
+
+    content = args.get("Content") or args.get("CodeContent") or ""
+    new_lines = len(content.splitlines())
+    rel = plugin_rel if in_plugin else normalize_rel_path(raw_path, repo)[0]
+    if new_lines < 0.70 * orig_lines:
+        return (
+            "force_ask",
+            f"DESTRUCTIVE WRITE SHIELD|`{rel}` shrunk {orig_lines}L -> {new_lines}L (<70%). Confirm deletion or use `edit_file`.",
+        )
+    return (
+        "deny",
+        f"WRITE SHIELD|Full overwrite on `{rel}` ({orig_lines}L > 150L) -> use surgical `edit_file` to save output tokens.",
+    )
+
+
+def _capture_invisible_snapshot(repo: Path, hook_file: Path, hook_state: dict[str, Any]) -> None:
+    if not (repo / ".git").exists():
+        return
+    import subprocess  # noqa: E402
+    from planner_state import save_json  # noqa: E402
+
+    def _git(gargs: list[str]) -> str:
+        res = subprocess.run(["git", "-C", str(repo), *gargs], capture_output=True, text=True, timeout=3, check=False)
+        return res.stdout.strip() if res.returncode == 0 else ""
+
+    head = _git(["rev-parse", "HEAD"])
+    stash_ref = _git(["stash", "create"])
+    st_lines = _git(["status", "--porcelain"]).splitlines()
+    pre_dirty = [
+        ln[3:].strip().strip('"').replace("\\", "/")
+        for ln in st_lines
+        if len(ln) > 3
+    ]
+    hook_state["turn_snapshot_taken"] = True
+    hook_state["turn_base_head"] = head
+    hook_state["turn_snapshot_ref"] = stash_ref
+    hook_state["turn_preexisting_dirty"] = pre_dirty[:200]
+    save_json(hook_file, hook_state)
+
+
 def main() -> None:
+    if (PLUGIN_ROOT / ".bypass_gates").exists():
+        allow()
+        return
+
     payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     tool = payload.get("toolCall") or {}
     tool_name = (tool.get("name") or "").lower()
     args = tool.get("args") or {}
     raw_path = args.get("Path") or args.get("TargetFile") or ""
+    if not raw_path:
+        allow()
+        return
+
+    _ensure_paths()
+    from planner_state import (  # noqa: E402
+        get_paths,
+        get_planner_mode,
+        has_active_turn_plan,
+        is_app_code_path,
+        is_plugin_path,
+        load_json,
+        load_project_profile,
+        normalize_rel_path,
+        record_telemetry,
+        resolve_plugin_root,
+        resolve_repo_root,
+        scan_secrets_and_conflicts,
+    )
 
     repo = resolve_repo_root(payload)
     profile = load_project_profile(repo)
 
     # 1. Declarative per-project file guards (e.g., targetSdkVersion="28")
-    if raw_path:
-        hit = check_declarative_file_guards(tool_name, args, raw_path, repo, profile)
-        if hit:
-            reply(hit[0], hit[1])
-            return
+    hit = check_declarative_file_guards(tool_name, args, raw_path, repo, profile)
+    if hit:
+        reply(hit[0], hit[1])
+        return
 
-    # 1b. Plugin self-protection guard for frozen historical fixtures
+    # 1b. Frozen historical fixture protection (v1 + v2)
     plugin_rel, in_plugin = is_plugin_path(raw_path)
-    if in_plugin and re.match(r"^tests/fixtures/profile_v1_.*\.json$", plugin_rel):
+    if in_plugin and re.match(r"^tests/fixtures/profile_v[12]_.*\.json$", plugin_rel):
         if (resolve_plugin_root() / plugin_rel).exists():
             reply(
                 "force_ask",
-                f"PLUGIN SAFETY GUARD: Frozen v1 fixture `{plugin_rel}` is a backward-compatibility contract "
-                "and should not be altered. Add a chained migrator in `scripts/schema_migrations.py` instead.",
+                f"PLUGIN SAFETY GUARD|Frozen fixture `{plugin_rel}` is a backward-compat contract. Add migrator in `scripts/schema_migrations.py` instead.",
             )
             return
 
-    # 2. Universal Pre-Edit Plan Gate (covers both workspace app code and plugin edits outside workspace)
+    # 1c. Secret & merge-conflict shield
+    sg = profile.get("secret_guard") or {}
+    if sg.get("enabled", True):
+        written_text = (
+            (args.get("Replacement") or args.get("ReplacementContent") or "")
+            if tool_name in ("edit_file", "replace_file_content")
+            else (args.get("Content") or args.get("CodeContent") or "")
+        )
+        rel_for_sec = plugin_rel if in_plugin else normalize_rel_path(raw_path, repo)[0]
+        sec_hits = scan_secrets_and_conflicts(written_text, rel_path=rel_for_sec, check_filename=True)
+        if sec_hits:
+            record_telemetry("shift_left_secret_conflict", {"file": rel_for_sec})
+            reply("deny", "SECRET/CONFLICT SHIELD|" + " ; ".join(sec_hits[:3]))
+            return
+
+    # 1d. Shift-left fail diff_rules before disk write
+    sl_hit = check_shift_left_diff_rules(tool_name, args, raw_path, repo, profile)
+    if sl_hit:
+        record_telemetry("shift_left_diff_rule", {"path": raw_path})
+        reply("deny", sl_hit)
+        return
+
+    # 1e. Destructive write_file shield (>150L existing code)
+    dw_hit = check_destructive_write(tool_name, args, raw_path, repo, profile, in_plugin, plugin_rel)
+    if dw_hit:
+        ev = "destructive_write_force_ask" if dw_hit[0] == "force_ask" else "full_rewrite_denied"
+        record_telemetry(ev, {"path": raw_path})
+        reply(dw_hit[0], dw_hit[1])
+        return
+
+    # 2. Plan Gate (strict) vs Blast Radius Guard (lean) + invisible Tier>=2 snapshot
     is_plugin_protected = in_plugin and plugin_rel.lower().endswith((".py", ".json", ".md", ".sh"))
-    if raw_path and (is_app_code_path(raw_path, repo, profile) or is_plugin_protected):
+    is_app = is_app_code_path(raw_path, repo, profile)
+    if is_app or is_plugin_protected:
         _, task_md, _, hook_file = get_paths(payload)
         hook_state = load_json(hook_file)
-        if not has_active_turn_plan(payload, hook_state):
-            triage = hook_state.get("triage") or analyze_prompt(payload.get("lastUserInput") or "", repo)
-            tier = int(triage.get("tier") or 0)
-            edited = list(hook_state.get("code_files_edited") or []) + [
-                f"plugin:{p}" for p in (hook_state.get("plugin_files_edited") or [])
-            ]
-            if in_plugin:
-                edit_key = f"plugin:{plugin_rel}"
-            else:
-                edit_key, _ = normalize_rel_path(raw_path, repo)
-            is_second_file = len(edited) >= 1 and edit_key not in edited
-            reads_no_plan = int(hook_state.get("code_reads_without_plan") or 0)
+        mode = get_planner_mode(profile)
+        plan_ready = has_active_turn_plan(payload, hook_state)
+        triage = hook_state.get("triage")
+        if not triage:
+            from complexity_triage import analyze_prompt  # noqa: E402
 
-            if tier >= 2 or is_second_file or reads_no_plan >= 4 or (in_plugin and plugin_rel.startswith(("hooks/", "scripts/"))):
-                why = (
-                    f"Tier {tier} ({triage.get('tier_name')})"
-                    if tier >= 2
-                    else (
-                        f"modifying core plugin file `{plugin_rel}`"
-                        if in_plugin
+            triage = analyze_prompt(payload.get("lastUserInput") or "", repo)
+        tier = int(triage.get("tier") or 0)
+        edited = list(hook_state.get("code_files_edited") or []) + [
+            f"plugin:{p}" for p in (hook_state.get("plugin_files_edited") or [])
+        ]
+        edit_key = f"plugin:{plugin_rel}" if in_plugin else normalize_rel_path(raw_path, repo)[0]
+
+        if mode == "strict":
+            if not plan_ready:
+                is_second_file = len(edited) >= 1 and edit_key not in edited
+                reads_no_plan = int(hook_state.get("code_reads_without_plan") or 0)
+                if tier >= 2 or is_second_file or reads_no_plan >= 4 or (in_plugin and plugin_rel.startswith(("hooks/", "scripts/"))):
+                    why = (
+                        f"Tier {tier} ({triage.get('tier_name')})"
+                        if tier >= 2
                         else (
-                            "editing multiple source files"
-                            if is_second_file
-                            else f"already read {reads_no_plan} source files without a plan"
+                            f"modifying core plugin file `{plugin_rel}`"
+                            if in_plugin
+                            else ("editing multiple source files" if is_second_file else f"read {reads_no_plan} source files w/o plan")
                         )
                     )
-                )
-                plan_cli = PLUGIN_ROOT / "scripts" / "plan_tool.py"
+                    plan_cli = PLUGIN_ROOT / "scripts" / "plan_tool.py"
+                    reply(
+                        "deny",
+                        f"PLAN GATE ({why}): Initialize plan BEFORE editing -> `python3 {plan_cli} init --tier {max(2, tier) if (is_second_file or in_plugin) else max(1, tier)} --goal \"...\" --req \"REQ-01: ...\"` (at `{task_md}`).",
+                    )
+                    return
+        else:
+            # lean mode: Blast Radius Guard on simple turns (Tier<=1) w/o active plan -> 4th distinct file force_ask
+            max_simple = int((profile.get("blast_radius") or {}).get("simple_tier_max_files") or 3)
+            if tier <= 1 and not plan_ready and edit_key not in edited and len(edited) >= max_simple:
+                record_telemetry("blast_radius_force_ask", {"edited": len(edited)})
                 reply(
-                    "deny",
-                    f"PLAN GATE ({why}): Lock all user requirements and initialize your dynamic plan BEFORE editing code.\n"
-                    f"Run `python3 {plan_cli} init --tier {max(2, tier) if (is_second_file or in_plugin) else max(1, tier)} "
-                    f'--goal "..." --req "REQ-01: ..."` (or write `{task_md}`), then re-attempt this edit.',
+                    "force_ask",
+                    f"BLAST RADIUS GUARD|Simple Tier {tier} turn already edited {len(edited)} code files; editing `{edit_key}` expands scope. Confirm?",
                 )
                 return
+
+        if tier >= 2 and is_app and not in_plugin and not hook_state.get("turn_snapshot_taken"):
+            _capture_invisible_snapshot(repo, hook_file, hook_state)
 
     allow()
 

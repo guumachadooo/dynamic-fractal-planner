@@ -16,7 +16,13 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from schema_migrations import CURRENT_SCHEMA_VERSION, migrate_profile  # noqa: E402
+from schema_migrations import (  # noqa: E402
+    CURRENT_SCHEMA_VERSION,
+    DEFAULT_BLAST_RADIUS,
+    DEFAULT_READ_BUDGET,
+    DEFAULT_SECRET_GUARD,
+    migrate_profile,
+)
 
 DEFAULT_IGNORED_PREFIXES = (
     ".git/", ".agents/", "node_modules/", "dist/", "build/", "target/",
@@ -51,6 +57,11 @@ BOOTSTRAP_REQUIRED_FILES = (
 
 PROJECT_ROOT_MARKERS = {
     "package.json",
+    "tsconfig.json",
+    "vite.config.ts",
+    "next.config.js",
+    "next.config.mjs",
+    "next.config.ts",
     "pyproject.toml",
     "requirements.txt",
     "Cargo.toml",
@@ -58,6 +69,7 @@ PROJECT_ROOT_MARKERS = {
     "pom.xml",
     "build.gradle",
     "build.gradle.kts",
+    "pubspec.yaml",
     "Makefile",
     "AGENTS.md",
     "GEMINI.md",
@@ -65,7 +77,7 @@ PROJECT_ROOT_MARKERS = {
 
 PROJECT_SOURCE_EXTS = {
     ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".cs", ".csproj", ".sln",
-    ".vb", ".fs", ".java", ".kt", ".kts", ".swift", ".rs", ".go", ".c", ".cpp",
+    ".vb", ".fs", ".java", ".kt", ".kts", ".swift", ".dart", ".rs", ".go", ".c", ".cpp",
     ".cc", ".h", ".hpp", ".rb", ".php", ".sql", ".sh", ".html", ".css", ".scss",
 }
 
@@ -111,6 +123,191 @@ EXTRA_REQUESTS_TEMPLATE = """# Extra Request Queue (Parallel `/btw` Threads)
 ## Completed Requests
 (No completed requests recorded yet.)
 """
+
+
+def is_bypass_enabled() -> bool:
+    """Return True when the emergency `.bypass_gates` kill-switch exists in plugin root."""
+    return (resolve_plugin_root() / ".bypass_gates").exists()
+
+
+def get_planner_mode(profile: dict[str, Any] | None = None) -> str:
+    """Return active planner mode (`lean` default or `strict`)."""
+    env_mode = os.environ.get("PLANNER_MODE", "").strip().lower()
+    if env_mode in ("lean", "strict"):
+        return env_mode
+    if profile:
+        p_mode = str(profile.get("planner_mode") or "").strip().lower()
+        if p_mode in ("lean", "strict"):
+            return p_mode
+    return "lean"
+
+
+_ECO_MODE_RE = re.compile(
+    r"cota\s+acabando|quota\s+acabando|vai\s+r[aá]pido|modo\s+econ[oô]mico|economiza\s+cota|low\s+quota|save\s+quota",
+    re.IGNORECASE,
+)
+
+
+def is_eco_mode_prompt(text: str) -> bool:
+    return bool(_ECO_MODE_RE.search(text or ""))
+
+
+def record_telemetry(event: str, meta: dict[str, Any] | None = None) -> None:
+    """Append compact telemetry event to `.metrics.jsonl` (safe no-op during normal plugin tests)."""
+    if os.environ.get("PLANNER_DISABLE_TELEMETRY") == "1":
+        return
+    metrics_env = os.environ.get("PLANNER_METRICS_FILE", "").strip()
+    if not metrics_env and os.environ.get("PLANNER_RUNNING_PLUGIN_TESTS") == "1":
+        return
+    target = Path(metrics_env) if metrics_env else (resolve_plugin_root() / ".metrics.jsonl")
+    try:
+        import time
+
+        entry: dict[str, Any] = {"ts": int(time.time()), "ev": event}
+        if meta:
+            entry.update(meta)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+_CONTROL_WORDS = frozenset({
+    "if", "for", "foreach", "while", "switch", "catch", "using", "lock",
+    "return", "throw", "new", "sizeof", "typeof", "nameof", "await",
+    "else", "when", "try", "finally", "do", "case", "yield", "checked",
+    "unchecked", "fixed", "super", "this",
+})
+
+_SYM_MD_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
+_SYM_PY_RE = re.compile(r"^\s*(?:async\s+)?(def|class)\s+([A-Za-z_][A-Za-z0-9_]*)")
+_SYM_TYPE_RE = re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:public|private|protected|internal|abstract|sealed|static|partial|open|data|final|pub(?:\([^)]*\))?|\s)*(?:class|struct|interface|enum|record|trait|impl)\s+([A-Za-z_$][A-Za-z0-9_$]*)")
+_SYM_CS_METHOD_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|internal|static|virtual|override|abstract|sealed|async|partial|extern|new|unsafe|readonly|suspend|synchronized|final)\s+)+"
+    r"(?:[\w.<>\[\]?,\s]+?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+_SYM_KT_FUN_RE = re.compile(r"^\s*(?:(?:public|private|protected|internal|override|open|suspend|inline|operator)\s+)*fun\s+(?:<[^>]+>\s*)?(?:[\w.]+\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_SYM_JS_FN_RE = re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(")
+_SYM_JS_ARROW_RE = re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>")
+_SYM_JS_METHOD_RE = re.compile(r"^\s*(?:(?:public|private|protected|static|async|override|readonly|get|set)\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^;]*\)\s*(?::\s*[\w.<>\[\]|&\s]+)?\s*\{")
+_SYM_GO_RE = re.compile(r"^\s*func\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_SYM_RS_FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)")
+_SYM_SH_FN_RE = re.compile(r"^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\{")
+
+
+def extract_symbol_map(lines: list[str], suffix: str, max_entries: int = 80) -> list[str]:
+    """Extract compact `L{no}|{symbol}` map from source/markdown lines in pure Python."""
+    ext = (suffix or "").lower()
+    out: list[str] = []
+
+    for idx, line in enumerate(lines, start=1):
+        s = line.rstrip()
+        if not s.strip():
+            continue
+        if ext == ".md":
+            m = _SYM_MD_RE.match(s)
+            if m:
+                out.append(f"L{idx}|{m.group(1)} {m.group(2)[:55]}")
+            continue
+        if ext == ".py":
+            m = _SYM_PY_RE.match(s)
+            if m:
+                kind, name = m.group(1), m.group(2)
+                out.append(f"L{idx}|class {name}" if kind == "class" else f"L{idx}|{name}()")
+            continue
+        if ext == ".sh":
+            m = _SYM_SH_FN_RE.match(s)
+            if m:
+                out.append(f"L{idx}|{m.group(1)}()")
+            continue
+        if ext == ".go":
+            m = _SYM_TYPE_RE.match(s) or _SYM_GO_RE.match(s)
+            if m:
+                txt = s.strip()
+                out.append(f"L{idx}|{m.group(1)}" if txt.startswith("type ") else f"L{idx}|{m.group(1)}()")
+            continue
+        if ext == ".rs":
+            m = _SYM_RS_FN_RE.match(s)
+            if m:
+                out.append(f"L{idx}|{m.group(1)}()")
+                continue
+            m = _SYM_TYPE_RE.match(s)
+            if m:
+                out.append(f"L{idx}|{m.group(1)}")
+            continue
+
+        m_type = _SYM_TYPE_RE.match(s)
+        if m_type and not s.lstrip().startswith(("//", "*", "/*")):
+            out.append(f"L{idx}|class {m_type.group(1)}")
+            continue
+
+        if ext in (".kt", ".kts"):
+            m = _SYM_KT_FUN_RE.match(s)
+            if m and m.group(1) not in _CONTROL_WORDS:
+                out.append(f"L{idx}|{m.group(1)}()")
+            continue
+
+        if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+            m = _SYM_JS_FN_RE.match(s) or _SYM_JS_ARROW_RE.match(s) or _SYM_JS_METHOD_RE.match(s)
+            if m and m.group(1) not in _CONTROL_WORDS:
+                out.append(f"L{idx}|{m.group(1)}()")
+            continue
+
+        # C#, Java, C/C++, Dart, Swift, PHP fallback
+        stripped = s.lstrip()
+        if stripped.startswith(("//", "/*", "*", "#", "[")):
+            continue
+        m_cs = _SYM_CS_METHOD_RE.match(s)
+        if m_cs and "=" not in s.split("(", 1)[0]:
+            name = m_cs.group(1)
+            if name not in _CONTROL_WORDS:
+                out.append(f"L{idx}|{name}()")
+
+    if len(out) > max_entries:
+        keep = out[: max_entries - 1]
+        keep.append(f"...(+{len(out) - (max_entries - 1)} more symbols)")
+        return keep
+    return out
+
+
+_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("GitHub token (ghp_*)", re.compile(r"ghp_[A-Za-z0-9]{20,}")),
+    ("Google/Firebase API key (AIza*)", re.compile(r"AIza[0-9A-Za-z_-]{30,}")),
+    ("API secret key (sk-*)", re.compile(r"(?<![A-Za-z0-9_-])sk-(?:proj-)?[A-Za-z0-9]{20,}")),
+    ("Private key PEM block", re.compile(r"-----BEGIN\s+(?:(?:RSA|EC|OPENSSH)\s+)?PRIVATE\s+KEY-----")),
+)
+_SECRET_DEF_HINT_RE = re.compile(r"re\.compile|\{\d+,\}|\[A-Za-z0-9|SECRET_PATTERNS")
+_SECRET_EXTS = {".keystore", ".jks", ".p12", ".pfx", ".pem"}
+
+
+def scan_secrets_and_conflicts(text: str, rel_path: str = "", check_filename: bool = True) -> list[str]:
+    """Detect real secrets, secret keyfiles, and git merge-conflict markers."""
+    hits: list[str] = []
+    norm = (rel_path or "").replace("\\", "/")
+    if check_filename and norm:
+        fname = Path(norm).name.lower()
+        if fname == ".env" or (fname.startswith(".env.") and not fname.endswith((".example", ".sample", ".template", ".dist"))):
+            hits.append(f"Sensitive `.env` path `{norm}` blocked")
+        elif Path(fname).suffix in _SECRET_EXTS:
+            hits.append(f"Sensitive key/cert path `{norm}` blocked")
+
+    lines = (text or "").splitlines()
+    has_left = any(re.match(r"^<{7}(?:\s|$)", ln) for ln in lines)
+    has_right = any(re.match(r"^>{7}(?:\s|$)", ln) for ln in lines)
+    has_eq_conflict = has_left or has_right
+
+    for idx, ln in enumerate(lines, start=1):
+        if re.match(r"^<{7}(?:\s|$)", ln) or re.match(r"^>{7}(?:\s|$)", ln) or (has_eq_conflict and re.match(r"^={7}$", ln)):
+            hits.append(f"L{idx}: Git merge-conflict marker detected")
+            continue
+        if _SECRET_DEF_HINT_RE.search(ln):
+            continue
+        for label, pat in _SECRET_PATTERNS:
+            if pat.search(ln):
+                hits.append(f"L{idx}: Possible {label} detected")
+                break
+    return hits
 
 
 def resolve_plugin_root() -> Path:
@@ -439,6 +636,8 @@ def is_real_project_root(repo: Path) -> bool:
 def _detect_starter_build_rules(repo: Path) -> list[dict[str, Any]]:
     rules: list[dict[str, Any]] = []
     pkg_file = repo / "package.json"
+    has_tsconfig = (repo / "tsconfig.json").is_file()
+    pkg_has_typecheck = False
     if pkg_file.is_file():
         try:
             pkg = json.loads(pkg_file.read_text(encoding="utf-8", errors="ignore") or "{}")
@@ -451,6 +650,20 @@ def _detect_starter_build_rules(repo: Path) -> list[dict[str, Any]]:
                         "trigger_extensions": [".js", ".jsx", ".ts", ".tsx"],
                         "run_on_force": True,
                     })
+                if "typecheck" in scripts:
+                    pkg_has_typecheck = True
+                    rules.append({
+                        "label": "npm run typecheck",
+                        "command": "npm run typecheck",
+                        "trigger_extensions": [".ts", ".tsx"],
+                        "run_on_force": True,
+                    })
+                if "lint" in scripts:
+                    rules.append({
+                        "label": "npm run lint",
+                        "command": "npm run lint",
+                        "trigger_extensions": [".js", ".jsx", ".ts", ".tsx"],
+                    })
                 if "build" in scripts:
                     rules.append({
                         "label": "npm run build",
@@ -459,6 +672,13 @@ def _detect_starter_build_rules(repo: Path) -> list[dict[str, Any]]:
                     })
         except Exception:
             pass
+    if has_tsconfig and not pkg_has_typecheck:
+        rules.append({
+            "label": "tsc --noEmit",
+            "command": "npx tsc --noEmit",
+            "trigger_extensions": [".ts", ".tsx"],
+            "run_on_force": True,
+        })
     if (repo / "pyproject.toml").is_file() or (repo / "pytest.ini").is_file() or (repo / "tests").is_dir():
         rules.append({
             "label": "pytest",
@@ -480,6 +700,42 @@ def _detect_starter_build_rules(repo: Path) -> list[dict[str, Any]]:
             "trigger_extensions": [".go"],
             "run_on_force": True,
         })
+    if (repo / "pubspec.yaml").is_file():
+        rules.append({
+            "label": "flutter test",
+            "command": "flutter test",
+            "trigger_extensions": [".dart"],
+            "run_on_force": True,
+        })
+    if (repo / "build.gradle").is_file() or (repo / "build.gradle.kts").is_file() or (repo / "gradlew").is_file():
+        g_cmd = "./gradlew test" if (repo / "gradlew").is_file() else "gradle test"
+        rules.append({
+            "label": "gradle test",
+            "command": g_cmd,
+            "trigger_extensions": [".kt", ".kts", ".java"],
+            "run_on_force": True,
+        })
+    if any(repo.glob("*.sln")) or any(repo.glob("*.csproj")) or any(repo.glob("*/*.csproj")) or any(repo.glob("*/*/*.csproj")):
+        termux_dotnet = Path("/root/.dotnet/dotnet")
+        if termux_dotnet.is_file():
+            rules.append({
+                "label": "dotnet build",
+                "command": "/root/.dotnet/dotnet build -m:1 /p:UseSharedCompilation=false --nologo -v:minimal",
+                "trigger_extensions": [".cs", ".csproj"],
+                "run_on_force": True,
+                "env": {
+                    "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",
+                    "DOTNET_GCHeapHardLimit": "20000000",
+                    "DOTNET_EnableDiagnostics": "0",
+                },
+            })
+        else:
+            rules.append({
+                "label": "dotnet build",
+                "command": "dotnet build --nologo -v:minimal",
+                "trigger_extensions": [".cs", ".csproj"],
+                "run_on_force": True,
+            })
     return rules
 
 
@@ -511,6 +767,10 @@ def bootstrap_workspace(repo: Path, name: str = "", force: bool = False) -> tupl
         profile = {
             "schema_version": CURRENT_SCHEMA_VERSION,
             "project_name": name or repo.name,
+            "planner_mode": "lean",
+            "read_budget": dict(DEFAULT_READ_BUDGET),
+            "secret_guard": dict(DEFAULT_SECRET_GUARD),
+            "blast_radius": dict(DEFAULT_BLAST_RADIUS),
             "extra_requests_file": ".agents/docs/EXTRA_REQUESTS.md",
             "memory_feedback": {
                 "enabled": True,

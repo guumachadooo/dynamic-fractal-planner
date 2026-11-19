@@ -6,13 +6,26 @@ from __future__ import annotations
 import copy
 from typing import Any, Callable
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 DEFAULT_MEMORY_DOCS = [
     ".agents/docs/PROJECT_HISTORY.md",
     ".agents/docs/SAVED_IDEAS.md",
     "AGENTS.md",
 ]
+
+DEFAULT_READ_BUDGET = {
+    "max_full_read_lines": 300,
+    "max_slice_lines": 250,
+}
+
+DEFAULT_SECRET_GUARD = {
+    "enabled": True,
+}
+
+DEFAULT_BLAST_RADIUS = {
+    "simple_tier_max_files": 3,
+}
 
 MigratorFn = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -59,8 +72,39 @@ def migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
+    """Losslessly migrate a v2 profile to schema v3."""
+    out = copy.deepcopy(data)
+    out["schema_version"] = 3
+
+    mode = str(out.get("planner_mode") or "").strip().lower()
+    if mode not in ("lean", "strict"):
+        out["planner_mode"] = "lean"
+    else:
+        out["planner_mode"] = mode
+
+    raw_rb = out.get("read_budget")
+    rb = copy.deepcopy(raw_rb) if isinstance(raw_rb, dict) else {}
+    rb.setdefault("max_full_read_lines", DEFAULT_READ_BUDGET["max_full_read_lines"])
+    rb.setdefault("max_slice_lines", DEFAULT_READ_BUDGET["max_slice_lines"])
+    out["read_budget"] = rb
+
+    raw_sg = out.get("secret_guard")
+    sg = copy.deepcopy(raw_sg) if isinstance(raw_sg, dict) else {}
+    sg.setdefault("enabled", DEFAULT_SECRET_GUARD["enabled"])
+    out["secret_guard"] = sg
+
+    raw_br = out.get("blast_radius")
+    br = copy.deepcopy(raw_br) if isinstance(raw_br, dict) else {}
+    br.setdefault("simple_tier_max_files", DEFAULT_BLAST_RADIUS["simple_tier_max_files"])
+    out["blast_radius"] = br
+
+    return out
+
+
 MIGRATORS: dict[int, MigratorFn] = {
     1: migrate_v1_to_v2,
+    2: migrate_v2_to_v3,
 }
 
 

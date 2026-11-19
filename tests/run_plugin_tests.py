@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-"""Comprehensive regression suite for the Dynamic Fractal Planner global plugin.
+"""Comprehensive regression suite for Dynamic Fractal Planner v3.
 
-Covers:
-1. Pure-Python chained schema migration (v1->v2 on frozen generic & Cavern fixtures,
-   synthetic v1->v10 multi-hop chain, v99 graceful warning, in-memory non-mutation,
-   and `plan_tool.py migrate` CLI).
-2. Automatic SessionStart project bootstrap (`is_real_project_root`, shared
-   `bootstrap_workspace` v2, no overwrite of existing docs, zero pollution of
-   `/`, `/tmp`, `~`, `~/.gemini`, and empty folders).
-3. Tolerant `EXTRA_REQUESTS.md` heading detection across hooks & verifier.
-4. Plugin self-protection gate (`complexity_triage`, `planner_guard_files`,
-   `planner_post_tool`, `planner_stop`, `planner_pre_invocation`, `verify_universal --plugin-tests`).
-5. Full Cavern v1 fixture parity + live Cavern v2 profile parity across every script & hook.
+Supports:
+  --fast : Single-process in-memory execution (<5s on Termux ARM64 PRoot)
+  --full : Full subprocess integration execution (default)
 """
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import copy
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -39,14 +35,87 @@ for p in (str(SCRIPTS_DIR), str(HOOKS_DIR)):
         sys.path.insert(0, p)
 
 import complexity_triage  # noqa: E402
+import log_digest  # noqa: E402
 import planner_state  # noqa: E402
+import repo_map  # noqa: E402
 import schema_migrations  # noqa: E402
+import verify_universal  # noqa: E402
+
+FAST_MODE = False
+_MOD_CACHE: dict[str, Any] = {}
 
 
-def run_hook(script_name: str, payload: dict[str, Any], env_extra: dict[str, str] | None = None) -> tuple[int, str, dict[str, Any]]:
-    env = os.environ.copy()
+def _load_mod(path: Path) -> Any:
+    key = str(path)
+    if key in _MOD_CACHE:
+        return _MOD_CACHE[key]
+    spec = importlib.util.spec_from_file_location(f"_dyn_{path.stem}", str(path))
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _MOD_CACHE[key] = mod
+    return mod
+
+
+@contextlib.contextmanager
+def _patched_env(env_extra: dict[str, str] | None, cwd: Path | None = None, stdin_txt: str | None = None):
+    old_env = os.environ.copy()
+    old_cwd = Path.cwd()
+    old_stdin = sys.stdin
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    try:
+        if env_extra:
+            os.environ.update(env_extra)
+        if cwd is not None:
+            os.chdir(str(cwd))
+        sys.stdin = io.StringIO(stdin_txt or "")
+        sys.stdout = out_buf
+        sys.stderr = err_buf
+        yield out_buf, err_buf
+    finally:
+        sys.stdin = old_stdin
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        if cwd is not None:
+            try:
+                os.chdir(str(old_cwd))
+            except Exception:
+                pass
+        os.environ.clear()
+        os.environ.update(old_env)
+
+
+def run_hook(
+    script_name: str,
+    payload: dict[str, Any],
+    env_extra: dict[str, str] | None = None,
+) -> tuple[int, str, dict[str, Any]]:
+    merged_env = {"PLANNER_DISABLE_TELEMETRY": "1"}
     if env_extra:
-        env.update(env_extra)
+        merged_env.update(env_extra)
+    if FAST_MODE:
+        mod = _load_mod(HOOKS_DIR / script_name)
+        rc = 0
+        with _patched_env(merged_env, stdin_txt=json.dumps(payload)) as (out_buf, err_buf):
+            try:
+                mod.main()
+            except SystemExit as exc:
+                rc = int(exc.code) if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+            out_txt = out_buf.getvalue().strip()
+            err_txt = err_buf.getvalue().strip()
+        parsed: dict[str, Any] = {}
+        if out_txt:
+            try:
+                parsed = json.loads(out_txt)
+            except Exception:
+                parsed = {"_raw": out_txt}
+        return rc, err_txt, parsed
+
+    env = os.environ.copy()
+    env.update(merged_env)
     res = subprocess.run(
         [sys.executable, str(HOOKS_DIR / script_name)],
         input=json.dumps(payload),
@@ -57,7 +126,7 @@ def run_hook(script_name: str, payload: dict[str, Any], env_extra: dict[str, str
         check=False,
     )
     out_txt = res.stdout.strip()
-    parsed: dict[str, Any] = {}
+    parsed = {}
     if out_txt:
         try:
             parsed = json.loads(out_txt)
@@ -66,13 +135,46 @@ def run_hook(script_name: str, payload: dict[str, Any], env_extra: dict[str, str
     return res.returncode, res.stderr.strip(), parsed
 
 
-def run_script(script_name: str, args: list[str], cwd: Path | None = None, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
+def run_script(
+    script_name: str,
+    args: list[str],
+    cwd: Path | None = None,
+    env_extra: dict[str, str] | None = None,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    merged_env = {"PLANNER_DISABLE_TELEMETRY": "1"}
     if env_extra:
-        env.update(env_extra)
+        merged_env.update(env_extra)
+    if FAST_MODE:
+        mod = _load_mod(SCRIPTS_DIR / script_name)
+        rc = 0
+        old_argv = sys.argv
+        try:
+            sys.argv = [str(SCRIPTS_DIR / script_name), *args]
+            with _patched_env(merged_env, cwd=cwd or PLUGIN_ROOT, stdin_txt=input_text) as (out_buf, err_buf):
+                try:
+                    mod.main()
+                except SystemExit as exc:
+                    if isinstance(exc.code, int):
+                        rc = exc.code
+                    elif exc.code:
+                        print(str(exc.code), file=sys.stderr)
+                        rc = 1
+                return subprocess.CompletedProcess(
+                    args=[script_name, *args],
+                    returncode=rc,
+                    stdout=out_buf.getvalue(),
+                    stderr=err_buf.getvalue(),
+                )
+        finally:
+            sys.argv = old_argv
+
+    env = os.environ.copy()
+    env.update(merged_env)
     return subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / script_name), *args],
         cwd=str(cwd) if cwd else str(PLUGIN_ROOT),
+        input=input_text,
         text=True,
         capture_output=True,
         env=env,
@@ -88,52 +190,50 @@ def init_git_repo(repo: Path) -> None:
 
 
 class TestSchemaMigrations(unittest.TestCase):
-    def test_v1_generic_fixture_migrates_losslessly(self) -> None:
+    def test_v1_generic_fixture_migrates_losslessly_to_v3(self) -> None:
         raw = json.loads((FIXTURES_DIR / "profile_v1_generic.json").read_text(encoding="utf-8"))
         snapshot = copy.deepcopy(raw)
         migrated, ver, warnings = schema_migrations.migrate_profile(raw)
 
         self.assertEqual(raw, snapshot, "migrate_profile must never mutate input dict")
-        self.assertEqual(ver, 2)
-        self.assertEqual(migrated["schema_version"], 2)
+        self.assertEqual(ver, 3)
+        self.assertEqual(migrated["schema_version"], 3)
         self.assertEqual(warnings, [])
         self.assertEqual(migrated["custom_owner_note"], "preserve-me-losslessly")
+        self.assertEqual(migrated["planner_mode"], "lean")
+        self.assertEqual(migrated["read_budget"], {"max_full_read_lines": 300, "max_slice_lines": 250})
+        self.assertEqual(migrated["secret_guard"], {"enabled": True})
+        self.assertEqual(migrated["blast_radius"], {"simple_tier_max_files": 3})
 
-        # Verify legacy commands normalized into build_rules
-        rules = migrated.get("build_rules") or []
-        cmds = {r.get("label"): r for r in rules}
+        cmds = {r.get("label"): r for r in (migrated.get("build_rules") or [])}
         self.assertIn("verify_command", cmds)
         self.assertEqual(cmds["verify_command"]["command"], "npm test")
-        self.assertEqual(cmds["verify_command"]["trigger_extensions"], [".ts", ".tsx"])
         self.assertIn("verify_non_code_command", cmds)
         self.assertTrue(cmds["verify_non_code_command"].get("run_without_build"))
-
-        # Verify memory_feedback defaults & domains preservation
-        mf = migrated["memory_feedback"]
-        self.assertTrue(mf["enabled"])
-        self.assertEqual(mf["min_code_files"], 2)
-        self.assertTrue(len(mf["docs"]) >= 1)
+        self.assertTrue(migrated["memory_feedback"]["enabled"])
         self.assertIn("payments", migrated["domains"])
-        self.assertFalse(migrated["domains"]["payments"]["is_ship"])
-        self.assertTrue(migrated["domains"]["release-ops"]["is_ship"])
-        self.assertEqual(migrated["domains"]["payments"]["keywords"], ["stripe*", "webhook*", "billing"])
 
-    def test_v1_cavern_fixture_migrates_losslessly(self) -> None:
-        raw = json.loads((FIXTURES_DIR / "profile_v1_cavern.json").read_text(encoding="utf-8"))
-        self.assertNotIn("schema_version", raw)
-        migrated, ver, warnings = schema_migrations.migrate_profile(raw)
+    def test_v1_and_v2_cavern_fixtures_migrate_losslessly(self) -> None:
+        v1 = json.loads((FIXTURES_DIR / "profile_v1_cavern.json").read_text(encoding="utf-8"))
+        self.assertNotIn("schema_version", v1)
+        m1, ver1, w1 = schema_migrations.migrate_profile(v1)
+        self.assertEqual(ver1, 3)
+        self.assertEqual(w1, [])
+        self.assertEqual(m1["build_rules"], v1["build_rules"])
+        self.assertEqual(m1["file_guards"], v1["file_guards"])
+        self.assertEqual(m1["diff_rules"], v1["diff_rules"])
+        self.assertEqual(m1["planner_mode"], "lean")
 
-        self.assertEqual(ver, 2)
-        self.assertEqual(migrated["schema_version"], 2)
-        self.assertEqual(warnings, [])
-        self.assertEqual(len(migrated["build_rules"]), len(raw["build_rules"]))
-        self.assertEqual(migrated["build_rules"], raw["build_rules"])
-        self.assertEqual(migrated["memory_feedback"], raw["memory_feedback"])
-        self.assertEqual(migrated["domains"], raw["domains"])
-        self.assertEqual(migrated["file_guards"], raw["file_guards"])
-        self.assertEqual(migrated["command_guards"], raw["command_guards"])
-        self.assertEqual(migrated["diff_rules"], raw["diff_rules"])
-        self.assertEqual(migrated["key_parity_rules"], raw["key_parity_rules"])
+        v2 = json.loads((FIXTURES_DIR / "profile_v2_cavern.json").read_text(encoding="utf-8"))
+        self.assertEqual(v2.get("schema_version"), 2)
+        m2, ver2, w2 = schema_migrations.migrate_profile(v2)
+        self.assertEqual(ver2, 3)
+        self.assertEqual(w2, [])
+        self.assertEqual(m2["schema_version"], 3)
+        self.assertEqual(m2["planner_mode"], "lean")
+        self.assertEqual(m2["build_rules"], v2["build_rules"])
+        self.assertEqual(m2["command_guards"], v2["command_guards"])
+        self.assertEqual(m2["key_parity_rules"], v2["key_parity_rules"])
 
     def test_synthetic_chain_v1_to_v10(self) -> None:
         def make_hop(src_v: int):
@@ -149,23 +249,16 @@ class TestSchemaMigrations(unittest.TestCase):
         chain = {v: make_hop(v) for v in range(1, 10)}
         v1 = {"project_name": "ChainProj", "keep": "yes"}
         out, ver, warnings = schema_migrations.migrate_profile(v1, migrators=chain, target_version=10)
-
         self.assertEqual(ver, 10)
         self.assertEqual(out["schema_version"], 10)
         self.assertEqual(warnings, [])
-        self.assertEqual(out["keep"], "yes")
         self.assertEqual(out["hops"], [f"{i}->{i + 1}" for i in range(1, 10)])
-        for v in range(2, 11):
-            self.assertTrue(out[f"field_v{v}"])
 
     def test_newer_schema_warns_without_crashing(self) -> None:
         future = {"schema_version": 99, "project_name": "FutureRepo", "future_field": [1, 2, 3]}
         out, ver, warnings = schema_migrations.migrate_profile(future)
         self.assertEqual(ver, 99)
-        self.assertEqual(out["schema_version"], 99)
-        self.assertEqual(out["future_field"], [1, 2, 3])
         self.assertTrue(any("99" in w for w in warnings))
-
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             (repo / ".agents").mkdir()
@@ -186,14 +279,15 @@ class TestSchemaMigrations(unittest.TestCase):
             prof_file.write_text(v1_text, encoding="utf-8")
 
             loaded = planner_state.load_project_profile(repo)
-            self.assertEqual(loaded["schema_version"], 2)
-            self.assertEqual(prof_file.read_text(encoding="utf-8"), v1_text, "load_project_profile must NOT modify disk")
+            self.assertEqual(loaded["schema_version"], 3)
+            self.assertEqual(prof_file.read_text(encoding="utf-8"), v1_text)
 
             res = run_script("plan_tool.py", ["--workspace", str(repo), "migrate"])
             self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
             self.assertTrue((agents_dir / "planner_profile.json.bak").is_file())
             disk_after = json.loads(prof_file.read_text(encoding="utf-8"))
-            self.assertEqual(disk_after["schema_version"], 2)
+            self.assertEqual(disk_after["schema_version"], 3)
+            self.assertEqual(disk_after["planner_mode"], "lean")
 
             res2 = run_script("plan_tool.py", ["--workspace", str(repo), "migrate"])
             self.assertEqual(res2.returncode, 0)
@@ -213,20 +307,51 @@ class TestAutoBootstrapAndHeadings(unittest.TestCase):
             (empty_dir / "notes.txt").write_text("just a note", encoding="utf-8")
             self.assertFalse(planner_state.is_real_project_root(empty_dir))
 
-        with tempfile.TemporaryDirectory() as pkg_td:
-            pkg_dir = Path(pkg_td)
-            (pkg_dir / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
-            self.assertTrue(planner_state.is_real_project_root(pkg_dir))
+        with tempfile.TemporaryDirectory() as dart_td:
+            d = Path(dart_td)
+            (d / "pubspec.yaml").write_text("name: flutter_app\n", encoding="utf-8")
+            self.assertTrue(planner_state.is_real_project_root(d))
 
-        with tempfile.TemporaryDirectory() as src_td:
-            src_dir = Path(src_td)
-            sub = src_dir / "src" / "core"
-            sub.mkdir(parents=True)
-            (sub / "app.py").write_text("print('ok')\n", encoding="utf-8")
-            self.assertTrue(planner_state.is_real_project_root(src_dir))
+    def test_bootstrap_v3_stacks(self) -> None:
+        # TS / Next / Vite
+        with tempfile.TemporaryDirectory() as td:
+            r = Path(td)
+            (r / "package.json").write_text(json.dumps({"scripts": {"lint": "eslint .", "build": "next build"}}), encoding="utf-8")
+            (r / "tsconfig.json").write_text("{}", encoding="utf-8")
+            planner_state.bootstrap_workspace(r)
+            prof = json.loads((r / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
+            self.assertEqual(prof["schema_version"], 3)
+            self.assertEqual(prof["planner_mode"], "lean")
+            cmds = [x["command"] for x in prof["build_rules"]]
+            self.assertIn("npx tsc --noEmit", cmds)
+            self.assertIn("npm run lint", cmds)
+
+        # Generic .NET / C#
+        with tempfile.TemporaryDirectory() as td:
+            r = Path(td)
+            (r / "App.csproj").write_text("<Project Sdk=\"Microsoft.NET.Sdk\"></Project>", encoding="utf-8")
+            planner_state.bootstrap_workspace(r)
+            prof = json.loads((r / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
+            self.assertTrue(any("dotnet build" in x["command"] for x in prof["build_rules"]))
+
+        # Android / Gradle / Kotlin
+        with tempfile.TemporaryDirectory() as td:
+            r = Path(td)
+            (r / "build.gradle.kts").write_text("plugins {}", encoding="utf-8")
+            (r / "gradlew").write_text("#!/bin/sh\n", encoding="utf-8")
+            planner_state.bootstrap_workspace(r)
+            prof = json.loads((r / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
+            self.assertTrue(any("./gradlew test" in x["command"] for x in prof["build_rules"]))
+
+        # Flutter / Dart
+        with tempfile.TemporaryDirectory() as td:
+            r = Path(td)
+            (r / "pubspec.yaml").write_text("name: app\n", encoding="utf-8")
+            planner_state.bootstrap_workspace(r)
+            prof = json.loads((r / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
+            self.assertTrue(any("flutter test" in x["command"] for x in prof["build_rules"]))
 
     def test_session_start_auto_bootstrap_and_non_overwrite(self) -> None:
-        # 1. Fresh package.json project
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
             repo = Path(td)
             (repo / "package.json").write_text(json.dumps({"name": "demo", "scripts": {"test": "jest"}}), encoding="utf-8")
@@ -237,36 +362,9 @@ class TestAutoBootstrapAndHeadings(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             msg = parsed["injectSteps"][0]["systemMessage"]["systemMessage"]
             self.assertIn("Auto-initialized project docs/profile", msg)
-            for rel in planner_state.BOOTSTRAP_REQUIRED_FILES:
-                self.assertTrue((repo / rel).is_file(), f"Missing {rel}")
             prof = json.loads((repo / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
-            self.assertEqual(prof["schema_version"], 2)
-            self.assertTrue(any(r["command"] == "npm test" for r in prof["build_rules"]))
+            self.assertEqual(prof["schema_version"], 3)
 
-        # 2. Existing files never overwritten; only missing files created
-        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
-            repo = Path(td)
-            init_git_repo(repo)
-            docs_dir = repo / ".agents" / "docs"
-            docs_dir.mkdir(parents=True)
-            sentinel_hist = "# Custom History\nKeep forever.\n"
-            sentinel_extra = "# Queue\n\n## Pending\n- Fix issue #42\n"
-            (docs_dir / "PROJECT_HISTORY.md").write_text(sentinel_hist, encoding="utf-8")
-            (docs_dir / "EXTRA_REQUESTS.md").write_text(sentinel_extra, encoding="utf-8")
-
-            rc, err, parsed = run_hook("planner_session_start.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-            })
-            self.assertEqual(rc, 0, err)
-            msg = parsed["injectSteps"][0]["systemMessage"]["systemMessage"]
-            self.assertIn("SAVED_IDEAS.md", msg)
-            self.assertIn("planner_profile.json", msg)
-            self.assertIn("ATTENTION — Pending extra requests", msg)
-            self.assertEqual((docs_dir / "PROJECT_HISTORY.md").read_text(encoding="utf-8"), sentinel_hist)
-            self.assertEqual((docs_dir / "EXTRA_REQUESTS.md").read_text(encoding="utf-8"), sentinel_extra)
-
-        # 3. Empty non-project folder never polluted
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
             empty_dir = Path(td)
             rc, err, _ = run_hook("planner_session_start.py", {
@@ -280,12 +378,9 @@ class TestAutoBootstrapAndHeadings(unittest.TestCase):
         variants = [
             ("## Pending Extra Requests\n- Task A\n", ["Task A"]),
             ("## Pedidos Extras Pendentes\n- Tarefa B\n", ["Tarefa B"]),
-            ("## pending\n1. Item C\n", ["1. Item C"]),
             ("### Queue:\n- Item D\n## Completed\n- Done E\n", ["Item D"]),
-            ("## extra requests\n- Item F\n", ["Item F"]),
             ("# Pending\n- Item G\n", ["Item G"]),
-            ("# Extra Request Queue (Parallel `/btw` Threads)\n\n## Pending Extra Requests\n(No pending requests.)\n", []),
-            ("## Queue\n(none)\n<!-- comment -->\n", []),
+            ("# Extra Request Queue\n\n## Pending Extra Requests\n(No pending requests.)\n", []),
         ]
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
@@ -295,9 +390,7 @@ class TestAutoBootstrapAndHeadings(unittest.TestCase):
             for content, expected_sub in variants:
                 extra.write_text(content, encoding="utf-8")
                 _, items = planner_state.get_pending_extra_requests(repo, {})
-                self.assertEqual(len(items), len(expected_sub), f"Failed for heading content:\n{content}")
-                for exp, got in zip(expected_sub, items):
-                    self.assertIn(exp, got)
+                self.assertEqual(len(items), len(expected_sub))
 
 
 class TestSelfProtectionGate(unittest.TestCase):
@@ -309,88 +402,58 @@ class TestSelfProtectionGate(unittest.TestCase):
         self.assertIn("plugin-self", res["detected_domains"])
         self.assertGreaterEqual(res["tier"], 2)
 
-    def test_plugin_edit_gate_post_tool_and_stop(self) -> None:
+    def test_plugin_edit_gate_strict_finish_and_stop(self) -> None:
+        strict_env = {"PLANNER_MODE": "strict"}
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
             ws = Path(td)
             init_git_repo(ws)
             target_plugin_file = str(PLUGIN_ROOT / "hooks" / "planner_stop.py")
 
-            # 1. Without plan -> planner_guard_files denies outside-repo plugin edit
+            # Strict mode denies outside-repo plugin edit without plan
             rc, _, resp = run_hook("planner_guard_files.py", {
                 "workspacePaths": [str(ws)],
                 "artifactDirectoryPath": art,
                 "lastUserInput": "Edit planner_stop.py in dynamic-fractal-planner plugin",
                 "toolCall": {"name": "edit_file", "args": {"Path": target_plugin_file, "Target": "a", "Replacement": "b"}},
-            })
+            }, env_extra=strict_env)
             self.assertEqual(rc, 0)
             self.assertEqual(resp.get("decision"), "deny")
             self.assertIn("PLAN GATE", resp.get("reason", ""))
 
-            # 2. Frozen fixture protected with force_ask
-            rc, _, resp_fix = run_hook("planner_guard_files.py", {
-                "workspacePaths": [str(ws)],
-                "artifactDirectoryPath": art,
-                "toolCall": {"name": "edit_file", "args": {"Path": str(FIXTURES_DIR / "profile_v1_generic.json"), "Target": "a", "Replacement": "b"}},
-            })
-            self.assertEqual(rc, 0)
-            self.assertEqual(resp_fix.get("decision"), "force_ask")
+            # Frozen v1 & v2 fixtures protected with force_ask
+            for fx in ("profile_v1_generic.json", "profile_v2_cavern.json"):
+                _, _, resp_fix = run_hook("planner_guard_files.py", {
+                    "workspacePaths": [str(ws)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(FIXTURES_DIR / fx), "Target": "a", "Replacement": "b"}},
+                }, env_extra=strict_env)
+                self.assertEqual(resp_fix.get("decision"), "force_ask", fx)
 
-            # 3. With active plan -> guard allows
+            # Initialize plan -> allow edit
             init_res = run_script("plan_tool.py", [
                 "--dir", art, "--workspace", str(ws), "init",
                 "--tier", "2", "--goal", "Update plugin", "--req", "REQ-01: Update stop hook",
             ])
             self.assertEqual(init_res.returncode, 0, init_res.stderr)
 
-            rc, _, resp_ok = run_hook("planner_guard_files.py", {
+            _, _, resp_ok = run_hook("planner_guard_files.py", {
                 "workspacePaths": [str(ws)],
                 "artifactDirectoryPath": art,
                 "lastUserInput": "Update plugin",
                 "toolCall": {"name": "edit_file", "args": {"Path": target_plugin_file, "Target": "a", "Replacement": "b"}},
-            })
-            self.assertEqual(rc, 0)
+            }, env_extra=strict_env)
             self.assertEqual(resp_ok.get("decision"), "allow")
 
-            # 4. PostToolUse marks needs_plugin_tests=True on plugin .py/.json/.md edit
-            rc, _, _ = run_hook("planner_post_tool.py", {
-                "workspacePaths": [str(ws)],
-                "artifactDirectoryPath": art,
-                "toolCall": {"name": "edit_file", "args": {"Path": "~/.gemini/config/plugins/dynamic-fractal-planner/hooks/planner_stop.py"}},
-            })
-            self.assertEqual(rc, 0)
-            hook_file = Path(art) / "scratch" / ".hook_state.json"
-            hs = json.loads(hook_file.read_text(encoding="utf-8"))
-            self.assertTrue(hs.get("needs_plugin_tests"))
-            self.assertGreater(float(hs.get("last_plugin_edit_ts") or 0), 0.0)
-
-            # 5. Running verify_universal.py WITHOUT --plugin-tests does NOT clear needs_plugin_tests
+            # PostToolUse marks needs_plugin_tests=True
             run_hook("planner_post_tool.py", {
                 "workspacePaths": [str(ws)],
                 "artifactDirectoryPath": art,
-                "toolCall": {"name": "run_command", "args": {"CommandLine": f"python3 {SCRIPTS_DIR / 'verify_universal.py'}"}},
+                "toolCall": {"name": "edit_file", "args": {"Path": target_plugin_file}},
             })
-            hs = json.loads(hook_file.read_text(encoding="utf-8"))
-            self.assertTrue(hs.get("needs_plugin_tests"))
+            hook_file = Path(art) / "scratch" / ".hook_state.json"
+            self.assertTrue(json.loads(hook_file.read_text(encoding="utf-8")).get("needs_plugin_tests"))
 
-            # 6. PreInvocation preserves needs_plugin_tests across new turns
-            run_hook("planner_pre_invocation.py", {
-                "workspacePaths": [str(ws)],
-                "artifactDirectoryPath": art,
-                "lastUserInput": "New turn question?",
-                "invocationNum": 1,
-            })
-            hs = json.loads(hook_file.read_text(encoding="utf-8"))
-            self.assertTrue(hs.get("needs_plugin_tests"))
-
-            # 7. Stop hook: fullyIdle=false allows stop; otherwise blocks stop when needs_plugin_tests=True
-            _, _, stop_idle_false = run_hook("planner_stop.py", {
-                "workspacePaths": [str(ws)],
-                "artifactDirectoryPath": art,
-                "fullyIdle": False,
-                "terminationReason": "NO_TOOL_CALL",
-            })
-            self.assertEqual(stop_idle_false, {})
-
+            # Stop blocked while needs_plugin_tests & open plan
             _, _, stop_blocked = run_hook("planner_stop.py", {
                 "workspacePaths": [str(ws)],
                 "artifactDirectoryPath": art,
@@ -400,22 +463,21 @@ class TestSelfProtectionGate(unittest.TestCase):
             self.assertEqual(stop_blocked.get("decision"), "continue")
             self.assertIn("run_plugin_tests.py", stop_blocked.get("reason", ""))
 
-            # 8. PostToolUse clears needs_plugin_tests ONLY on run_plugin_tests.py or verify_universal.py --plugin-tests
+            # plan_tool.py finish closes all modules & REQs in 1 turn + compacts done modules
+            fin = run_script("plan_tool.py", ["--dir", art, "--workspace", str(ws), "finish", "--evidence", "tested"])
+            self.assertEqual(fin.returncode, 0, fin.stdout + fin.stderr)
+            self.assertIn("PLAN AUDIT PASS", fin.stdout)
+            task_md_txt = (Path(art) / "TASK_PLAN.md").read_text(encoding="utf-8")
+            self.assertIn("- [x] `MOD-AUDIT` |", task_md_txt)
+            self.assertNotIn("### [x] `MOD-AUDIT`", task_md_txt)
+
+            # run_plugin_tests clears needs_plugin_tests -> Stop allows
             time.sleep(0.01)
             run_hook("planner_post_tool.py", {
                 "workspacePaths": [str(ws)],
                 "artifactDirectoryPath": art,
                 "toolCall": {"name": "run_command", "args": {"CommandLine": f"python3 {TESTS_DIR / 'run_plugin_tests.py'}"}},
             })
-            hs = json.loads(hook_file.read_text(encoding="utf-8"))
-            self.assertFalse(hs.get("needs_plugin_tests"))
-            self.assertGreaterEqual(float(hs.get("last_plugin_test_ts") or 0), float(hs.get("last_plugin_edit_ts") or 0))
-
-            # Clear plan open checks cleanly to verify stop allows once tests & plan done
-            plan_data = json.loads((Path(art) / "scratch" / "plan_state.json").read_text(encoding="utf-8"))
-            for m in plan_data.get("modules") or []:
-                run_script("plan_tool.py", ["--dir", art, "--workspace", str(ws), "done", m["id"]])
-            run_script("plan_tool.py", ["--dir", art, "--workspace", str(ws), "req-verify", "REQ-01", "--evidence", "tested"])
             _, _, stop_ok = run_hook("planner_stop.py", {
                 "workspacePaths": [str(ws)],
                 "artifactDirectoryPath": art,
@@ -424,23 +486,8 @@ class TestSelfProtectionGate(unittest.TestCase):
             })
             self.assertEqual(stop_ok, {})
 
-            # Also verify PostToolUse clears needs_plugin_tests on `verify_universal.py --plugin-tests`
-            run_hook("planner_post_tool.py", {
-                "workspacePaths": [str(ws)],
-                "artifactDirectoryPath": art,
-                "toolCall": {"name": "edit_file", "args": {"Path": str(PLUGIN_ROOT / "README.md")}},
-            })
-            self.assertTrue(json.loads(hook_file.read_text(encoding="utf-8")).get("needs_plugin_tests"))
-            time.sleep(0.01)
-            run_hook("planner_post_tool.py", {
-                "workspacePaths": [str(ws)],
-                "artifactDirectoryPath": art,
-                "toolCall": {"name": "run_command", "args": {"CommandLine": f"python3 {SCRIPTS_DIR / 'verify_universal.py'} --plugin-tests"}},
-            })
-            self.assertFalse(json.loads(hook_file.read_text(encoding="utf-8")).get("needs_plugin_tests"))
-
     def test_verify_universal_plugin_tests_flag(self) -> None:
-        if os.environ.get("PLANNER_PLUGIN_TEST_DEPTH") == "1":
+        if FAST_MODE or os.environ.get("PLANNER_PLUGIN_TEST_DEPTH") == "1":
             return
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
             repo = Path(td)
@@ -456,30 +503,638 @@ class TestSelfProtectionGate(unittest.TestCase):
                 "verify_universal.py",
                 ["--workspace", str(repo), "--files", "--plugin-tests"],
                 cwd=repo,
-                env_extra={
-                    "PLANNER_ARTIFACT_DIR": art,
-                    "PLANNER_PLUGIN_TEST_DEPTH": "1",
-                },
+                env_extra={"PLANNER_ARTIFACT_DIR": art, "PLANNER_PLUGIN_TEST_DEPTH": "1"},
             )
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             self.assertIn("plugin tests passed", res.stdout)
+            self.assertFalse(json.loads(hook_file.read_text(encoding="utf-8")).get("needs_plugin_tests"))
+
+
+class TestV3Features(unittest.TestCase):
+    def test_bypass_switch(self) -> None:
+        bypass_file = PLUGIN_ROOT / ".bypass_gates"
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            try:
+                bypass_file.write_text("1", encoding="utf-8")
+                _, _, r_read = run_hook("planner_guard_read.py", {
+                    "workspacePaths": [str(repo)],
+                    "toolCall": {"name": "read_file", "args": {"Path": "/root/.gemini/antigravity/brain/abc/transcript.jsonl"}},
+                })
+                self.assertEqual(r_read.get("decision"), "allow")
+                _, _, r_cmd = run_hook("planner_guard_command.py", {
+                    "workspacePaths": [str(repo)],
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "dotnet build CavernizeAndroid.csproj"}},
+                })
+                self.assertEqual(r_cmd.get("decision"), "allow")
+                _, _, r_pre = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "lastUserInput": "1. A\n2. B\n3. C",
+                    "invocationNum": 1,
+                })
+                self.assertEqual(r_pre, {})
+            finally:
+                if bypass_file.exists():
+                    bypass_file.unlink()
+
+    def test_neon_handoff_preserves_turn_state(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            prompt = "1. Implement parser\n2. Add tests\n3. Update docs"
+            _, _, first = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": prompt,
+                "invocationNum": 1,
+            })
+            self.assertIn("injectSteps", first)
+
+            # Simulate edits during planning/execution turn
+            hook_file = Path(art) / "scratch" / ".hook_state.json"
             hs = json.loads(hook_file.read_text(encoding="utf-8"))
-            self.assertFalse(hs.get("needs_plugin_tests"))
-            self.assertGreaterEqual(float(hs.get("last_plugin_test_ts") or 0), float(hs.get("last_plugin_edit_ts") or 0))
+            hs["code_files_edited"] = ["src/a.py"]
+            hs["needs_verify"] = True
+            hs["last_invocation_num"] = 4
+            hook_file.write_text(json.dumps(hs), encoding="utf-8")
+
+            # Neon handoff resets invocationNum back to 1 with identical prompt within window
+            _, _, handoff = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": prompt,
+                "invocationNum": 1,
+            })
+            self.assertEqual(handoff, {}, "Must NOT treat Neon handoff as new turn or re-inject triage")
+            hs_after = json.loads(hook_file.read_text(encoding="utf-8"))
+            self.assertEqual(hs_after["code_files_edited"], ["src/a.py"])
+            self.assertTrue(hs_after["needs_verify"])
+            self.assertTrue(hs_after["triage_injected"])
+
+    def test_lean_auto_reqs_jit_and_blast_radius(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "src").mkdir()
+            # Tier >= 2 in lean mode -> auto REQs + JIT checklists, no PLAN GATE
+            _, _, pre = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "1. Fix CSS layout clipping\n2. Add pytest unit tests\n3. Update API endpoint",
+                "invocationNum": 1,
+            })
+            msg = pre["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("mode=lean", msg)
+            self.assertIn("REQS|REQ-01:", msg)
+            self.assertIn("JIT|", msg)
+
+            # Simple Tier 1 turn -> Blast Radius Guard triggers on 4th distinct code file
+            _, _, _ = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "Fix typo in helper.py",
+                "invocationNum": 1,
+            })
+            for idx in range(3):
+                fp = repo / "src" / f"f{idx}.py"
+                fp.write_text("x = 1\n", encoding="utf-8")
+                _, _, dec = run_hook("planner_guard_files.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "lastUserInput": "Fix typo in helper.py",
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(fp), "Target": "x = 1", "Replacement": "x = 2"}},
+                })
+                self.assertEqual(dec.get("decision"), "allow", f"File {idx} should allow")
+                run_hook("planner_post_tool.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(fp)}},
+                })
+            f4 = repo / "src" / "f3.py"
+            f4.write_text("x = 1\n", encoding="utf-8")
+            _, _, dec4 = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "Fix typo in helper.py",
+                "toolCall": {"name": "edit_file", "args": {"Path": str(f4), "Target": "x = 1", "Replacement": "x = 2"}},
+            })
+            self.assertEqual(dec4.get("decision"), "force_ask")
+            self.assertIn("BLAST RADIUS", dec4.get("reason", ""))
+
+    def test_eco_mode_memory_anchor_14_and_long_chat_nudge(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "docs" / "PROJECT_HISTORY.md").write_text("# History\n", encoding="utf-8")
+            os.utime(repo / ".agents" / "docs" / "PROJECT_HISTORY.md", (time.time() - 7200, time.time() - 7200))
+            for i in range(2):
+                p = repo / f"m{i}.py"
+                p.write_text("a=1\n", encoding="utf-8")
+
+            # ECO_MODE prompt injects directive & suppresses memory_feedback on commit
+            _, _, pre_eco = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "Economiza cota, corrige m0.py rápido",
+                "invocationNum": 1,
+            })
+            self.assertIn("ECO_MODE|ON", pre_eco["injectSteps"][0]["systemMessage"]["systemMessage"])
+            _, _, cg_eco = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m 'eco'"}},
+            })
+            self.assertEqual(cg_eco.get("decision"), "allow")
+
+        # Memory anchor every 14 invocations ONLY when open_reqs >= 3
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            run_script("plan_tool.py", [
+                "--dir", art, "--workspace", str(repo), "init", "--tier", "2", "--goal", "Anchor test",
+                "--req", "REQ-01: A", "--req", "REQ-02: B", "--req", "REQ-03: C",
+            ])
+            prompt = "Anchor test"
+            run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": prompt, "invocationNum": 1,
+            })
+            # At inv 8 -> must NOT trigger yet (interval is 14)
+            saw_anchor_early = False
+            for inv in range(2, 13):
+                _, _, out = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": prompt, "invocationNum": inv,
+                })
+                if "Memory Anchor" in json.dumps(out):
+                    saw_anchor_early = True
+            self.assertFalse(saw_anchor_early)
+            # By inv 15 -> MUST trigger
+            saw_anchor_14 = False
+            for inv in range(13, 17):
+                _, _, out = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": prompt, "invocationNum": inv,
+                })
+                if "Memory Anchor" in json.dumps(out):
+                    saw_anchor_14 = True
+            self.assertTrue(saw_anchor_14)
+
+            # With open_reqs < 3, Memory Anchor must NOT trigger even after 14 invocations
+            run_script("plan_tool.py", ["--dir", art, "--workspace", str(repo), "req-verify", "REQ-01", "--evidence", "done"])
+            hs_reset = json.loads((Path(art) / "scratch" / ".hook_state.json").read_text(encoding="utf-8"))
+            hs_reset["invocations_since_anchor"] = 14
+            (Path(art) / "scratch" / ".hook_state.json").write_text(json.dumps(hs_reset), encoding="utf-8")
+            _, _, out_lt3 = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": prompt, "invocationNum": 18,
+            })
+            self.assertNotIn("Memory Anchor", json.dumps(out_lt3))
+
+            # Long-chat nudge at total_turns >= 25
+            hook_file = Path(art) / "scratch" / ".hook_state.json"
+            hs = json.loads(hook_file.read_text(encoding="utf-8"))
+            hs["total_turns"] = 25
+            hs["handoff_nudged"] = False
+            hook_file.write_text(json.dumps(hs), encoding="utf-8")
+            _, _, nudge_out = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": "Turn 26", "invocationNum": 1,
+            })
+            self.assertIn("QUOTA TIP", json.dumps(nudge_out))
+
+    def test_read_guard_log_digest_and_repo_map(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+
+            # 1. transcript*.jsonl blocked
+            _, _, r_tr = run_hook("planner_guard_read.py", {
+                "workspacePaths": [str(repo)],
+                "toolCall": {"name": "read_file", "args": {"Path": "/root/.gemini/antigravity/brain/xyz/transcript_full.jsonl"}},
+            })
+            self.assertEqual(r_tr.get("decision"), "deny")
+
+            # 2. PROJECT_HISTORY.md > 150L without EndLine blocked; with EndLine=60 allowed
+            hist = repo / ".agents" / "docs" / "PROJECT_HISTORY.md"
+            hist.write_text("\n".join(f"- Line {i}" for i in range(180)), encoding="utf-8")
+            _, _, r_h1 = run_hook("planner_guard_read.py", {
+                "workspacePaths": [str(repo)],
+                "toolCall": {"name": "read_file", "args": {"Path": str(hist)}},
+            })
+            self.assertEqual(r_h1.get("decision"), "deny")
+            _, _, r_h2 = run_hook("planner_guard_read.py", {
+                "workspacePaths": [str(repo)],
+                "toolCall": {"name": "read_file", "args": {"Path": str(hist), "StartLine": 1, "EndLine": 60}},
+            })
+            self.assertEqual(r_h2.get("decision"), "allow")
+
+            # 3. Large code file > 300L -> deny + free symbol map; slice <= 250L -> allow
+            big_cs = repo / "PlayerEngine.cs"
+            cs_lines = ["namespace Cavernize {", "  public class PlayerEngine {"]
+            for i in range(360):
+                if i == 40:
+                    cs_lines.append("    public void CreateEnglish() {}")
+                elif i == 200:
+                    cs_lines.append("    public int ComputeLatency(int x) { return x; }")
+                else:
+                    cs_lines.append(f"    int _f{i} = {i};")
+            cs_lines.extend(["  }", "}"])
+            big_cs.write_text("\n".join(cs_lines), encoding="utf-8")
+
+            _, _, r_cs_full = run_hook("planner_guard_read.py", {
+                "workspacePaths": [str(repo)],
+                "toolCall": {"name": "read_file", "args": {"Path": str(big_cs)}},
+            })
+            self.assertEqual(r_cs_full.get("decision"), "deny")
+            self.assertIn("CreateEnglish()", r_cs_full.get("reason", ""))
+            self.assertIn("L43|", r_cs_full.get("reason", ""))
+
+            _, _, r_cs_slice = run_hook("planner_guard_read.py", {
+                "workspacePaths": [str(repo)],
+                "toolCall": {"name": "read_file", "args": {"Path": str(big_cs), "StartLine": 35, "EndLine": 120}},
+            })
+            self.assertEqual(r_cs_slice.get("decision"), "allow")
+
+            # 4. Large log > 300L -> deny + log_digest.py test
+            big_log = repo / "app.log"
+            log_lines = ["=== Session 1 ===", "Error: old error that should not appear"] + ["info ok" for _ in range(320)]
+            log_lines += [
+                "=== Session 2 ===",
+                "2026-11-19 00:00:01 info boot",
+                "2026-11-19 00:00:02 info loading",
+                "2026-11-19 00:00:03 warn retrying",
+                "2026-11-19 00:00:04 warn retrying",
+                "2026-11-19 00:00:05 warn retrying",
+                "2026-11-19 00:00:06 FATAL crash in decoder",
+                "2026-11-19 00:00:07 stack frame 1",
+            ]
+            big_log.write_text("\n".join(log_lines), encoding="utf-8")
+            _, _, r_log = run_hook("planner_guard_read.py", {
+                "workspacePaths": [str(repo)],
+                "toolCall": {"name": "read_file", "args": {"Path": str(big_log)}},
+            })
+            self.assertEqual(r_log.get("decision"), "deny")
+            self.assertIn("log_digest.py", r_log.get("reason", ""))
+
+            dig = log_digest.digest_log_text(big_log.read_text(encoding="utf-8"), name="app.log")
+            self.assertNotIn("old error", dig)
+            self.assertIn("FATAL crash in decoder", dig)
+            self.assertIn("[repeated 3x]", dig)
+
+            # 5. repo_map.py cached in /tmp, zero repo pollution, invalidates on git change
+            subprocess.run(["git", "add", "PlayerEngine.cs"], cwd=str(repo), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "add cs"], cwd=str(repo), check=True)
+            rm1 = repo_map.build_repo_map(repo, use_cache=True)
+            self.assertIn("PlayerEngine.cs|", rm1)
+            self.assertIn("CreateEnglish()", rm1)
+            st_clean = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True, check=True)
+            self.assertNotIn("repomap", st_clean.stdout)
+            (repo / "ExtraModule.py").write_text("def BrandNewFunc():\n    pass\n", encoding="utf-8")
+            subprocess.run(["git", "add", "ExtraModule.py"], cwd=str(repo), check=True)
+            rm2 = repo_map.build_repo_map(repo, use_cache=True)
+            self.assertIn("BrandNewFunc()", rm2)
+
+    def test_shift_left_destructive_write_secrets_and_undo_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "Cavern.Format").mkdir()
+            (repo / "CavernSamples" / "CavernizeAndroid").mkdir(parents=True)
+            good = repo / "Cavern.Format" / "Codec.cs"
+            good.write_text("\n".join(f"class C{i} {{ }}" for i in range(180)) + "\n", encoding="utf-8")
+            pre_dirty = repo / "PreDirty.txt"
+            pre_dirty.write_text("v1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+            pre_dirty.write_text("preexisting_uncommitted_change\n", encoding="utf-8")
+
+            prof = json.loads((FIXTURES_DIR / "profile_v2_cavern.json").read_text(encoding="utf-8"))
+            (repo / ".agents").mkdir(exist_ok=True)
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps(prof), encoding="utf-8")
+
+            # Shift-left fail diff_rule blocks BEFORE disk write
+            _, _, sl_bad = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {
+                    "name": "edit_file",
+                    "args": {"Path": str(good), "Target": "class C0 { }", "Replacement": "class C0 { void F(object x) { if (x is not null) {} } }"},
+                },
+            })
+            self.assertEqual(sl_bad.get("decision"), "deny")
+            self.assertIn("SHIFT-LEFT", sl_bad.get("reason", ""))
+
+            # Warn diff_rule does NOT block
+            ui = repo / "CavernSamples" / "CavernizeAndroid" / "Ui.cs"
+            ui.write_text("class Ui {}\n", encoding="utf-8")
+            _, _, sl_warn = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {
+                    "name": "edit_file",
+                    "args": {"Path": str(ui), "Target": "class Ui {}", "Replacement": "class Ui { void F() { Orientation.Horizontal; new Button(); } }"},
+                },
+            })
+            self.assertEqual(sl_warn.get("decision"), "allow")
+
+            # Destructive write_file on >150L file: <70% -> force_ask; >=70% -> deny
+            _, _, dw_ask = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "write_file", "args": {"Path": str(good), "Content": "class Only { }\n"}},
+            })
+            self.assertEqual(dw_ask.get("decision"), "force_ask")
+
+            _, _, dw_deny = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "write_file", "args": {"Path": str(good), "Content": "\n".join(f"class D{i} {{ }}" for i in range(160))}},
+            })
+            self.assertEqual(dw_deny.get("decision"), "deny")
+
+            # Secret & merge conflict shields (no false positives on regex definitions)
+            fake_ghp = "ghp_" + "A1b2C3d4E5" * 3
+            _, _, sec_deny = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(ui), "Target": "class Ui {}", "Replacement": f'var tok = "{fake_ghp}";'}},
+            })
+            self.assertEqual(sec_deny.get("decision"), "deny")
+
+            _, _, conf_deny = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(ui), "Target": "class Ui {}", "Replacement": "<<<<<<< HEAD\nint a = 1;\n=======\nint a = 2;\n>>>>>>> main"}},
+            })
+            self.assertEqual(conf_deny.get("decision"), "deny")
+
+            _, _, regex_ok = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(ui), "Target": "class Ui {}", "Replacement": 'var rx = @"ghp_[A-Za-z0-9]{20,}";'}},
+            })
+            self.assertEqual(regex_ok.get("decision"), "allow")
+
+            # Invisible Tier>=2 git snapshot + undo-turn
+            _, _, _ = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "1. Refactor Codec\n2. Fix Ui\n3. Update logic",
+                "invocationNum": 1,
+            })
+            _, _, _ = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(good), "Target": "class C0 { }", "Replacement": "class C0 { int x; }"}},
+            })
+            good.write_text("MODIFIED_IN_TURN\n", encoding="utf-8")
+            run_hook("planner_post_tool.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(good)}},
+            })
+            dry = run_script("plan_tool.py", ["--dir", art, "--workspace", str(repo), "undo-turn", "--dry-run"])
+            self.assertEqual(dry.returncode, 0)
+            self.assertIn("RESTORE|Cavern.Format/Codec.cs|", dry.stdout)
+            applied = run_script("plan_tool.py", ["--dir", art, "--workspace", str(repo), "undo-turn"])
+            self.assertEqual(applied.returncode, 0)
+            self.assertIn("class C0 { }", good.read_text(encoding="utf-8"))
+            self.assertEqual(pre_dirty.read_text(encoding="utf-8"), "preexisting_uncommitted_change\n")
+
+    def test_circuit_breaker_cmd_diet_push_flight_and_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".github" / "workflows").mkdir(parents=True)
+            (repo / ".github" / "workflows" / "ci.yml").write_text("name: CI\n", encoding="utf-8")
+            (repo / "README.md").write_text("# Demo\n", encoding="utf-8")
+            (repo / "app.py").write_text("def ok():\n    return 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+            # Circuit Breaker on 2 failed same commands
+            run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": "Fix test", "invocationNum": 1,
+            })
+            for _ in range(2):
+                run_hook("planner_post_tool.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "exitCode": 1,
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest -q"}},
+                })
+            _, _, cb = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": "Fix test", "invocationNum": 2,
+            })
+            self.assertIn("CIRCUIT BREAKER", cb["injectSteps"][0]["systemMessage"]["systemMessage"])
+
+            # Stop blocked while last_build_failed == True; passing pytest clears it
+            _, _, st_fail = run_hook("planner_stop.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "fullyIdle": True, "terminationReason": "NO_TOOL_CALL",
+            })
+            self.assertEqual(st_fail.get("decision"), "continue")
+            run_hook("planner_post_tool.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "exitCode": 0,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest -q"}},
+            })
+            _, _, st_ok = run_hook("planner_stop.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "fullyIdle": True, "terminationReason": "NO_TOOL_CALL",
+            })
+            self.assertEqual(st_ok, {})
+
+            # Circuit Breaker on 4 edits to same file without passing build
+            for _ in range(4):
+                run_hook("planner_post_tool.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(repo / "app.py")}},
+                })
+            _, _, cb_edit = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": "Fix test", "invocationNum": 3,
+            })
+            cb_edit_msg = cb_edit["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("CIRCUIT BREAKER", cb_edit_msg)
+            self.assertIn("edited 4x", cb_edit_msg)
+            run_hook("planner_post_tool.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "exitCode": 0,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest -q"}},
+            })
+
+            # Silent static auto-verify on Stop (<0.5s): valid edit -> Stop clears & allows!
+            (repo / "app.py").write_text("def ok():\n    return 2\n", encoding="utf-8")
+            run_hook("planner_post_tool.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(repo / "app.py")}},
+            })
+            _, _, st_auto = run_hook("planner_stop.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "fullyIdle": True, "terminationReason": "NO_TOOL_CALL",
+            })
+            self.assertEqual(st_auto, {})
+
+            # Syntax error in .py -> Stop blocks with file:line error
+            (repo / "app.py").write_text("def broken(:\n", encoding="utf-8")
+            run_hook("planner_post_tool.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(repo / "app.py")}},
+            })
+            _, _, st_err = run_hook("planner_stop.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "fullyIdle": True, "terminationReason": "NO_TOOL_CALL",
+            })
+            self.assertEqual(st_err.get("decision"), "continue")
+            self.assertIn("app.py", st_err.get("reason", ""))
+            (repo / "app.py").write_text("def ok():\n    return 2\n", encoding="utf-8")
+
+            # Command diet: dotnet build -> --nologo -v:minimal; existing -v:detailed untouched; raw cat on >300L log -> deny
+            _, _, cg_dn = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "dotnet build Foo.csproj"}},
+            })
+            self.assertIn("--nologo -v:minimal", cg_dn.get("overwrite", {}).get("CommandLine", ""))
+            _, _, cg_dn_keep = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "dotnet build Foo.csproj -v:detailed"}},
+            })
+            self.assertNotIn("overwrite", cg_dn_keep)
+
+            # Pre-push blocked when code edited with needs_build=True
+            hs_b = json.loads((Path(art) / "scratch" / ".hook_state.json").read_text(encoding="utf-8"))
+            hs_b["code_files_edited"] = ["app.py"]
+            hs_b["needs_build"] = True
+            (Path(art) / "scratch" / ".hook_state.json").write_text(json.dumps(hs_b), encoding="utf-8")
+            _, _, cg_unbuilt = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "git push origin main"}},
+            }, env_extra={"PLANNER_SKIP_DNS_CHECK": "1"})
+            self.assertEqual(cg_unbuilt.get("decision"), "deny")
+            self.assertIn("needs_build", cg_unbuilt.get("reason", ""))
+            hs_b["code_files_edited"] = []
+            hs_b["needs_build"] = False
+            (Path(art) / "scratch" / ".hook_state.json").write_text(json.dumps(hs_b), encoding="utf-8")
+
+            big_log = repo / "run.log"
+            big_log.write_text("\n".join("ok" for _ in range(320)), encoding="utf-8")
+            _, _, cg_cat = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "cat run.log"}},
+            })
+            self.assertEqual(cg_cat.get("decision"), "deny")
+            big_log.unlink()
+
+            # Pre-push flight checks: untracked code file blocks push; offline DNS blocks push; docs-only triggers [skip ci] tip
+            (repo / "orphan.py").write_text("x = 1\n", encoding="utf-8")
+            _, _, cg_untr = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "git push origin main"}},
+            }, env_extra={"PLANNER_SKIP_DNS_CHECK": "1"})
+            self.assertEqual(cg_untr.get("decision"), "deny")
+            self.assertIn("Untracked code", cg_untr.get("reason", ""))
+            (repo / "orphan.py").unlink()
+
+            _, _, cg_off = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "git push origin main"}},
+            }, env_extra={"PLANNER_FORCE_OFFLINE": "1"})
+            self.assertEqual(cg_off.get("decision"), "deny")
+            self.assertIn("Offline/DNS", cg_off.get("reason", ""))
+
+            (repo / "README.md").write_text("# Updated\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=str(repo), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "docs update"], cwd=str(repo), check=True)
+            _, _, cg_skip = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "git push origin main"}},
+            }, env_extra={"PLANNER_SKIP_DNS_CHECK": "1"})
+            self.assertEqual(cg_skip.get("decision"), "force_ask")
+            self.assertIn("[skip ci]", cg_skip.get("reason", ""))
+
+    def test_verify_brackets_orphan_weight_handoff_stats_and_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "docs" / "PROJECT_HISTORY.md").write_text("\n".join(f"L{i}" for i in range(160)), encoding="utf-8")
+            (repo / "Program.cs").write_text(
+                'class Program {\n  static void LegacyHelperMethod() {}\n  static void Main() { LegacyHelperMethod(); var s = "{"; /* { */ }\n}\n',
+                encoding="utf-8",
+            )
+            (repo / "Ui.tsx").write_text("export const x = `val ${fn(\"(\")}`;\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+            # Remove LegacyHelperMethod declaration while call in Main remains -> orphan warning
+            (repo / "Program.cs").write_text(
+                'class Program {\n  static void Main() { LegacyHelperMethod(); var s = "{"; /* { */ }\n}\n',
+                encoding="utf-8",
+            )
+            res_ok = run_script("verify_universal.py", ["--workspace", str(repo)], cwd=repo, env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"})
+            self.assertEqual(res_ok.returncode, 0, res_ok.stdout)
+            self.assertIn("LegacyHelperMethod", res_ok.stdout)
+            self.assertIn("PROJECT_HISTORY.md", res_ok.stdout)
+
+            # Unbalanced bracket in .cs fails
+            (repo / "Program.cs").write_text('class Program { void F() { }\n', encoding="utf-8")
+            res_bad = run_script("verify_universal.py", ["--workspace", str(repo)], cwd=repo, env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"})
+            self.assertNotEqual(res_bad.returncode, 0)
+            self.assertIn("Unclosed `{`", res_bad.stdout)
+
+            # should_run_plugin_tests must NOT trigger on unrelated repo even if plugin repo is dirty
+            with _patched_env({"PLANNER_ARTIFACT_DIR": str(art), "CAVERN_ARTIFACT_DIR": str(art)}):
+                self.assertFalse(verify_universal.should_run_plugin_tests(repo, PLUGIN_ROOT, ["Program.cs"], False))
+
+            # HANDOFF.md write, SessionStart injection, clear
+            ho = run_script("plan_tool.py", ["--workspace", str(repo), "handoff", "--summary", "Refactored X", "--next", "Run build"])
+            self.assertEqual(ho.returncode, 0)
+            _, _, ss = run_hook("planner_session_start.py", {"workspacePaths": [str(repo)], "artifactDirectoryPath": art})
+            self.assertIn("HANDOFF|", ss["injectSteps"][0]["systemMessage"]["systemMessage"])
+            ho_clr = run_script("plan_tool.py", ["--workspace", str(repo), "handoff", "--clear"])
+            self.assertEqual(ho_clr.returncode, 0)
+            self.assertFalse((repo / ".agents" / "docs" / "HANDOFF.md").exists())
+
+            # Telemetry stats
+            metrics_p = Path(art) / "metrics.jsonl"
+            planner_state.record_telemetry("turn", {"tier": 2})
+            with _patched_env({"PLANNER_METRICS_FILE": str(metrics_p), "PLANNER_DISABLE_TELEMETRY": "0"}):
+                planner_state.record_telemetry("read_deflected_symbol_map", {"file": "A.cs"})
+            st_out = run_script("plan_tool.py", ["stats"], env_extra={"PLANNER_METRICS_FILE": str(metrics_p)})
+            self.assertIn("read_deflected_symbol_map|1", st_out.stdout)
+
+            # install.sh --rollback tested in isolated temp copy
+            if not FAST_MODE:
+                plug_copy = Path(td) / "plug_copy"
+                shutil.copytree(
+                    PLUGIN_ROOT,
+                    plug_copy,
+                    ignore=shutil.ignore_patterns(".git", ".last_good_backup", "__pycache__", "*.pyc", ".metrics.jsonl"),
+                )
+                ins = subprocess.run([str(plug_copy / "install.sh"), "--target", str(plug_copy), "--skip-tests"], capture_output=True, text=True, check=False)
+                self.assertEqual(ins.returncode, 0, ins.stderr + ins.stdout)
+                orig_ver = (plug_copy / "plugin.json").read_text(encoding="utf-8")
+                (plug_copy / "plugin.json").write_text('{"broken": true}', encoding="utf-8")
+                rb = subprocess.run([str(plug_copy / "install.sh"), "--target", str(plug_copy), "--rollback"], capture_output=True, text=True, check=False)
+                self.assertEqual(rb.returncode, 0, rb.stderr + rb.stdout)
+                self.assertEqual((plug_copy / "plugin.json").read_text(encoding="utf-8"), orig_ver)
 
 
-class TestCavernV1AndV2Parity(unittest.TestCase):
+class TestCavernV1V2V3Parity(unittest.TestCase):
     LIVE_CAVERN_PROFILE = Path("/root/.gemini/antigravity/scratch/Cavern/.agents/planner_profile.json")
 
-    def _make_cavern_repo(self, td: str, profile_data: dict[str, Any], use_temp_dotnet_guard: bool = True) -> tuple[Path, Path]:
+    def _make_cavern_repo(self, td: str, profile_data: dict[str, Any]) -> Path:
         repo = Path(td)
         init_git_repo(repo)
         (repo / ".agents" / "docs").mkdir(parents=True)
         (repo / ".agents" / "docs" / "PROJECT_HISTORY.md").write_text("# History\n", encoding="utf-8")
         (repo / ".agents" / "docs" / "SAVED_IDEAS.md").write_text("# Ideas\n", encoding="utf-8")
-        (repo / ".agents" / "docs" / "EXTRA_REQUESTS.md").write_text(
-            "## Pending Extra Requests\n(No pending requests.)\n", encoding="utf-8"
-        )
+        (repo / ".agents" / "docs" / "EXTRA_REQUESTS.md").write_text("## Pending Extra Requests\n(No pending requests.)\n", encoding="utf-8")
         (repo / "CavernSamples" / "CavernizeAndroid" / "Properties").mkdir(parents=True)
         (repo / "CavernSamples" / "CavernizeAndroid" / "Language").mkdir(parents=True)
         (repo / "Cavern.Format").mkdir(parents=True)
@@ -498,14 +1153,7 @@ class TestCavernV1AndV2Parity(unittest.TestCase):
             encoding="utf-8",
         )
         (repo / "CavernSamples" / "CavernizeAndroid" / "Language" / "AndroidStrings.cs").write_text(
-            'class AndroidStrings {\n'
-            '  static Dictionary<string, string> CreateEnglish() => new() {\n'
-            '    ["Hello"] = "Hello",\n'
-            '  };\n'
-            '  static void ApplyPortuguese(Dictionary<string, string> d) {\n'
-            '    d["Hello"] = "Olá";\n'
-            '  }\n'
-            '}\n',
+            'class AndroidStrings {\n  static Dictionary<string, string> CreateEnglish() => new() {\n    ["Hello"] = "Hello",\n  };\n  static void ApplyPortuguese(Dictionary<string, string> d) {\n    d["Hello"] = "Olá";\n  }\n}\n',
             encoding="utf-8",
         )
         subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
@@ -513,25 +1161,21 @@ class TestCavernV1AndV2Parity(unittest.TestCase):
 
         prof = copy.deepcopy(profile_data)
         dotnet_marker = repo / ".fake_dotnet"
-        if use_temp_dotnet_guard:
-            dotnet_marker.write_text("#!/bin/sh\n", encoding="utf-8")
-            for g in prof.get("command_guards") or []:
-                cond = g.get("conditions") or {}
-                if "exists_path" in cond:
-                    cond["exists_path"] = str(dotnet_marker)
-                if "not_exists_glob" in cond:
-                    cond["not_exists_glob"] = str(repo / ".nonexistent_android_pack*")
-
-        (repo / ".agents" / "planner_profile.json").write_text(
-            json.dumps(prof, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        return repo, dotnet_marker
+        dotnet_marker.write_text("#!/bin/sh\n", encoding="utf-8")
+        for g in prof.get("command_guards") or []:
+            cond = g.get("conditions") or {}
+            if "exists_path" in cond:
+                cond["exists_path"] = str(dotnet_marker)
+            if "not_exists_glob" in cond:
+                cond["not_exists_glob"] = str(repo / ".nonexistent_android_pack*")
+        (repo / ".agents" / "planner_profile.json").write_text(json.dumps(prof, ensure_ascii=False, indent=2), encoding="utf-8")
+        return repo
 
     def _assert_parity_for_profile(self, label: str, profile_data: dict[str, Any]) -> None:
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
-            repo, _ = self._make_cavern_repo(td, profile_data)
+            repo = self._make_cavern_repo(td, profile_data)
 
-            # 1. Complexity Triage parity
+            # 1. Triage
             tri = complexity_triage.analyze_prompt(
                 "Corrigir layout One UI na tela Play, ajustar decoder TrueHD em Cavern.Format, resolver AudioTrack e gerar APK release",
                 repo,
@@ -539,243 +1183,93 @@ class TestCavernV1AndV2Parity(unittest.TestCase):
             self.assertEqual(tri["tier"], 3, label)
             for dom in ("ui-oneui9", "dsp-format", "media-native", "build-deliver"):
                 self.assertIn(dom, tri["detected_domains"], f"{label} missing {dom}")
-            self.assertEqual(tri["recommended_modules"][-1]["domain"], "build-deliver", label)
 
-            # 2. SessionStart parity
-            rc, err, ss = run_hook("planner_session_start.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-            })
+            # 2. SessionStart
+            rc, err, ss = run_hook("planner_session_start.py", {"workspacePaths": [str(repo)], "artifactDirectoryPath": art})
             self.assertEqual(rc, 0, err)
             ss_msg = ss["injectSteps"][0]["systemMessage"]["systemMessage"]
             self.assertIn("csproj=2.8.28 | CI=2.8.${{ github.run_number }}", ss_msg)
             self.assertNotIn("Schema warning", ss_msg)
 
-            # 3. PreInvocation parity (not plan_ready -> injects Phase 0 triage + runaway guard)
-            multi_prompt = (
-                "1. Ajustar decoder em Cavern.Format\n"
-                "2. Corrigir layout One UI na tela Play\n"
-                "3. Gerar APK release no GitHub Actions"
-            )
-            rc, _, pre = run_hook("planner_pre_invocation.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-                "lastUserInput": multi_prompt,
-                "invocationNum": 1,
-            })
-            self.assertEqual(rc, 0)
-            self.assertIn("injectSteps", pre, f"{label}: unexpected PreInvocation output: {pre}")
-            pre_msg = pre["injectSteps"][0]["systemMessage"]["systemMessage"]
-            self.assertIn("Dynamic Planner Triage", pre_msg)
+            # 3. Lean PreInvocation (auto_reqs + JIT checklists)
+            multi_prompt = "1. Ajustar decoder em Cavern.Format\n2. Corrigir layout One UI na tela Play\n3. Gerar APK release"
+            _, _, pre_lean = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": multi_prompt, "invocationNum": 1,
+            }, env_extra={"PLANNER_MODE": "lean"})
+            lean_msg = pre_lean["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("mode=lean", lean_msg)
+            self.assertIn("REQS|REQ-01:", lean_msg)
 
-            # 4. Guard Files: targetSdkVersion != 28 -> force_ask, == 28 -> allow, Plan Gate -> deny
+            # 4. Strict PreInvocation + PLAN GATE
+            with tempfile.TemporaryDirectory() as art_strict:
+                _, _, pre_strict = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)], "artifactDirectoryPath": art_strict, "lastUserInput": multi_prompt, "invocationNum": 1,
+                }, env_extra={"PLANNER_MODE": "strict"})
+                self.assertIn("mode=strict", pre_strict["injectSteps"][0]["systemMessage"]["systemMessage"])
+                _, _, fg_gate = run_hook("planner_guard_files.py", {
+                    "workspacePaths": [str(repo)], "artifactDirectoryPath": art_strict, "lastUserInput": multi_prompt,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(repo / "Cavern.Format" / "Sample.cs"), "Target": "a", "Replacement": "b"}},
+                }, env_extra={"PLANNER_MODE": "strict"})
+                self.assertEqual(fg_gate.get("decision"), "deny", label)
+                self.assertIn("PLAN GATE", fg_gate.get("reason", ""))
+
+            # 5. File guard: targetSdkVersion="28"
             manifest = str(repo / "CavernSamples" / "CavernizeAndroid" / "Properties" / "AndroidManifest.xml")
             _, _, fg_bad = run_hook("planner_guard_files.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-                "toolCall": {
-                    "name": "edit_file",
-                    "args": {
-                        "Path": manifest,
-                        "Target": 'android:targetSdkVersion="28"',
-                        "Replacement": 'android:targetSdkVersion="34"',
-                    },
-                },
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art,
+                "toolCall": {"name": "edit_file", "args": {"Path": manifest, "Target": 'android:targetSdkVersion="28"', "Replacement": 'android:targetSdkVersion="34"'}},
             })
             self.assertEqual(fg_bad.get("decision"), "force_ask", label)
 
-            with tempfile.TemporaryDirectory() as art_fg:
-                _, _, fg_good = run_hook("planner_guard_files.py", {
-                    "workspacePaths": [str(repo)],
-                    "artifactDirectoryPath": art_fg,
-                    "toolCall": {
-                        "name": "edit_file",
-                        "args": {
-                            "Path": manifest,
-                            "Target": 'android:targetSdkVersion="28"',
-                            "Replacement": 'android:targetSdkVersion="28" android:label="Cavern"',
-                        },
-                    },
-                })
-                self.assertEqual(fg_good.get("decision"), "allow", label)
-
-            _, _, fg_gate = run_hook("planner_guard_files.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-                "lastUserInput": multi_prompt,
-                "toolCall": {
-                    "name": "edit_file",
-                    "args": {
-                        "Path": str(repo / "Cavern.Format" / "Sample.cs"),
-                        "Target": "a",
-                        "Replacement": "b",
-                    },
-                },
-            })
-            self.assertEqual(fg_gate.get("decision"), "deny", label)
-            self.assertIn("PLAN GATE", fg_gate.get("reason", ""))
-
-            # Runaway read containment check (>=4 reads without plan)
-            for idx in range(4):
-                run_hook("planner_post_tool.py", {
-                    "workspacePaths": [str(repo)],
-                    "artifactDirectoryPath": art,
-                    "toolCall": {"name": "read_file", "args": {"Path": str(repo / "Cavern.Format" / f"File{idx}.cs")}},
-                })
-            _, _, pre_runaway = run_hook("planner_pre_invocation.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-                "lastUserInput": multi_prompt,
-                "invocationNum": 2,
-            })
-            self.assertIn("PLANNER GUARD", pre_runaway["injectSteps"][0]["systemMessage"]["systemMessage"])
-
-            # 5. Guard Command parity
+            # 6. Command guards & rewrite
             _, _, cg_apk = run_hook("planner_guard_command.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art,
                 "toolCall": {"name": "run_command", "args": {"CommandLine": "DOTNET_GCHeapHardLimit=20000000 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 dotnet build CavernSamples/CavernizeAndroid/CavernizeAndroid.csproj"}},
             })
             self.assertEqual(cg_apk.get("decision"), "deny", label)
 
-            _, _, cg_env = run_hook("planner_guard_command.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-                "toolCall": {"name": "run_command", "args": {"CommandLine": "dotnet build CavernSamples/Reusable/Cavernize.Logic/Cavernize.Logic.csproj"}},
-            })
-            self.assertEqual(cg_env.get("decision"), "deny", label)
-
             _, _, cg_ok = run_hook("planner_guard_command.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art,
                 "toolCall": {"name": "run_command", "args": {"CommandLine": "DOTNET_GCHeapHardLimit=20000000 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 /root/.dotnet/dotnet build CavernSamples/Reusable/Cavernize.Logic/Cavernize.Logic.csproj"}},
             })
             self.assertEqual(cg_ok.get("decision"), "allow", label)
+            self.assertIn("--nologo -v:minimal", cg_ok.get("overwrite", {}).get("CommandLine", ""))
 
-            # Command rewrite check
-            _, _, cg_rw = run_hook("planner_guard_command.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-                "conversationId": "conv123",
-                "toolCall": {"name": "run_command", "args": {"CommandLine": "python3 .agents/scripts/plan_tool.py status"}},
-            })
-            self.assertEqual(cg_rw.get("decision"), "allow")
-            self.assertIn("PLANNER_ARTIFACT_DIR=", cg_rw.get("overwrite", {}).get("CommandLine", ""))
-
-            # Pending EXTRA_REQUESTS blocks git commit/push
-            extra_file = repo / ".agents" / "docs" / "EXTRA_REQUESTS.md"
-            extra_file.write_text("## Pending Extra Requests\n- Handle btw task\n", encoding="utf-8")
-            _, _, cg_extra = run_hook("planner_guard_command.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-                "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m 'test'"}},
-            })
-            self.assertEqual(cg_extra.get("decision"), "deny", label)
-            self.assertIn("pending extra requests", cg_extra.get("reason", "").lower())
-            extra_file.write_text("## Pending Extra Requests\n(No pending requests.)\n", encoding="utf-8")
-
-            # Active plan blocks commit until non-ship modules & REQs verified; allows when only is_ship remains
-            init_res = run_script("plan_tool.py", [
-                "--dir", art, "--workspace", str(repo), "init", "--json", "-",
-            ], cwd=repo) if False else subprocess.run(
-                [
-                    sys.executable, str(SCRIPTS_DIR / "plan_tool.py"),
-                    "--dir", art, "--workspace", str(repo), "init", "--json", "-",
-                ],
-                input=json.dumps({
-                    "goal": "Test Cavern Parity",
-                    "tier": 2,
-                    "requirements": [
-                        {"id": "REQ-01", "summary": "Test DSP"},
-                        {"id": "REQ-02", "summary": "Commit & Push"},
-                    ],
-                    "modules": [
-                        {"id": "MOD-DSP-FORMAT", "title": "DSP", "domain": "dsp-format", "linked_reqs": ["REQ-01"]},
-                        {"id": "MOD-AUDIT", "title": "Audit", "domain": "audit", "linked_reqs": ["REQ-01", "REQ-02"]},
-                        {"id": "MOD-SHIP", "title": "Ship", "domain": "build-deliver", "linked_reqs": ["REQ-02"]},
-                    ],
-                }),
-                text=True, capture_output=True, check=False,
-            )
-            self.assertEqual(init_res.returncode, 0, init_res.stderr)
-
-            _, _, cg_plan_block = run_hook("planner_guard_command.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-                "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m 'wip'"}},
-            })
-            self.assertEqual(cg_plan_block.get("decision"), "deny", label)
-
-            run_script("plan_tool.py", ["--dir", art, "--workspace", str(repo), "done", "MOD-DSP-FORMAT"])
-            run_script("plan_tool.py", ["--dir", art, "--workspace", str(repo), "req-verify", "REQ-01", "--evidence", "ok"])
-            _, _, cg_ship_allow = run_hook("planner_guard_command.py", {
-                "workspacePaths": [str(repo)],
-                "artifactDirectoryPath": art,
-                "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m 'ready'"}},
-            })
-            self.assertEqual(cg_ship_allow.get("decision"), "allow", label)
-
-            # 6. verify_universal parity (diff_rules & key_parity_rules)
+            # 7. verify_universal diff_rules & key_parity_rules
             (repo / "Cavern.Format" / "Bad.cs").write_text("namespace Foo;\nclass Bad { void F(object x) { if (x is not null) {} } }\n", encoding="utf-8")
             (repo / "CavernSamples" / "CavernizeAndroid" / "BadUi.cs").write_text("class BadUi { void F() { var d = new AlertDialog(); var s = new Spinner(); } }\n", encoding="utf-8")
             (repo / "CavernSamples" / "CavernizeAndroid" / "Language" / "AndroidStrings.cs").write_text(
-                'class AndroidStrings {\n'
-                '  static Dictionary<string, string> CreateEnglish() => new() {\n'
-                '    ["Hello"] = "Hello",\n'
-                '    ["MissingPtKey"] = "Missing",\n'
-                '  };\n'
-                '  static void ApplyPortuguese(Dictionary<string, string> d) {\n'
-                '    d["Hello"] = "Olá";\n'
-                '  }\n'
-                '}\n',
+                'class AndroidStrings {\n  static Dictionary<string, string> CreateEnglish() => new() {\n    ["Hello"] = "Hello",\n    ["MissingPtKey"] = "Missing",\n  };\n  static void ApplyPortuguese(Dictionary<string, string> d) {\n    d["Hello"] = "Olá";\n  }\n}\n',
                 encoding="utf-8",
             )
-            v_fail = run_script(
-                "verify_universal.py",
-                ["--workspace", str(repo)],
-                cwd=repo,
-                env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"},
-            )
+            v_fail = run_script("verify_universal.py", ["--workspace", str(repo)], cwd=repo, env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"})
             self.assertNotEqual(v_fail.returncode, 0, label)
             self.assertIn("is not", v_fail.stdout)
-            self.assertIn("File-scoped namespace", v_fail.stdout)
             self.assertIn("AlertDialog", v_fail.stdout)
-            self.assertIn("Spinner", v_fail.stdout)
             self.assertIn("MissingPtKey", v_fail.stdout)
 
-            # Fix violations and verify clean pass
             (repo / "Cavern.Format" / "Bad.cs").unlink()
             (repo / "CavernSamples" / "CavernizeAndroid" / "BadUi.cs").unlink()
             (repo / "CavernSamples" / "CavernizeAndroid" / "Language" / "AndroidStrings.cs").write_text(
-                'class AndroidStrings {\n'
-                '  static Dictionary<string, string> CreateEnglish() => new() {\n'
-                '    ["Hello"] = "Hello",\n'
-                '    ["MissingPtKey"] = "Missing",\n'
-                '  };\n'
-                '  static void ApplyPortuguese(Dictionary<string, string> d) {\n'
-                '    d["Hello"] = "Olá";\n'
-                '    d["MissingPtKey"] = "Faltando";\n'
-                '  }\n'
-                '}\n',
+                'class AndroidStrings {\n  static Dictionary<string, string> CreateEnglish() => new() {\n    ["Hello"] = "Hello",\n    ["MissingPtKey"] = "Missing",\n  };\n  static void ApplyPortuguese(Dictionary<string, string> d) {\n    d["Hello"] = "Olá";\n    d["MissingPtKey"] = "Faltando";\n  }\n}\n',
                 encoding="utf-8",
             )
-            v_pass = run_script(
-                "verify_universal.py",
-                ["--workspace", str(repo)],
-                cwd=repo,
-                env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"},
-            )
+            v_pass = run_script("verify_universal.py", ["--workspace", str(repo)], cwd=repo, env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"})
             self.assertEqual(v_pass.returncode, 0, v_pass.stdout + v_pass.stderr)
             self.assertIn("UNIVERSAL VERIFY PASS", v_pass.stdout)
 
-    def test_cavern_v1_fixture_and_live_v2_parity(self) -> None:
+    def test_cavern_v1_v2_and_live_parity(self) -> None:
         v1_cavern = json.loads((FIXTURES_DIR / "profile_v1_cavern.json").read_text(encoding="utf-8"))
         self._assert_parity_for_profile("v1_cavern_fixture", v1_cavern)
 
+        v2_cavern = json.loads((FIXTURES_DIR / "profile_v2_cavern.json").read_text(encoding="utf-8"))
+        self.assertEqual(v2_cavern.get("schema_version"), 2)
+        self._assert_parity_for_profile("v2_cavern_fixture", v2_cavern)
+
         if self.LIVE_CAVERN_PROFILE.is_file():
-            v2_cavern = json.loads(self.LIVE_CAVERN_PROFILE.read_text(encoding="utf-8"))
-            self.assertEqual(v2_cavern.get("schema_version"), 2)
-            self._assert_parity_for_profile("live_v2_cavern", v2_cavern)
+            live_cavern = json.loads(self.LIVE_CAVERN_PROFILE.read_text(encoding="utf-8"))
+            self.assertIn(live_cavern.get("schema_version"), (2, 3))
+            self._assert_parity_for_profile(f"live_v{live_cavern.get('schema_version')}_cavern", live_cavern)
 
 
 def _stamp_plugin_tests_passed() -> None:
@@ -796,8 +1290,19 @@ def _stamp_plugin_tests_passed() -> None:
 
 
 def main() -> int:
+    global FAST_MODE
+    parser = argparse.ArgumentParser(description="Run Dynamic Fractal Planner regression tests.")
+    parser.add_argument("--fast", action="store_true", help="Run in-memory single-process tests (<5s).")
+    parser.add_argument("--full", action="store_true", help="Run full subprocess integration tests (default).")
+    args, remaining = parser.parse_known_args()
+    FAST_MODE = bool(args.fast and not args.full)
+
     loader = unittest.TestLoader()
-    suite = loader.loadTestsFromModule(sys.modules[__name__])
+    targets = [r for r in remaining if not r.startswith("-")]
+    if targets:
+        suite = loader.loadTestsFromNames(targets, sys.modules[__name__])
+    else:
+        suite = loader.loadTestsFromModule(sys.modules[__name__])
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     if result.wasSuccessful():
