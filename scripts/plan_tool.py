@@ -825,6 +825,44 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_model_mode(args: argparse.Namespace, ws_root: Path) -> int:
+    """Inspect, persist, or clear cached `auto` model-mode classifications."""
+    from model_mode_cache import (  # noqa: E402
+        clear_model_mode,
+        list_model_modes,
+        lookup_model_mode,
+        set_model_mode,
+    )
+
+    sub = args.mm_cmd
+    if sub == "set":
+        entry = set_model_mode(args.model, args.mode, why=args.why, source=args.source)
+        print(f"MODEL_MODE_SET|key={entry['key']}|mode={entry['mode']}|src={entry['source']}|why={entry['why']}")
+        return 0
+    if sub == "get":
+        prof = load_project_profile(ws_root)
+        mode, src, key = lookup_model_mode(args.model, profile=prof)
+        print(f"MODEL_MODE|key={key}|mode={mode or 'unseen'}|src={src}")
+        return 0
+    if sub == "list":
+        rows, pending = list_model_modes()
+        print("MODEL|MODE|SRC|WHY")
+        for r in rows:
+            print(f"{r['key']}|{r['mode']}|{r['source']}|{r['why']}")
+        for k in sorted(pending.keys()):
+            p = pending[k] if isinstance(pending[k], dict) else {}
+            print(f"PENDING|{k}|{p.get('status', 'pending')}|next_retry={p.get('next_retry_ts', 0)}")
+        return 0
+    if sub == "clear":
+        if not getattr(args, "all", False) and not (getattr(args, "model", "") or "").strip():
+            print("MODEL_MODE_ERROR|pass <model> or --all", file=sys.stderr)
+            return 1
+        removed = clear_model_mode(getattr(args, "model", ""), clear_all=bool(getattr(args, "all", False)))
+        print(f"MODEL_MODE_CLEARED|removed={removed}")
+        return 0
+    return 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Universal Dynamic Fractal Plan Engine & Project Bootstrapper.")
     parser.add_argument("--dir", default=None, help="Artifact directory override.")
@@ -901,6 +939,20 @@ def main() -> None:
     p_st = sub.add_parser("stats", help="Show or reset local plugin telemetry stats.")
     p_st.add_argument("--reset", action="store_true")
 
+    p_mm = sub.add_parser("model-mode", help="Inspect, persist, or clear cached auto model-mode verdicts.")
+    mm_sub = p_mm.add_subparsers(dest="mm_cmd", required=True)
+    p_mm_set = mm_sub.add_parser("set")
+    p_mm_set.add_argument("model")
+    p_mm_set.add_argument("mode", choices=["lean", "strict"])
+    p_mm_set.add_argument("--why", default="")
+    p_mm_set.add_argument("--source", choices=["ai", "user", "native_plan_tool"], default="ai")
+    p_mm_get = mm_sub.add_parser("get")
+    p_mm_get.add_argument("model")
+    mm_sub.add_parser("list")
+    p_mm_clr = mm_sub.add_parser("clear")
+    p_mm_clr.add_argument("model", nargs="?", default="")
+    p_mm_clr.add_argument("--all", action="store_true")
+
     args = parser.parse_args()
     ws_root = resolve_workspace_root(args.workspace)
     if args.cmd == "triage":
@@ -922,6 +974,8 @@ def main() -> None:
         raise SystemExit(cmd_handoff(args, ws_root))
     if args.cmd == "stats":
         raise SystemExit(cmd_stats(args))
+    if args.cmd == "model-mode":
+        raise SystemExit(cmd_model_mode(args, ws_root))
 
     art_dir = resolve_artifact_dir(args.dir)
     if args.cmd == "init":

@@ -11,7 +11,7 @@
       {
         "type": "command",
         "command": "python3 ./hooks/planner_pre_invocation.py",
-        "timeout": 5
+        "timeout": 8
       }
     ],
     "PreToolUse": [
@@ -44,11 +44,21 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "enter_plan_mode|exit_plan_mode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ./hooks/planner_post_tool.py --pre",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "read_file|view_file|edit_file|write_file|replace_file_content|write_to_file|run_command",
+        "matcher": "read_file|view_file|edit_file|write_file|replace_file_content|write_to_file|run_command|enter_plan_mode|exit_plan_mode",
         "hooks": [
           {
             "type": "command",

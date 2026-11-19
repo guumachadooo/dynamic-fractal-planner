@@ -78,7 +78,7 @@ def migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
     out["schema_version"] = 3
 
     mode = str(out.get("planner_mode") or "").strip().lower()
-    if mode not in ("lean", "strict"):
+    if mode not in ("lean", "strict", "auto"):
         out["planner_mode"] = "lean"
     else:
         out["planner_mode"] = mode

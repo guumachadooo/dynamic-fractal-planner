@@ -147,6 +147,36 @@ SMALL_CONVERSATIONAL = {
     "pode seguir", "yes", "no", "go ahead", "proceed", "tudo bem",
 }
 
+GDK_DOC_KEYWORDS = (
+    "android", "androidmanifest*", "targetsdk*", "mediastore", "mediasession",
+    "audiotrack", "audiomanager", "foreground", "notification*", "saf", "ndk",
+    "selinux", "jetpack", "compose", "kotlin", "gradle", "adb", "avd",
+    "firebase", "firestore", "gcloud", "gcp", "google cloud", "cloud run",
+    "bigquery", "iam", "vertex", "gemini", "adk", "tensorflow", "flutter",
+    "dart", "chrome", "devtools", "webapi", "golang", "material design",
+    "google-developer-knowledge", "developer knowledge",
+)
+
+CONTEXT7_DOC_KEYWORDS = (
+    "react", "next.js", "nextjs", "vue", "nuxt", "svelte", "angular",
+    "tailwind", "prisma", "drizzle", "supabase", "express", "fastify",
+    "nestjs", "zod", "typescript", "vite", "webpack", "playwright",
+    "vitest", "jest", "pytest", "fastapi", "django", "flask", "sqlalchemy",
+    "pydantic", "three.js", "electron", "tauri", "docker", "kubernetes",
+    "dotnet", ".net", "entity framework", "ef core", "maui", "skiasharp",
+    "ffmpeg", "tokio", "serde", "axum", "langchain", "openai", "anthropic",
+    "stripe", "auth0", "graphql", "trpc", "redux", "zustand", "shadcn",
+    "radix", "axios", "tanstack", "context7",
+)
+
+DOC_INTENT_KEYWORDS = (
+    "docs", "documentação", "documentacao", "api reference", "sdk",
+    "biblioteca", "library", "framework", "sintaxe", "syntax",
+    "deprecated", "depreciado", "migrar", "migration", "migração", "migracao",
+)
+
+GDK_DOMAINS = frozenset({"media-native"})
+
 
 def compile_kw_regex(kw: str) -> re.Pattern[str]:
     k = kw.strip().lower()
@@ -160,6 +190,25 @@ def compile_kw_regex(kw: str) -> re.Pattern[str]:
 
 _ACTION_PATTERNS = [compile_kw_regex(v) for v in ACTION_VERBS]
 _DEPTH_PATTERNS = [(kw.rstrip("*"), compile_kw_regex(kw)) for kw in HIGH_DEPTH_SIGNALS]
+_GDK_DOC_PATTERNS = [compile_kw_regex(k) for k in GDK_DOC_KEYWORDS]
+_C7_DOC_PATTERNS = [compile_kw_regex(k) for k in CONTEXT7_DOC_KEYWORDS]
+_DOC_INTENT_PATTERNS = [compile_kw_regex(k) for k in DOC_INTENT_KEYWORDS]
+
+
+def detect_doc_lookup_targets(prompt: str, domains: list[str] | None = None) -> list[str]:
+    """Return ordered list of relevant doc MCP targets (`gdk`, `context7`) for a prompt."""
+    clean = re.sub(r"\s+", " ", (prompt or "").strip().lower()).rstrip(".!?")
+    if not clean or clean in SMALL_CONVERSATIONAL or len(clean) < 12:
+        return []
+    dom_set = set(domains or [])
+    targets: list[str] = []
+    if (dom_set & GDK_DOMAINS) or any(p.search(clean) for p in _GDK_DOC_PATTERNS):
+        targets.append("gdk")
+    if any(p.search(clean) for p in _C7_DOC_PATTERNS):
+        targets.append("context7")
+    elif not targets and any(p.search(clean) for p in _DOC_INTENT_PATTERNS):
+        targets.append("context7")
+    return targets
 
 
 def load_project_profile(workspace_root: Path | None = None) -> dict[str, Any]:
@@ -373,6 +422,7 @@ def analyze_prompt(prompt: str, workspace_root: Path | None = None) -> dict[str,
     action_clauses = _count_action_clauses(text)
     domains = _detect_domains(lower, domain_specs)
     depth_hits = [label for label, pat in _DEPTH_PATTERNS if pat.search(lower)]
+    doc_targets = detect_doc_lookup_targets(text, domains)
 
     is_trivial_chat = _is_pure_question_or_greeting(text, action_clauses, list_items)
     if is_trivial_chat:
@@ -385,6 +435,7 @@ def analyze_prompt(prompt: str, workspace_root: Path | None = None) -> dict[str,
             "detected_domains": domains,
             "research_strategy": "none",
             "recommended_modules": [],
+            "doc_lookup_targets": doc_targets,
         }
 
     breadth_est = max(list_items, action_clauses, 1 if (domains or len(text) > 25) else 0)
@@ -407,6 +458,7 @@ def analyze_prompt(prompt: str, workspace_root: Path | None = None) -> dict[str,
             "detected_domains": domains,
             "research_strategy": "inline_grep",
             "recommended_modules": [],
+            "doc_lookup_targets": doc_targets,
         }
 
     depth_score = len(depth_hits) * 2
@@ -456,6 +508,7 @@ def analyze_prompt(prompt: str, workspace_root: Path | None = None) -> dict[str,
         "detected_domains": domains,
         "research_strategy": research_strategy,
         "recommended_modules": modules,
+        "doc_lookup_targets": doc_targets,
     }
 
 

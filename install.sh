@@ -55,13 +55,13 @@ if [[ "$DO_ROLLBACK" -eq 1 ]]; then
     exit 1
   fi
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete --exclude '.git' --exclude '.last_good_backup' --exclude '.metrics.jsonl' --exclude '.bypass_gates' --exclude '__pycache__' "$BACKUP_DIR/" "$TARGET_REAL/"
+    rsync -a --delete --exclude '.git' --exclude '.last_good_backup' --exclude '.metrics.jsonl' --exclude '.model_modes.json' --exclude '.bypass_gates' --exclude '__pycache__' "$BACKUP_DIR/" "$TARGET_REAL/"
   else
     python3 - "$BACKUP_DIR" "$TARGET_REAL" <<'PY'
 import shutil, sys
 from pathlib import Path
 bak, dst = Path(sys.argv[1]), Path(sys.argv[2])
-keep = {".git", ".last_good_backup", ".metrics.jsonl", ".bypass_gates", "__pycache__"}
+keep = {".git", ".last_good_backup", ".metrics.jsonl", ".model_modes.json", ".bypass_gates", "__pycache__"}
 for item in dst.iterdir():
     if item.name in keep:
         continue
@@ -108,9 +108,9 @@ if [[ "$SCRIPT_DIR" != "$TARGET_REAL" ]]; then
   else
     mkdir -p "$TARGET_REAL"
     if command -v rsync >/dev/null 2>&1; then
-      rsync -a --delete --exclude '.git' --exclude '.last_good_backup' --exclude '.metrics.jsonl' --exclude '.bypass_gates' --exclude '__pycache__' --exclude '*.pyc' "$SCRIPT_DIR/" "$TARGET_REAL/"
+      rsync -a --delete --exclude '.git' --exclude '.last_good_backup' --exclude '.metrics.jsonl' --exclude '.model_modes.json' --exclude '.bypass_gates' --exclude '__pycache__' --exclude '*.pyc' "$SCRIPT_DIR/" "$TARGET_REAL/"
     else
-      (cd "$SCRIPT_DIR" && tar --exclude='.git' --exclude='.last_good_backup' --exclude='.metrics.jsonl' --exclude='.bypass_gates' --exclude='__pycache__' --exclude='*.pyc' -cf - .) | (cd "$TARGET_REAL" && tar -xf -)
+      (cd "$SCRIPT_DIR" && tar --exclude='.git' --exclude='.last_good_backup' --exclude='.metrics.jsonl' --exclude='.model_modes.json' --exclude='.bypass_gates' --exclude='__pycache__' --exclude='*.pyc' -cf - .) | (cd "$TARGET_REAL" && tar -xf -)
     fi
     echo "Installed plugin to: $TARGET_REAL"
   fi
@@ -142,7 +142,7 @@ src, bak = Path(sys.argv[1]), Path(sys.argv[2])
 tmp_bak = src / ".last_good_backup.tmp"
 if tmp_bak.exists():
     shutil.rmtree(tmp_bak)
-ignore = shutil.ignore_patterns(".git", ".last_good_backup", ".last_good_backup.tmp", ".metrics.jsonl", ".bypass_gates", "__pycache__", "*.pyc")
+ignore = shutil.ignore_patterns(".git", ".last_good_backup", ".last_good_backup.tmp", ".metrics.jsonl", ".model_modes.json", ".bypass_gates", "__pycache__", "*.pyc")
 shutil.copytree(src, tmp_bak, ignore=ignore)
 if bak.exists():
     shutil.rmtree(bak)

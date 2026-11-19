@@ -19,8 +19,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,7 @@ for p in (str(SCRIPTS_DIR), str(HOOKS_DIR)):
 
 import complexity_triage  # noqa: E402
 import log_digest  # noqa: E402
+import model_mode_cache  # noqa: E402
 import planner_state  # noqa: E402
 import repo_map  # noqa: E402
 import schema_migrations  # noqa: E402
@@ -618,8 +621,45 @@ class TestV3Features(unittest.TestCase):
                 "lastUserInput": "Fix typo in helper.py",
                 "toolCall": {"name": "edit_file", "args": {"Path": str(f4), "Target": "x = 1", "Replacement": "x = 2"}},
             })
-            self.assertEqual(dec4.get("decision"), "force_ask")
-            self.assertIn("BLAST RADIUS", dec4.get("reason", ""))
+            # Default action is non-blocking "warn" (no force_ask popup spam)
+            self.assertEqual(dec4.get("decision"), "allow")
+            _, _, pre_br = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "Fix typo in helper.py",
+                "invocationNum": 2,
+            })
+            self.assertIn("BLAST RADIUS", pre_br["injectSteps"][0]["systemMessage"]["systemMessage"])
+
+            # Opt-in action="force_ask" asks ONCE per turn, then allows 5th file once approved
+            (repo / ".agents").mkdir(exist_ok=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 3, "blast_radius": {"simple_tier_max_files": 3, "action": "force_ask"}}),
+                encoding="utf-8",
+            )
+            _, _, dec4_ask = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "Fix typo in helper.py",
+                "toolCall": {"name": "edit_file", "args": {"Path": str(f4), "Target": "x = 1", "Replacement": "x = 2"}},
+            })
+            self.assertEqual(dec4_ask.get("decision"), "force_ask")
+            self.assertIn("BLAST RADIUS", dec4_ask.get("reason", ""))
+            # Approve 4th file edit -> 5th file must NOT re-ask
+            run_hook("planner_post_tool.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(f4)}},
+            })
+            f5 = repo / "src" / "f4.py"
+            f5.write_text("x = 1\n", encoding="utf-8")
+            _, _, dec5 = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "Fix typo in helper.py",
+                "toolCall": {"name": "edit_file", "args": {"Path": str(f5), "Target": "x = 1", "Replacement": "x = 2"}},
+            })
+            self.assertEqual(dec5.get("decision"), "allow")
 
     def test_eco_mode_memory_anchor_14_and_long_chat_nudge(self) -> None:
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
@@ -650,14 +690,14 @@ class TestV3Features(unittest.TestCase):
         # Memory anchor every 14 invocations ONLY when open_reqs >= 3
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
             repo = Path(td)
-            run_script("plan_tool.py", [
-                "--dir", art, "--workspace", str(repo), "init", "--tier", "2", "--goal", "Anchor test",
-                "--req", "REQ-01: A", "--req", "REQ-02: B", "--req", "REQ-03: C",
-            ])
             prompt = "Anchor test"
             run_hook("planner_pre_invocation.py", {
                 "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": prompt, "invocationNum": 1,
             })
+            run_script("plan_tool.py", [
+                "--dir", art, "--workspace", str(repo), "init", "--tier", "2", "--goal", "Anchor test",
+                "--req", "REQ-01: A", "--req", "REQ-02: B", "--req", "REQ-03: C",
+            ])
             # At inv 8 -> must NOT trigger yet (interval is 14)
             saw_anchor_early = False
             for inv in range(2, 13):
@@ -1270,6 +1310,606 @@ class TestCavernV1V2V3Parity(unittest.TestCase):
             live_cavern = json.loads(self.LIVE_CAVERN_PROFILE.read_text(encoding="utf-8"))
             self.assertIn(live_cavern.get("schema_version"), (2, 3))
             self._assert_parity_for_profile(f"live_v{live_cavern.get('schema_version')}_cavern", live_cavern)
+
+
+class TestDocMcpIntegration(unittest.TestCase):
+    def test_detect_doc_mcps_and_profile_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pdir = Path(td)
+            self.assertEqual(planner_state.detect_doc_mcps({}, plugins_dir=pdir), {"gdk": False, "context7": False})
+
+            (pdir / "google-developer-knowledge").mkdir()
+            (pdir / "google-developer-knowledge" / "mcp_config.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(planner_state.detect_doc_mcps({}, plugins_dir=pdir), {"gdk": True, "context7": False})
+
+            (pdir / "context7").mkdir()
+            (pdir / "context7" / "mcp_config.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(planner_state.detect_doc_mcps({}, plugins_dir=pdir), {"gdk": True, "context7": True})
+
+            # Profile disable & per-provider override
+            self.assertEqual(
+                planner_state.detect_doc_mcps({"doc_lookup": {"enabled": False}}, plugins_dir=pdir),
+                {"gdk": False, "context7": False},
+            )
+            self.assertEqual(
+                planner_state.detect_doc_mcps({"doc_lookup": {"gdk": False, "context7": True}}, plugins_dir=pdir),
+                {"gdk": False, "context7": True},
+            )
+
+    def test_triage_and_hooks_doc_mcp_routing(self) -> None:
+        self.assertIn("gdk", complexity_triage.detect_doc_lookup_targets("Como configurar MediaSession e targetSdkVersion no Android?"))
+        self.assertIn("context7", complexity_triage.detect_doc_lookup_targets("Write a Prisma query for Next.js 15"))
+        hybrid = complexity_triage.detect_doc_lookup_targets("Integrate Firebase Auth with React and Next.js")
+        self.assertEqual(hybrid, ["gdk", "context7"])
+        self.assertEqual(complexity_triage.detect_doc_lookup_targets("oi"), [])
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as pdir, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            plugins = Path(pdir)
+            for slug in ("google-developer-knowledge", "context7"):
+                (plugins / slug).mkdir()
+                (plugins / slug / "mcp_config.json").write_text("{}", encoding="utf-8")
+
+            env_mcps = {"PLANNER_PLUGINS_DIR": str(plugins)}
+
+            # SessionStart emits DOC_MCP
+            rc, err, sess = run_hook("planner_session_start.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art,
+            }, env_extra=env_mcps)
+            self.assertEqual(rc, 0, err)
+            sess_msg = sess["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("DOC_MCP|google-developer-knowledge(search_documents/answer_query) + context7(resolve-library-id->query-docs)", sess_msg)
+
+            # Tier 0 technical question routes to GDK
+            _, _, pre_q = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art,
+                "lastUserInput": "Como funciona MediaStore no Android?",
+                "invocationNum": 1,
+            }, env_extra=env_mcps)
+            q_msg = pre_q["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("DOC_LOOKUP|GDK(", q_msg)
+            self.assertNotIn("Context7(", q_msg)
+
+            # Same turn inv 2 does NOT repeat DOC_LOOKUP
+            _, _, pre_q2 = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art,
+                "lastUserInput": "Como funciona MediaStore no Android?",
+                "invocationNum": 2,
+            }, env_extra=env_mcps)
+            self.assertNotIn("DOC_LOOKUP|", json.dumps(pre_q2))
+
+            # ECO_MODE suppresses Tier 0 DOC_LOOKUP
+            _, _, pre_eco = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art,
+                "lastUserInput": "Economiza cota, explica MediaStore no Android",
+                "invocationNum": 1,
+            }, env_extra=env_mcps)
+            eco_msg = pre_eco["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("ECO_MODE|ON", eco_msg)
+            self.assertNotIn("DOC_LOOKUP|", eco_msg)
+
+            # Circuit breaker includes GDK/Context7 hint
+            hook_file = Path(art) / "scratch" / ".hook_state.json"
+            hs = json.loads(hook_file.read_text(encoding="utf-8"))
+            hs["same_cmd_fails"] = 2
+            hs["last_failed_cmd_sig"] = "dotnet build Foo.csproj"
+            hook_file.write_text(json.dumps(hs), encoding="utf-8")
+            _, _, pre_cb = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)], "artifactDirectoryPath": art,
+                "lastUserInput": "Economiza cota, explica MediaStore no Android",
+                "invocationNum": 2,
+            }, env_extra=env_mcps)
+            cb_msg = pre_cb["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("CIRCUIT BREAKER", cb_msg)
+            self.assertIn("GDK/Context7", cb_msg)
+
+
+class TestAutoModelMode(unittest.TestCase):
+    @staticmethod
+    def _run_hook_args(
+        script_name: str,
+        payload: dict[str, Any],
+        extra_args: list[str] | None = None,
+        env_extra: dict[str, str] | None = None,
+    ) -> tuple[int, str, dict[str, Any]]:
+        merged_env = {"PLANNER_DISABLE_TELEMETRY": "1"}
+        if env_extra:
+            merged_env.update(env_extra)
+        cli_args = list(extra_args or [])
+        if FAST_MODE:
+            mod = _load_mod(HOOKS_DIR / script_name)
+            rc = 0
+            old_argv = sys.argv
+            try:
+                sys.argv = [str(HOOKS_DIR / script_name), *cli_args]
+                with _patched_env(merged_env, stdin_txt=json.dumps(payload)) as (out_buf, err_buf):
+                    try:
+                        mod.main()
+                    except SystemExit as exc:
+                        rc = int(exc.code) if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+                    out_txt = out_buf.getvalue().strip()
+                    err_txt = err_buf.getvalue().strip()
+            finally:
+                sys.argv = old_argv
+            parsed = json.loads(out_txt) if out_txt.startswith("{") else ({"_raw": out_txt} if out_txt else {})
+            return rc, err_txt, parsed
+
+        env = os.environ.copy()
+        env.update(merged_env)
+        res = subprocess.run(
+            [sys.executable, str(HOOKS_DIR / script_name), *cli_args],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=15,
+            check=False,
+        )
+        out_txt = res.stdout.strip()
+        parsed = json.loads(out_txt) if out_txt.startswith("{") else ({"_raw": out_txt} if out_txt else {})
+        return res.returncode, res.stderr.strip(), parsed
+
+    def test_seed_cache_hit_fast_path_and_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            cache_file = repo / ".cache_models.json"
+            prof_auto = {"schema_version": 3, "planner_mode": "auto"}
+            base_env = {
+                "PLANNER_MODEL_CACHE_FILE": str(cache_file),
+                "PLANNER_MODEL_OFFLINE": "1",
+                "PLANNER_MODEL_DISABLE_AGY_CLI": "1",
+                "PLANNER_MODE": "",
+            }
+
+            with _patched_env(base_env):
+                # Seeded frontier/orchestrator models -> lean (zero network)
+                for m in (
+                    "gemini-4-neon",
+                    "Gemini 4 Neon (Medium)",
+                    "gemini-4-neon-xhigh",
+                    "gemini-pro-orchestrator-neon",
+                    "Orchestrator (Carbon)",
+                    "claude-opus-5-5",
+                ):
+                    mode, src, _ = planner_state.resolve_planner_mode_info(prof_auto, {"modelName": m})
+                    self.assertEqual(mode, "lean", m)
+                    self.assertEqual(src, "auto:seed", m)
+
+                # Seeded lightweight/executor models -> strict
+                for m in ("gemini-4-hydrogen", "gemini-3.6-flash-medium", "claude-sonnet-5-5", "gpt-oss-120b"):
+                    mode, src, _ = planner_state.resolve_planner_mode_info(prof_auto, {"modelName": m})
+                    self.assertEqual(mode, "strict", m)
+                    self.assertEqual(src, "auto:seed", m)
+
+                # Missing or literal "auto" -> safe lean
+                self.assertEqual(planner_state.resolve_planner_mode_info(prof_auto, {})[:2], ("lean", "auto:no_model"))
+                self.assertEqual(
+                    planner_state.resolve_planner_mode_info(prof_auto, {"modelName": "auto"})[:2],
+                    ("lean", "auto:no_model"),
+                )
+
+                # Zero regex/keyword guessing: unknown models stay safe lean ("auto:unseen")
+                for unseen_m in ("future-flash-9000", "future-sonnet-9", "future-orchestrator-z"):
+                    mode, src, _ = planner_state.resolve_planner_mode_info(prof_auto, {"modelName": unseen_m})
+                    self.assertEqual(mode, "lean", unseen_m)
+                    self.assertEqual(src, "auto:unseen", unseen_m)
+
+                # Precedence: PLANNER_MODE env > profile.planner_mode > auto_mode.overrides > cache > seed
+                override_prof = {
+                    "schema_version": 3,
+                    "planner_mode": "auto",
+                    "auto_mode": {"overrides": {"gemini-4-neon": "strict", "my-custom-v9": "strict"}},
+                }
+                self.assertEqual(
+                    planner_state.resolve_planner_mode_info(override_prof, {"modelName": "gemini-4-neon"})[:2],
+                    ("strict", "auto:profile_override"),
+                )
+                self.assertEqual(
+                    planner_state.resolve_planner_mode_info(override_prof, {"modelName": "my-custom-v9"})[:2],
+                    ("strict", "auto:profile_override"),
+                )
+                strict_prof = {"schema_version": 3, "planner_mode": "strict"}
+                self.assertEqual(
+                    planner_state.resolve_planner_mode_info(strict_prof, {"modelName": "gemini-4-neon"})[:2],
+                    ("strict", "profile"),
+                )
+                with _patched_env({"PLANNER_MODE": "lean"}):
+                    self.assertEqual(
+                        planner_state.resolve_planner_mode_info(strict_prof, {"modelName": "gemini-3.6-flash-medium"})[:2],
+                        ("lean", "env"),
+                    )
+
+                # Cache overrides seed
+                model_mode_cache.set_model_mode("gemini-4-hydrogen", "lean", why="user override", cache_path=cache_file)
+                self.assertEqual(
+                    planner_state.resolve_planner_mode_info(prof_auto, {"modelName": "gemini-4-hydrogen"})[:2],
+                    ("lean", "auto:cache:ai"),
+                )
+
+                # Fast-path timing: 50 lookups < 50ms
+                t0 = time.monotonic()
+                for _ in range(50):
+                    planner_state.resolve_planner_mode_info(prof_auto, {"modelName": "Gemini 4 Neon (Medium)"})
+                self.assertLess(time.monotonic() - t0, 0.05)
+
+            # Known model in PreInvocation -> zero MODEL_MODE_CLASSIFY & live mid-conversation switch
+            (repo / ".agents").mkdir()
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps(prof_auto), encoding="utf-8")
+            src_f = repo / "app.py"
+            src_f.write_text("x = 1\n", encoding="utf-8")
+            complex_prompt = "1. Refactor auth\n2. Add pytest tests\n3. Update API routes"
+
+            _, _, pre_known = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-4-neon",
+                "lastUserInput": complex_prompt,
+                "invocationNum": 1,
+            }, env_extra=base_env)
+            self.assertNotIn("MODEL_MODE_CLASSIFY", json.dumps(pre_known))
+
+            _, _, dec_neon = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-4-neon",
+                "lastUserInput": complex_prompt,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(src_f), "Target": "x = 1", "Replacement": "x = 2"}},
+            }, env_extra=base_env)
+            self.assertEqual(dec_neon.get("decision"), "allow")
+
+            _, _, dec_flash = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-3.6-flash-medium",
+                "lastUserInput": complex_prompt,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(src_f), "Target": "x = 1", "Replacement": "x = 2"}},
+            }, env_extra=base_env)
+            self.assertEqual(dec_flash.get("decision"), "deny")
+            self.assertIn("PLAN GATE", dec_flash.get("reason", ""))
+
+    def test_unseen_model_ai_classification_and_persistence(self) -> None:
+        hits = {"count": 0}
+        mock_md = (
+            "# Choose a model\n\n"
+            "## Reasoning model\n"
+            "| Model | Free | Pro | Ultra | Enterprise |\n"
+            "| Gemini 5 Krypton | ✅ | ✅ | ✅ | ✅ |\n\n"
+            "### Gemini 5 Krypton\n"
+            "Fast, lightweight everyday coding and execution model for routine edits.\n"
+        ).encode("utf-8")
+
+        class MockDocsHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                hits["count"] += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(mock_md)
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), MockDocsHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+                repo = Path(td)
+                init_git_repo(repo)
+                (repo / ".agents").mkdir()
+                (repo / ".agents" / "planner_profile.json").write_text(
+                    json.dumps({"schema_version": 3, "planner_mode": "auto"}),
+                    encoding="utf-8",
+                )
+                src_f = repo / "app.py"
+                src_f.write_text("x = 1\n", encoding="utf-8")
+                cache_file = repo / ".cache_models.json"
+                docs_url = f"http://127.0.0.1:{port}/docs/models.md"
+                env_live = {
+                    "PLANNER_MODEL_CACHE_FILE": str(cache_file),
+                    "PLANNER_MODEL_DOCS_URL": docs_url,
+                    "PLANNER_MODEL_DISABLE_AGY_CLI": "1",
+                    "PLANNER_MODEL_COOLDOWN_SECS": "900",
+                    "PLANNER_MODE": "",
+                }
+                complex_prompt = "1. Refactor parser\n2. Add unit tests\n3. Update docs"
+
+                # First unseen invocation fetches docs once & injects compact prompt while temporarily lean
+                _, _, pre1 = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-5-krypton-high",
+                    "lastUserInput": complex_prompt,
+                    "invocationNum": 1,
+                }, env_extra=env_live)
+                self.assertEqual(hits["count"], 1)
+                msg1 = pre1["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[MODEL_MODE_CLASSIFY|model=gemini-5-krypton-high|key=gemini-5-krypton|tmp=lean]", msg1)
+                self.assertIn("CRITERIA|", msg1)
+                self.assertIn("CTX|", msg1)
+                self.assertIn("Krypton", msg1)
+                self.assertIn('model-mode set "gemini-5-krypton"', msg1)
+
+                # While unclassified -> safe lean (no PLAN GATE block)
+                _, _, dec_tmp = run_hook("planner_guard_files.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-5-krypton-high",
+                    "lastUserInput": complex_prompt,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(src_f), "Target": "x = 1", "Replacement": "x = 2"}},
+                }, env_extra=env_live)
+                self.assertEqual(dec_tmp.get("decision"), "allow")
+
+                # Second invocation in same turn -> NO duplicate classify prompt & NO extra HTTP fetch
+                _, _, pre2 = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-5-krypton-high",
+                    "lastUserInput": complex_prompt,
+                    "invocationNum": 2,
+                }, env_extra=env_live)
+                self.assertEqual(hits["count"], 1)
+                self.assertNotIn("MODEL_MODE_CLASSIFY", json.dumps(pre2))
+
+                # Persist AI verdict via CLI -> strict
+                res_set = run_script("plan_tool.py", [
+                    "--workspace", str(repo), "model-mode", "set", "gemini-5-krypton", "strict",
+                    "--why", "Fast lightweight everyday executor",
+                ], env_extra=env_live)
+                self.assertEqual(res_set.returncode, 0, res_set.stderr)
+                self.assertIn("MODEL_MODE_SET|key=gemini-5-krypton|mode=strict|src=ai|", res_set.stdout)
+
+                cached = json.loads(cache_file.read_text(encoding="utf-8"))
+                self.assertEqual(cached["models"]["gemini-5-krypton"]["mode"], "strict")
+                self.assertNotIn("gemini-5-krypton", cached["pending"])
+
+                # New turn with different effort suffix -> 0 network, cached strict enforces PLAN GATE
+                new_prompt = "1. Refactor cache\n2. Add pytest tests\n3. Update API routes"
+                _, _, pre3 = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-5-krypton-low",
+                    "lastUserInput": new_prompt,
+                    "invocationNum": 1,
+                }, env_extra=env_live)
+                self.assertEqual(hits["count"], 1)
+                self.assertNotIn("MODEL_MODE_CLASSIFY", json.dumps(pre3))
+
+                _, _, dec_strict = run_hook("planner_guard_files.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-5-krypton-low",
+                    "lastUserInput": new_prompt,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(src_f), "Target": "x = 1", "Replacement": "x = 2"}},
+                }, env_extra=env_live)
+                self.assertEqual(dec_strict.get("decision"), "deny")
+                self.assertIn("PLAN GATE", dec_strict.get("reason", ""))
+
+                # Verify CLI get / list / clear subcommands
+                res_get = run_script("plan_tool.py", [
+                    "--workspace", str(repo), "model-mode", "get", "gemini-5-krypton-low",
+                ], env_extra=env_live)
+                self.assertEqual(res_get.returncode, 0)
+                self.assertIn("MODEL_MODE|key=gemini-5-krypton|mode=strict|src=auto:cache:ai", res_get.stdout)
+
+                res_list = run_script("plan_tool.py", ["--workspace", str(repo), "model-mode", "list"], env_extra=env_live)
+                self.assertEqual(res_list.returncode, 0)
+                self.assertIn("gemini-5-krypton|strict|ai|", res_list.stdout)
+
+                res_clr = run_script("plan_tool.py", [
+                    "--workspace", str(repo), "model-mode", "clear", "gemini-5-krypton",
+                ], env_extra=env_live)
+                self.assertEqual(res_clr.returncode, 0)
+                self.assertIn("MODEL_MODE_CLEARED|removed=1", res_clr.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_unseen_model_offline_fallback_and_cooldown(self) -> None:
+        hits = {"count": 0}
+
+        class MockDocsHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                hits["count"] += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"# Models\n| Gemini 9 Offline | New |\n")
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), MockDocsHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+                repo = Path(td)
+                init_git_repo(repo)
+                (repo / ".agents").mkdir()
+                (repo / ".agents" / "planner_profile.json").write_text(
+                    json.dumps({"schema_version": 3, "planner_mode": "auto"}),
+                    encoding="utf-8",
+                )
+                src_f = repo / "app.py"
+                src_f.write_text("x = 1\n", encoding="utf-8")
+                cache_file = repo / ".cache_models.json"
+                docs_url = f"http://127.0.0.1:{port}/docs/models.md"
+
+                env_off = {
+                    "PLANNER_MODEL_CACHE_FILE": str(cache_file),
+                    "PLANNER_MODEL_OFFLINE": "1",
+                    "PLANNER_MODEL_DISABLE_AGY_CLI": "1",
+                    "PLANNER_MODEL_COOLDOWN_SECS": "3600",
+                    "PLANNER_MODE": "",
+                }
+                prompt1 = "1. Refactor auth\n2. Add tests\n3. Update docs"
+                _, _, pre_off = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-9-offline",
+                    "lastUserInput": prompt1,
+                    "invocationNum": 1,
+                }, env_extra=env_off)
+                self.assertNotIn("MODEL_MODE_CLASSIFY", json.dumps(pre_off))
+
+                # Safe lean when offline (no PLAN GATE)
+                _, _, dec_off = run_hook("planner_guard_files.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-9-offline",
+                    "lastUserInput": prompt1,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(src_f), "Target": "x = 1", "Replacement": "x = 2"}},
+                }, env_extra=env_off)
+                self.assertEqual(dec_off.get("decision"), "allow")
+
+                cache = json.loads(cache_file.read_text(encoding="utf-8"))
+                pend = cache["pending"]["gemini-9-offline"]
+                self.assertEqual(pend["status"], "offline")
+                self.assertGreater(pend["next_retry_ts"], pend["last_attempt_ts"])
+
+                # Next turn inside cooldown -> 0 HTTP requests
+                env_on = {
+                    "PLANNER_MODEL_CACHE_FILE": str(cache_file),
+                    "PLANNER_MODEL_DOCS_URL": docs_url,
+                    "PLANNER_MODEL_DISABLE_AGY_CLI": "1",
+                    "PLANNER_MODEL_COOLDOWN_SECS": "3600",
+                    "PLANNER_MODE": "",
+                }
+                _, _, pre_cd = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-9-offline",
+                    "lastUserInput": "Retry check",
+                    "invocationNum": 1,
+                }, env_extra=env_on)
+                self.assertEqual(hits["count"], 0)
+                self.assertNotIn("MODEL_MODE_CLASSIFY", json.dumps(pre_cd))
+
+                # Expire cooldown -> triggers fetch & classification prompt once
+                cache["pending"]["gemini-9-offline"]["next_retry_ts"] = 0
+                cache_file.write_text(json.dumps(cache), encoding="utf-8")
+                _, _, pre_retry = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-9-offline",
+                    "lastUserInput": "Retry after cooldown",
+                    "invocationNum": 1,
+                }, env_extra=env_on)
+                self.assertEqual(hits["count"], 1)
+                msg_retry = pre_retry["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[MODEL_MODE_CLASSIFY|model=gemini-9-offline|key=gemini-9-offline|tmp=lean]", msg_retry)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_native_plan_mode_auto_pin_and_handoff_no_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents").mkdir()
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 3, "planner_mode": "auto"}),
+                encoding="utf-8",
+            )
+            src_f = repo / "app.py"
+            src_f.write_text("x = 1\n", encoding="utf-8")
+            cache_file = repo / ".cache_models.json"
+            env_pin = {
+                "PLANNER_MODEL_CACHE_FILE": str(cache_file),
+                "PLANNER_MODEL_OFFLINE": "1",
+                "PLANNER_MODEL_DISABLE_AGY_CLI": "1",
+                "PLANNER_MODE": "",
+            }
+
+            # 1. PreToolUse --pre on exit_plan_mode auto-pins unseen model to lean
+            _, _, pre_pin = self._run_hook_args(
+                "planner_post_tool.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "future-planner-x",
+                    "toolCall": {"name": "exit_plan_mode", "args": {}},
+                },
+                extra_args=["--pre"],
+                env_extra=env_pin,
+            )
+            self.assertEqual(pre_pin.get("decision"), "allow")
+            cache = json.loads(cache_file.read_text(encoding="utf-8"))
+            self.assertEqual(cache["models"]["future-planner-x"]["mode"], "lean")
+            self.assertEqual(cache["models"]["future-planner-x"]["source"], "native_plan_tool")
+
+            # 2. PostToolUse on enter_plan_mode upgrades previously strict model to lean
+            with _patched_env(env_pin):
+                model_mode_cache.set_model_mode("hybrid-exec-y", "strict", why="initial", cache_path=cache_file)
+            _, _, post_pin = self._run_hook_args(
+                "planner_post_tool.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "hybrid-exec-y",
+                    "toolCall": {"name": "enter_plan_mode", "args": {}},
+                },
+                env_extra=env_pin,
+            )
+            self.assertEqual(post_pin, {})
+            cache = json.loads(cache_file.read_text(encoding="utf-8"))
+            self.assertEqual(cache["models"]["hybrid-exec-y"]["mode"], "lean")
+            self.assertEqual(cache["models"]["hybrid-exec-y"]["source"], "native_plan_tool")
+
+            # 3. Mid-turn Orchestrator handoff to seeded strict executor (gemini-4-hydrogen) keeps lean -> NO collision!
+            turn1_prompt = "1. Refactor auth\n2. Add pytest tests\n3. Update API routes"
+            run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-pro-orchestrator-neon",
+                "lastUserInput": turn1_prompt,
+                "invocationNum": 1,
+            }, env_extra=env_pin)
+            self._run_hook_args(
+                "planner_post_tool.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "modelName": "gemini-pro-orchestrator-neon",
+                    "lastUserInput": turn1_prompt,
+                    "toolCall": {"name": "exit_plan_mode", "args": {}},
+                },
+                extra_args=["--pre"],
+                env_extra=env_pin,
+            )
+            _, _, dec_handoff = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-4-hydrogen",
+                "lastUserInput": turn1_prompt,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(src_f), "Target": "x = 1", "Replacement": "x = 2"}},
+            }, env_extra=env_pin)
+            self.assertEqual(dec_handoff.get("decision"), "allow")
+
+            # 4. New standalone turn directly on gemini-4-hydrogen -> strict enforces PLAN GATE
+            turn2_prompt = "1. Refactor cache\n2. Add pytest tests\n3. Update API routes"
+            run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-4-hydrogen",
+                "lastUserInput": turn2_prompt,
+                "invocationNum": 1,
+            }, env_extra=env_pin)
+            _, _, dec_new = run_hook("planner_guard_files.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-4-hydrogen",
+                "lastUserInput": turn2_prompt,
+                "toolCall": {"name": "edit_file", "args": {"Path": str(src_f), "Target": "x = 1", "Replacement": "x = 2"}},
+            }, env_extra=env_pin)
+            self.assertEqual(dec_new.get("decision"), "deny")
+            self.assertIn("PLAN GATE", dec_new.get("reason", ""))
 
 
 def _stamp_plugin_tests_passed() -> None:

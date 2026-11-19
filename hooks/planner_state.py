@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,12 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from model_mode_cache import (  # noqa: E402
+    lookup_model_mode,
+    normalize_model_key,
+    pin_native_plan_model,
+    prepare_unseen_classification,
+)
 from schema_migrations import (  # noqa: E402
     CURRENT_SCHEMA_VERSION,
     DEFAULT_BLAST_RADIUS,
@@ -130,16 +137,59 @@ def is_bypass_enabled() -> bool:
     return (resolve_plugin_root() / ".bypass_gates").exists()
 
 
-def get_planner_mode(profile: dict[str, Any] | None = None) -> str:
-    """Return active planner mode (`lean` default or `strict`)."""
+def resolve_planner_mode_info(
+    profile: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+    hook_state: dict[str, Any] | None = None,
+) -> tuple[str, str, str]:
+    """Resolve `(effective_mode, source, model_name)` for `lean`, `strict`, and `auto`.
+
+    Precedence:
+      1. `PLANNER_MODE` env (`lean`|`strict`)
+      2. `profile["planner_mode"]` (`lean`|`strict`)
+      3. When `auto`: missing/`auto` -> safe `lean`; active native-plan turn -> safe `lean`;
+         exact lookup via `model_mode_cache` (`profile.auto_mode.overrides` > cache > seed);
+         unseen -> safe `lean` (`auto:unseen`, never regex-guessed).
+    """
+    raw_model = str((payload or {}).get("modelName") or "").strip()
     env_mode = os.environ.get("PLANNER_MODE", "").strip().lower()
     if env_mode in ("lean", "strict"):
-        return env_mode
-    if profile:
-        p_mode = str(profile.get("planner_mode") or "").strip().lower()
-        if p_mode in ("lean", "strict"):
-            return p_mode
-    return "lean"
+        return env_mode, "env", raw_model
+
+    if env_mode == "auto":
+        configured = "auto"
+    else:
+        p_mode = str((profile or {}).get("planner_mode") or "").strip().lower()
+        configured = p_mode if p_mode in ("lean", "strict", "auto") else "auto"
+
+    if configured in ("lean", "strict"):
+        return configured, "profile", raw_model
+
+    if not raw_model or raw_model.lower() == "auto":
+        return "lean", "auto:no_model", raw_model
+
+    if isinstance(hook_state, dict):
+        turn_sig = str(hook_state.get("turn_sig") or "")
+        np_sig = str(hook_state.get("native_plan_turn_sig") or "")
+        np_ts = float(hook_state.get("native_plan_active_ts") or 0.0)
+        if (turn_sig and np_sig == turn_sig) or (not turn_sig and np_ts > 0.0 and (time.time() - np_ts) <= 600.0):
+            return "lean", "auto:native_plan_turn", raw_model
+
+    mode, src, _ = lookup_model_mode(raw_model, profile=profile)
+    if mode in ("lean", "strict"):
+        return mode, src, raw_model
+
+    return "lean", "auto:unseen", raw_model
+
+
+def get_planner_mode(
+    profile: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+    hook_state: dict[str, Any] | None = None,
+) -> str:
+    """Return active planner mode (`lean` or `strict`), resolving `auto` via `payload['modelName']`."""
+    mode, _, _ = resolve_planner_mode_info(profile, payload, hook_state=hook_state)
+    return mode
 
 
 _ECO_MODE_RE = re.compile(
@@ -312,6 +362,52 @@ def scan_secrets_and_conflicts(text: str, rel_path: str = "", check_filename: bo
 
 def resolve_plugin_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def detect_doc_mcps(
+    profile: dict[str, Any] | None = None,
+    plugins_dir: Path | None = None,
+) -> dict[str, bool]:
+    """Detect installed documentation MCP plugins (`google-developer-knowledge`, `context7`).
+
+    Respects optional `profile["doc_lookup"]`:
+      - `enabled: false` disables all doc MCP hints
+      - `gdk: true|false` / `context7: true|false` explicitly overrides auto-detection
+      - `auto_detect: false` skips filesystem probing
+    """
+    cfg = (profile or {}).get("doc_lookup")
+    cfg_dict = cfg if isinstance(cfg, dict) else {}
+    if cfg_dict.get("enabled") is False:
+        return {"gdk": False, "context7": False}
+
+    auto_detect = cfg_dict.get("auto_detect", True) is not False
+    if plugins_dir is not None:
+        base = Path(plugins_dir).expanduser()
+    else:
+        env_dir = os.environ.get("PLANNER_PLUGINS_DIR", "").strip()
+        base = Path(env_dir).expanduser() if env_dir else resolve_plugin_root().parent
+
+    def _has_plugin(slug: str) -> bool:
+        if not auto_detect or not base.is_dir():
+            return False
+        pdir = base / slug
+        return (pdir / "mcp_config.json").is_file() or (pdir / "plugin.json").is_file()
+
+    gdk = cfg_dict["gdk"] if isinstance(cfg_dict.get("gdk"), bool) else _has_plugin("google-developer-knowledge")
+    c7 = cfg_dict["context7"] if isinstance(cfg_dict.get("context7"), bool) else _has_plugin("context7")
+    return {"gdk": bool(gdk), "context7": bool(c7)}
+
+
+def format_doc_mcp_hint(targets: list[str], available: dict[str, bool]) -> str:
+    """Format a compact 1-line routing hint for matched & installed doc MCPs."""
+    parts: list[str] = []
+    if "gdk" in targets and available.get("gdk"):
+        parts.append("GDK(`google-developer-knowledge`: `search_documents`/`answer_query`)")
+    if "context7" in targets and available.get("context7"):
+        parts.append("Context7(`context7`: `resolve-library-id`->`query-docs`, 1 concept/call)")
+    if not parts:
+        return ""
+    return "DOC_LOOKUP|" + " + ".join(parts)
 
 
 def is_plugin_path(path_str: str) -> tuple[str, bool]:

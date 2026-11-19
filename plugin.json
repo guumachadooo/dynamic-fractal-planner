@@ -1,8 +1,8 @@
 {
   "name": "dynamic-fractal-planner",
   "displayName": "Dynamic Fractal Planner",
-  "version": "2.0.0",
-  "description": "v3 quota-efficient lean/strict adaptive planning, read/terminal token diet, shift-left secret/diff shields, circuit breaker, static auto-verify & cross-project memory.",
+  "version": "2.2.0",
+  "description": "v3 quota-efficient lean/strict adaptive planning, read/terminal token diet, shift-left secret/diff shields, circuit breaker, static auto-verify, GDK/Context7 MCP doc routing & cross-project memory.",
   "author": {
     "name": "guumachadooo"
   },
@@ -12,7 +12,10 @@
     "token-diet",
     "guardrails",
     "verification",
-    "telemetry"
+    "telemetry",
+    "mcp",
+    "context7",
+    "google-developer-knowledge"
   ],
   "suggestedPrompts": [
     "Plan and implement this multi-part feature cleanly with minimal quota",

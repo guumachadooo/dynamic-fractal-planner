@@ -54,21 +54,24 @@ def main() -> None:
     _ensure_paths()
 
     from planner_state import (  # noqa: E402
+        detect_doc_mcps,
+        format_doc_mcp_hint,
         get_paths,
-        get_planner_mode,
         has_active_turn_plan,
         is_eco_mode_prompt,
         load_json,
         load_project_profile,
+        normalize_model_key,
+        prepare_unseen_classification,
         prompt_hash,
         record_telemetry,
+        resolve_planner_mode_info,
         resolve_repo_root,
         save_json,
     )
 
     repo = resolve_repo_root(payload)
     profile = load_project_profile(repo)
-    mode = get_planner_mode(profile)
 
     _, task_md, plan_json, hook_file = get_paths(payload)
     hook_state = load_json(hook_file)
@@ -119,6 +122,10 @@ def main() -> None:
             "last_invocation_num": inv_num,
             "triage": triage,
             "triage_injected": False,
+            "doc_hint_injected": False,
+            "blast_radius_warned": False,
+            "blast_radius_notified": False,
+            "blast_radius_approved": False,
             "runaway_warned": False,
             "eco_mode": eco,
             "eco_injected": False,
@@ -143,8 +150,10 @@ def main() -> None:
             "last_plugin_test_ts": prev_pt_ts,
             "handoff_nudged": prev_handoff_nudged,
             "post_commit_nudge": prev_post_commit,
+            "model_classify_prompted": "",
+            "native_plan_turn_sig": "",
+            "native_plan_active_ts": 0.0,
         }
-        record_telemetry("turn", {"mode": mode, "tier": triage.get("tier")})
     else:
         triage = hook_state.get("triage") or {}
         if not triage:
@@ -155,11 +164,27 @@ def main() -> None:
         hook_state["last_invocation_num"] = inv_num
         hook_state["last_activity_ts"] = now
 
+    mode, mode_src, model_name = resolve_planner_mode_info(profile, payload, hook_state=hook_state)
+    if mode_src == "auto:unseen" and model_name:
+        mode_tag = f"{mode}(auto:{model_name}|unseen)"
+    elif mode_src.startswith("auto:") and model_name and model_name.lower() != "auto":
+        mode_tag = f"{mode}(auto:{model_name})"
+    else:
+        mode_tag = mode
+    if is_new_turn:
+        record_telemetry("turn", {"mode": mode, "tier": triage.get("tier")})
+
+    hook_state["model_name"] = model_name
+    hook_state["resolved_mode"] = mode
+
     inject_lines: list[str] = []
     tier = int(triage.get("tier") or 0)
     eco_mode = bool(hook_state.get("eco_mode"))
     plan_ready = has_active_turn_plan(payload, hook_state)
     plan_cli = PLUGIN_ROOT / "scripts" / "plan_tool.py"
+    doc_mcps = detect_doc_mcps(profile)
+    doc_targets = list(triage.get("doc_lookup_targets") or [])
+    doc_hint_line = format_doc_mcp_hint(doc_targets, doc_mcps)
 
     if eco_mode and not hook_state.get("eco_injected"):
         hook_state["eco_injected"] = True
@@ -181,8 +206,15 @@ def main() -> None:
     if cb_key and hook_state.get("cb_triggered_key") != cb_key:
         hook_state["cb_triggered_key"] = cb_key
         record_telemetry("circuit_breaker", {"reason": cb_reason})
+        cb_doc_suffix = ""
+        if doc_mcps.get("gdk") and doc_mcps.get("context7"):
+            cb_doc_suffix = " | verify API/flags via GDK/Context7"
+        elif doc_mcps.get("gdk"):
+            cb_doc_suffix = " | verify API/flags via GDK"
+        elif doc_mcps.get("context7"):
+            cb_doc_suffix = " | verify API/flags via Context7"
         inject_lines.append(
-            f"[CIRCUIT BREAKER|{cb_reason}] STOP blind retries -> re-read exact error, rethink root cause, or ask user."
+            f"[CIRCUIT BREAKER|{cb_reason}] STOP blind retries -> re-read exact error, rethink root cause, or ask user{cb_doc_suffix}."
         )
 
     # Triage injection (once per turn when plan not created)
@@ -202,7 +234,7 @@ def main() -> None:
             auto_reqs = extract_auto_reqs(last_input)
             jits = _compact_domain_checklists(domains, profile, max_items=6)
             inject_lines.append(
-                f"[Planner Triage|T{tier} {triage.get('tier_name')}|mode=lean|dom={dom_str}|mods={mods}|strat={triage.get('research_strategy')}]"
+                f"[Planner Triage|T{tier} {triage.get('tier_name')}|mode={mode_tag}|dom={dom_str}|mods={mods}|strat={triage.get('research_strategy')}]"
             )
             if auto_reqs:
                 inject_lines.append("REQS|" + " | ".join(auto_reqs))
@@ -211,9 +243,12 @@ def main() -> None:
         else:
             skill_md = PLUGIN_ROOT / "skills" / "dynamic-planner" / "SKILL.md"
             inject_lines.append(
-                f"[Planner Triage|T{tier} {triage.get('tier_name')}|mode=strict|dom={dom_str}|mods={mods}|strat={triage.get('research_strategy')}]\n"
+                f"[Planner Triage|T{tier} {triage.get('tier_name')}|mode={mode_tag}|dom={dom_str}|mods={mods}|strat={triage.get('research_strategy')}]\n"
                 f"PHASE 0 FIRST -> follow `{skill_md}` && lock REQs via `python3 {plan_cli} init ...` at `{task_md}`."
             )
+        if doc_hint_line and not hook_state.get("doc_hint_injected"):
+            hook_state["doc_hint_injected"] = True
+            inject_lines.append(doc_hint_line)
 
     # Runaway read guard (strict mode only)
     elif (
@@ -245,6 +280,29 @@ def main() -> None:
             )
         else:
             hook_state["invocations_since_anchor"] = since
+
+    # Non-blocking Blast Radius heads-up (once per turn, suppressed in ECO_MODE)
+    if not eco_mode and hook_state.get("blast_radius_warned") and not hook_state.get("blast_radius_notified"):
+        hook_state["blast_radius_notified"] = True
+        total_ed = len(hook_state.get("code_files_edited") or []) + len(hook_state.get("plugin_files_edited") or [])
+        inject_lines.append(
+            f"[BLAST RADIUS|T{tier} edited {total_ed} files] Scope expanded beyond simple fix -> keep edits tightly scoped to the request."
+        )
+
+    # Direct doc-lookup routing for Tier 0/1 technical queries (once per turn, suppressed in ECO_MODE)
+    if not eco_mode and doc_hint_line and not hook_state.get("doc_hint_injected"):
+        hook_state["doc_hint_injected"] = True
+        inject_lines.append(doc_hint_line)
+
+    # Event-driven 1-time classification for unseen models (never on known/cached/seeded models)
+    if mode_src == "auto:unseen" and model_name and not eco_mode:
+        mkey = normalize_model_key(model_name)
+        if mkey and hook_state.get("model_classify_prompted") != mkey:
+            cls_prompt = prepare_unseen_classification(model_name, plan_cli=plan_cli, profile=profile)
+            if cls_prompt:
+                hook_state["model_classify_prompted"] = mkey
+                inject_lines.append(cls_prompt)
+                record_telemetry("model_mode_classify_prompt", {"model": mkey})
 
     # Long-chat quota nudge (~25 turns or post-commit, suppressed in ECO_MODE)
     total_turns = int(hook_state.get("total_turns") or 1)

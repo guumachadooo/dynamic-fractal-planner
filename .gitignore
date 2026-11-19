@@ -8,5 +8,6 @@ __pycache__/
 .pytest_cache/
 .hook_state.json
 .metrics.jsonl
+.model_modes.json
 .last_good_backup/
 .bypass_gates

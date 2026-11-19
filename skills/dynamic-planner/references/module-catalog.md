@@ -3,7 +3,7 @@
 ## 1. Universal Modules
 | Module | Domain | Trigger | Gate |
 | :--- | :--- | :--- | :--- |
-| `MOD-DISCOVERY` | `discovery` | Tier >= 2 \|\| unknown symbols | `file:line` map + invariants |
+| `MOD-DISCOVERY` | `discovery` | Tier >= 2 \|\| unknown symbols | `file:line` map + invariants + GDK/Context7 API check |
 | `MOD-CONTRACT` | `contract` | Complex / multi-layer | Types, state, failure semantics |
 | `MOD-UI-FRONTEND` | `ui-frontend` | UI/CSS/layout/i18n | Anti-clipping, responsive, locale parity |
 | `MOD-BACKEND` | `api-backend` | API/auth/DB/migrations | Validation, auth, schema compat |
@@ -20,7 +20,8 @@
 {
   "schema_version": 3,
   "project_name": "MyApp",
-  "planner_mode": "lean",
+  "planner_mode": "auto",
+  "auto_mode": {"overrides": {}},
   "read_budget": {"max_full_read_lines": 300, "max_slice_lines": 250},
   "secret_guard": {"enabled": true},
   "blast_radius": {"simple_tier_max_files": 3},

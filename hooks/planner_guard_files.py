@@ -321,7 +321,7 @@ def main() -> None:
     if is_app or is_plugin_protected:
         _, task_md, _, hook_file = get_paths(payload)
         hook_state = load_json(hook_file)
-        mode = get_planner_mode(profile)
+        mode = get_planner_mode(profile, payload, hook_state=hook_state)
         plan_ready = has_active_turn_plan(payload, hook_state)
         triage = hook_state.get("triage")
         if not triage:
@@ -355,15 +355,30 @@ def main() -> None:
                     )
                     return
         else:
-            # lean mode: Blast Radius Guard on simple turns (Tier<=1) w/o active plan -> 4th distinct file force_ask
-            max_simple = int((profile.get("blast_radius") or {}).get("simple_tier_max_files") or 3)
-            if tier <= 1 and not plan_ready and edit_key not in edited and len(edited) >= max_simple:
-                record_telemetry("blast_radius_force_ask", {"edited": len(edited)})
-                reply(
-                    "force_ask",
-                    f"BLAST RADIUS GUARD|Simple Tier {tier} turn already edited {len(edited)} code files; editing `{edit_key}` expands scope. Confirm?",
-                )
-                return
+            # lean mode: Blast Radius Guard on simple turns (Tier<=1) w/o active plan
+            # Default action is non-blocking "warn" so Antigravity's permission dialog is never spammed
+            # with one-time-only `force_ask` prompts. Projects can opt-in to `"action": "force_ask"`,
+            # which still asks at most ONCE per turn (cleared once approved).
+            br_cfg = profile.get("blast_radius") if isinstance(profile.get("blast_radius"), dict) else {}
+            if br_cfg.get("enabled", True) is not False:
+                max_simple = int(br_cfg.get("simple_tier_max_files") or 3)
+                br_action = str(br_cfg.get("action") or "warn").strip().lower()
+                if tier <= 1 and not plan_ready and edit_key not in edited and len(edited) >= max_simple:
+                    if br_action == "force_ask":
+                        if not hook_state.get("blast_radius_approved"):
+                            record_telemetry("blast_radius_force_ask", {"edited": len(edited)})
+                            reply(
+                                "force_ask",
+                                f"BLAST RADIUS GUARD|Simple Tier {tier} turn already edited {len(edited)} code files; editing `{edit_key}` expands scope. Confirm?",
+                            )
+                            return
+                    elif br_action != "off" and not hook_state.get("blast_radius_warned"):
+                        from planner_state import save_json  # noqa: E402
+
+                        hook_state["blast_radius_warned"] = True
+                        hook_state["blast_radius_notified"] = False
+                        save_json(hook_file, hook_state)
+                        record_telemetry("blast_radius_warn", {"edited": len(edited)})
 
         if tier >= 2 and is_app and not in_plugin and not hook_state.get("turn_snapshot_taken"):
             _capture_invisible_snapshot(repo, hook_file, hook_state)

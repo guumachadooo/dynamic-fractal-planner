@@ -50,12 +50,13 @@ def main() -> None:
         BOOTSTRAP_REQUIRED_FILES,
         DEFAULT_EXTRA_REQUESTS_FILE,
         bootstrap_workspace,
+        detect_doc_mcps,
         eval_conditions,
         get_paths,
         get_pending_extra_requests,
-        get_planner_mode,
         is_real_project_root,
         load_project_profile_with_warnings,
+        resolve_planner_mode_info,
         resolve_repo_root,
     )
 
@@ -69,13 +70,19 @@ def main() -> None:
     _, task_md, _, _ = get_paths(payload)
 
     proj_name = profile.get("project_name") or repo.name
-    mode = get_planner_mode(profile)
+    mode, mode_src, model_name = resolve_planner_mode_info(profile, payload)
+    if mode_src == "auto:unseen" and model_name:
+        mode_tag = f"{mode}(auto:{model_name}|unseen)"
+    elif mode_src.startswith("auto:") and model_name and model_name.lower() != "auto":
+        mode_tag = f"{mode}(auto:{model_name})"
+    else:
+        mode_tag = mode
     branch = run_git(repo, ["branch", "--show-current"])
     recent_commits = run_git(repo, ["log", "-n", "4", "--oneline"])
     dirty_lines = [l for l in run_git(repo, ["status", "-s"]).splitlines() if l.strip()]
 
     tree_state = "clean" if not dirty_lines else f"{len(dirty_lines)} dirty"
-    head_meta = f"[{proj_name}|mode={mode}" + (f"|branch={branch}|tree={tree_state}]" if branch else f"|ws={repo}]")
+    head_meta = f"[{proj_name}|mode={mode_tag}" + (f"|branch={branch}|tree={tree_state}]" if branch else f"|ws={repo}]")
     lines = [head_meta]
 
     session_cfg: dict[str, Any] = profile.get("session") or {}
@@ -163,6 +170,15 @@ def main() -> None:
         lines.append("Auto-initialized project docs/profile: " + ", ".join(f"`{p}`" for p in auto_initialized))
     for w in profile_warnings:
         lines.append(f"Schema warning: {w}")
+
+    doc_mcps = detect_doc_mcps(profile)
+    doc_mcp_parts: list[str] = []
+    if doc_mcps.get("gdk"):
+        doc_mcp_parts.append("google-developer-knowledge(search_documents/answer_query)")
+    if doc_mcps.get("context7"):
+        doc_mcp_parts.append("context7(resolve-library-id->query-docs)")
+    if doc_mcp_parts:
+        lines.append("DOC_MCP|" + " + ".join(doc_mcp_parts))
 
     plan_cli = PLUGIN_ROOT / "scripts" / "plan_tool.py"
     verify_cli = PLUGIN_ROOT / "scripts" / "verify_universal.py"

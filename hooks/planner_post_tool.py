@@ -23,7 +23,13 @@ TRACKED_TOOLS = frozenset({
     "replace_file_content",
     "write_to_file",
     "run_command",
+    "enter_plan_mode",
+    "exit_plan_mode",
 })
+
+
+def _emit_ok(is_pre: bool) -> None:
+    print('{"decision": "allow"}' if is_pre else "{}")
 
 UNIVERSAL_BUILD_TEST_RE = re.compile(
     r"(?:^|\s|&&|\|\||;)(?:"
@@ -77,15 +83,19 @@ def _matches_build_rule(cmd: str, profile: dict[str, Any]) -> bool:
 
 
 def main() -> None:
+    is_pre = "--pre" in sys.argv[1:]
     if (PLUGIN_ROOT / ".bypass_gates").exists():
-        print("{}")
+        _emit_ok(is_pre)
         return
 
     payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     tool = payload.get("toolCall") or {}
     name = (tool.get("name") or "").lower()
     if name not in TRACKED_TOOLS:
-        print("{}")
+        _emit_ok(is_pre)
+        return
+    if is_pre and name not in ("enter_plan_mode", "exit_plan_mode"):
+        _emit_ok(True)
         return
 
     if str(HOOKS_DIR) not in sys.path:
@@ -99,7 +109,10 @@ def main() -> None:
         is_verifiable_path,
         load_json,
         load_project_profile,
+        normalize_model_key,
         normalize_rel_path,
+        pin_native_plan_model,
+        record_telemetry,
         resolve_repo_root,
         save_json,
     )
@@ -116,7 +129,15 @@ def main() -> None:
     hook_state["last_activity_ts"] = now
     changed = False
 
-    if name in ("read_file", "view_file"):
+    if name in ("enter_plan_mode", "exit_plan_mode"):
+        raw_model = str(payload.get("modelName") or "").strip()
+        if raw_model and raw_model.lower() != "auto":
+            if pin_native_plan_model(raw_model, name):
+                record_telemetry("model_mode_auto_pin", {"model": normalize_model_key(raw_model), "tool": name})
+        hook_state["native_plan_turn_sig"] = str(hook_state.get("turn_sig") or "")
+        hook_state["native_plan_active_ts"] = now
+        changed = True
+    elif name in ("read_file", "view_file"):
         path = args.get("Path") or args.get("AbsolutePath") or args.get("TargetFile") or ""
         plugin_rel, in_plugin = is_plugin_path(path)
         is_plugin_code = in_plugin and plugin_rel.lower().endswith((".py", ".json", ".md", ".sh"))
@@ -169,6 +190,13 @@ def main() -> None:
                 hook_state["file_edit_counts"] = counts
                 if is_build_relevant_path(path, repo, profile):
                     hook_state["needs_build"] = True
+            changed = True
+
+        # Once a >max_simple file edit succeeds, mark blast radius approved for the rest of the turn
+        max_simple = int((profile.get("blast_radius") or {}).get("simple_tier_max_files") or 3)
+        total_edited = len(hook_state.get("code_files_edited") or []) + len(hook_state.get("plugin_files_edited") or [])
+        if total_edited > max_simple and not hook_state.get("blast_radius_approved"):
+            hook_state["blast_radius_approved"] = True
             changed = True
 
     elif name == "run_command":
@@ -231,11 +259,12 @@ def main() -> None:
     if changed:
         save_json(hook_file, hook_state)
 
-    print("{}")
+    _emit_ok(is_pre)
 
 
 if __name__ == "__main__":
+    _is_pre = "--pre" in sys.argv[1:]
     try:
         main()
     except Exception:
-        print("{}")
+        _emit_ok(_is_pre)
