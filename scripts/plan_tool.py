@@ -30,68 +30,68 @@ from complexity_triage import (  # noqa: E402
     build_recommended_modules,
     load_project_profile,
 )
-from planner_state import bootstrap_workspace  # noqa: E402
-from schema_migrations import CURRENT_SCHEMA_VERSION, migrate_profile  # noqa: E402
+from planner_state import auto_upgrade_workspace, bootstrap_workspace, mark_docs_migrated  # noqa: E402
+from schema_migrations import CURRENT_DOCS_FORMAT_VERSION, CURRENT_SCHEMA_VERSION, migrate_profile  # noqa: E402
 
 UNIVERSAL_CHECKLISTS: dict[str, list[str]] = {
     "discovery": [
-        "Locate targets with `grep -rn` / `git grep -n` first; read <=150-line slices (or use `research` subagent for >=3 subsystems).",
-        "Check repo instructions (`AGENTS.md`, `GEMINI.md`, `.agents/docs/PROJECT_HISTORY.md`, README) for local invariants.",
+        "grep/git grep first -> <=150L slices (`research` subagent if >=3 subsystems).",
+        "Check `AGENTS.md`, `GEMINI.md`, `.agents/docs/PROJECT_HISTORY.md`, README -> local invariants.",
     ],
     "contract": [
-        "Define affected files, interfaces/signatures, state ownership, and failure modes BEFORE first code edit.",
+        "Lock affected files, interfaces/signatures, state ownership && failure modes pre-edit.",
     ],
     "ui-frontend": [
-        "Preserve responsive layout safety, overflow/clipping prevention, accessibility, and user locale/i18n consistency.",
+        "Guard responsive layout, !overflow/clipping, a11y && locale/i18n parity.",
     ],
     "api-backend": [
-        "Validate inputs, auth/permission boundaries, error responses, and backward compatibility of schemas/contracts.",
+        "Validate inputs, auth/perm boundaries, error responses && schema/contract backward-compat.",
     ],
     "core-logic": [
-        "Guard boundary conditions (empty/null/EOF/overflow), state invariants, and deterministic behavior.",
+        "Guard boundary cases (empty/null/EOF/overflow), state invariants && determinism.",
     ],
     "runtime-infra": [
-        "Check concurrency/race conditions, resource disposal/cleanup, process exit codes, and error logging.",
+        "Audit concurrency/races, resource disposal/cleanup, exit codes && error logging.",
     ],
     "tests-qa": [
-        "Run real tests after final edits and verify both happy-path and edge-case failures.",
+        "Run real tests post-final-edit -> verify happy-path && edge/failure cases.",
     ],
     "build-ci": [
-        "Check `.agents/docs/EXTRA_REQUESTS.md` first and ensure build/packaging/CI checks pass cleanly.",
+        "Clear `.agents/docs/EXTRA_REQUESTS.md` first && pass build/packaging/CI checks.",
     ],
     "agent-infra": [
-        "Keep agent docs/scripts crisp, verify JSON/script syntax, and test hooks with simulated inputs.",
+        "Write agent docs in symbolic telegraphic EN; verify JSON/script syntax && run hook sim tests.",
     ],
     "plugin-self": [
-        "Never break an older `schema_version` without a deterministic migrator in `scripts/schema_migrations.py`.",
-        "Preserve frozen fixtures in `tests/fixtures/` and run `tests/run_plugin_tests.py` after final edits.",
+        "!break older `schema_version` -> add deterministic migrator in `scripts/schema_migrations.py`.",
+        "Preserve frozen `tests/fixtures/` && run `tests/run_plugin_tests.py` post-final-edit.",
     ],
     "harden": [
-        "Audit null/empty inputs, error messages, resource cleanup, and zero regression of existing capabilities.",
+        "Audit null/empty inputs, error msgs, cleanup && zero regression.",
     ],
     "audit": [
-        "Run `verify_universal.py` (with `--build` if compiled code changed) and inspect `git diff` after the final edit.",
-        "Audit every `REQ-01..REQ-N` item-by-item against observed files/tool outputs and mark via `req-verify`.",
+        "Run `verify_universal.py` (`--build` on compiled code) && inspect `git diff` post-final-edit.",
+        "Verify `REQ-01..REQ-N` item-by-item vs observed files/outputs -> mark via `req-verify`.",
     ],
     "general": [
-        "Follow existing repository coding style, naming conventions, and modular structure.",
+        "Match repo coding style, naming && modular structure.",
     ],
 }
 
 DEFAULT_MODULE_STEPS: dict[str, list[str]] = {
     "discovery": [
-        "Map affected files, symbols, and call sites via grep/scoped reads (or `research` subagent).",
-        "Review project conventions, pitfalls (`PROJECT_HISTORY.md`), and constraints for touched areas.",
+        "Map affected files, symbols && call sites via grep/scoped slices (or `research` subagent).",
+        "Check conventions, pitfalls (`PROJECT_HISTORY.md`) && touched-area constraints.",
     ],
     "contract": [
-        "Specify exact file list, interfaces, data/state flow, and failure/fallback behavior.",
+        "Specify exact file list, interfaces, state flow && failure/fallback behavior.",
     ],
     "harden": [
-        "Audit edge cases, error handling, resource cleanup, and backward compatibility.",
+        "Audit edge cases, error handling, cleanup && backward-compat.",
     ],
     "audit": [
-        "Run `verify_universal.py` (plus build/tests if applicable) and inspect `git diff --stat`.",
-        "Verify every `REQ-XX` against actual files/outputs and record `req-verify` evidence.",
+        "Run `verify_universal.py` (+ build/tests if applicable) && inspect `git diff --stat`.",
+        "Verify every `REQ-XX` vs observed files/outputs -> record `req-verify` evidence.",
     ],
 }
 
@@ -199,19 +199,19 @@ def render_markdown(state: dict[str, Any]) -> str:
     done_mods = sum(1 for m in mods if m.get("status") == "done")
 
     lines = [
-        f"# Dynamic Task Plan — Tier {tier} ({tier_name})",
+        f"# Task Plan — T{tier} ({tier_name})",
         "",
         f"- **Goal:** {state.get('goal', '')}",
-        f"- **Lifecycle Status:** `{state.get('lifecycle', 'active')}`"
+        f"- **State:** `{state.get('lifecycle', 'active')}`"
         + (f" — {state['pause_reason']}" if state.get("pause_reason") else ""),
-        f"- **Progress:** `{verified_reqs}/{len(reqs)}` requirements verified | `{done_mods}/{len(mods)}` planning modules done",
-        f"- **Detected Domains:** `{', '.join(state.get('domains') or ['general'])}`",
-        f"- **Research Strategy:** `{state.get('research_strategy', 'scoped_grep_and_line_slices')}`",
+        f"- **Progress:** `{verified_reqs}/{len(reqs)}` REQs verified | `{done_mods}/{len(mods)}` modules done",
+        f"- **Domains:** `{', '.join(state.get('domains') or ['general'])}`",
+        f"- **Strategy:** `{state.get('research_strategy', 'scoped_grep_and_line_slices')}`",
         "",
         "---",
         "",
-        "## 1. Requirement Lock (Phase 0)",
-        "| ID | Status | Requirement | Acceptance / Evidence |",
+        "## 1. REQs (Phase 0)",
+        "| ID | Status | REQ | Acceptance / Evidence |",
         "| :--- | :--- | :--- | :--- |",
     ]
     for r in reqs:
@@ -220,7 +220,7 @@ def render_markdown(state: dict[str, Any]) -> str:
         chk = f" ({r['check_note']})" if r.get("check_note") else ""
         lines.append(f"| `{r['id']}` | `{icon}` {r.get('status', 'pending')} | {r['summary']} | {ev}{chk} |")
 
-    lines.extend(["", "## 2. Dynamic Planning Modules", ""])
+    lines.extend(["", "## 2. Modules", ""])
     for m in mods:
         m_icon = STATUS_ICON.get(m.get("status", "pending"), "[ ]")
         linked = ", ".join(m.get("linked_reqs") or []) or "All"
@@ -230,7 +230,7 @@ def render_markdown(state: dict[str, Any]) -> str:
             continue
         lines.append(f"### {m_icon} `{m['id']}` — {m['title']} (`{m.get('domain', 'general')}` | REQs: {linked})")
         if m.get("checklist"):
-            lines.append("**Module Guardrails:**")
+            lines.append("**Guardrails:**")
             for c in m["checklist"]:
                 lines.append(f"- {c}")
         lines.append("**Steps:**")
@@ -626,6 +626,16 @@ def cmd_migrate(args: argparse.Namespace, ws_root: Path) -> int:
 
     if raw == migrated:
         print(f"Profile `{profile_path}` is already up to date at schema_version {resolved_ver}.")
+        if not getattr(args, "dry_run", False) and (ws_root / ".agents" / "docs").is_dir():
+            up = auto_upgrade_workspace(ws_root)
+            if up.get("boilerplate_upgraded"):
+                print("AUTO_UPGRADED|templates=" + ",".join(up["boilerplate_upgraded"]))
+            if up.get("docs_needing_ai_conversion"):
+                print(
+                    "DOCS_MIGRATION_PENDING|files="
+                    + ",".join(up["docs_needing_ai_conversion"])
+                    + "|run lossless rewrite -> plan_tool.py docs-migrated"
+                )
         return 0
 
     if getattr(args, "dry_run", False):
@@ -640,6 +650,26 @@ def cmd_migrate(args: argparse.Namespace, ws_root: Path) -> int:
     profile_path.write_text(json.dumps(migrated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     old_label = raw_ver if raw_ver is not None else "1 (implicit)"
     print(f"Migrated `{profile_path}`: v{old_label} -> schema_version {resolved_ver}.")
+    if (ws_root / ".agents" / "docs").is_dir():
+        up = auto_upgrade_workspace(ws_root)
+        if up.get("boilerplate_upgraded"):
+            print("AUTO_UPGRADED|templates=" + ",".join(up["boilerplate_upgraded"]))
+        if up.get("docs_needing_ai_conversion"):
+            print(
+                "DOCS_MIGRATION_PENDING|files="
+                + ",".join(up["docs_needing_ai_conversion"])
+                + "|run lossless rewrite -> plan_tool.py docs-migrated"
+            )
+    return 0
+
+
+def cmd_docs_migrated(args: argparse.Namespace, ws_root: Path) -> int:
+    """Validate symbolic telegraphic EN marker across managed project docs and stamp docs_format_version."""
+    ok, msg, files = mark_docs_migrated(ws_root, force=bool(getattr(args, "force", False)))
+    if not ok:
+        print(f"DOCS_MIGRATION_INCOMPLETE|{msg}|missing={','.join(files)}")
+        return 1
+    print(f"DOCS_MIGRATED|docs_format_version={CURRENT_DOCS_FORMAT_VERSION}|files={','.join(files)}|profile={msg}")
     return 0
 
 
@@ -720,7 +750,7 @@ def cmd_handoff(args: argparse.Namespace, ws_root: Path) -> int:
 
     lines = [
         "# Session Handoff",
-        f"ts={int(time.time())}|branch={branch}|head={head}|dirty={dirty}",
+        f"ts={int(time.time())}|branch={branch}|head={head}|dirty={dirty}|fmt={CURRENT_DOCS_FORMAT_VERSION}",
     ]
     if summary:
         lines.append(f"summary|{summary[:300]}")
@@ -825,6 +855,27 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_diagnostics(args: argparse.Namespace) -> int:
+    """Inspect or clear self-diagnostic anomaly logs in `.diagnostics/anomalies.jsonl`."""
+    from plugin_diagnostics import clear_anomalies, format_diagnostics_report  # noqa: E402
+
+    if getattr(args, "clear", False):
+        removed, target = clear_anomalies(kind_filter=getattr(args, "kind", "") or "")
+        if removed == 0:
+            print("DIAGNOSTICS_CLEARED|removed=0|clean")
+        else:
+            print(f"DIAGNOSTICS_CLEARED|removed={removed}|file={target}")
+        return 0
+    print(
+        format_diagnostics_report(
+            kind_filter=getattr(args, "kind", "") or "",
+            limit=int(getattr(args, "limit", 25) or 25),
+            raw=bool(getattr(args, "raw", False)),
+        )
+    )
+    return 0
+
+
 def cmd_model_mode(args: argparse.Namespace, ws_root: Path) -> int:
     """Inspect, persist, or clear cached `auto` model-mode classifications."""
     from model_mode_cache import (  # noqa: E402
@@ -881,6 +932,9 @@ def main() -> None:
     p_mig = sub.add_parser("migrate", help="Upgrade .agents/planner_profile.json on disk to current schema.")
     p_mig.add_argument("--dry-run", action="store_true")
     p_mig.add_argument("--no-backup", action="store_true")
+
+    p_dm = sub.add_parser("docs-migrated", help="Validate converted project docs and stamp docs_format_version.")
+    p_dm.add_argument("--force", action="store_true")
 
     p_init = sub.add_parser("init")
     p_init.add_argument("--goal", default="")
@@ -939,6 +993,12 @@ def main() -> None:
     p_st = sub.add_parser("stats", help="Show or reset local plugin telemetry stats.")
     p_st.add_argument("--reset", action="store_true")
 
+    p_diag = sub.add_parser("diagnostics", aliases=["diag"], help="Inspect or clear zero-token plugin anomaly logs.")
+    p_diag.add_argument("--clear", action="store_true")
+    p_diag.add_argument("--kind", default="")
+    p_diag.add_argument("--limit", type=int, default=25)
+    p_diag.add_argument("--raw", action="store_true")
+
     p_mm = sub.add_parser("model-mode", help="Inspect, persist, or clear cached auto model-mode verdicts.")
     mm_sub = p_mm.add_subparsers(dest="mm_cmd", required=True)
     p_mm_set = mm_sub.add_parser("set")
@@ -970,10 +1030,14 @@ def main() -> None:
         return
     if args.cmd == "migrate":
         raise SystemExit(cmd_migrate(args, ws_root))
+    if args.cmd == "docs-migrated":
+        raise SystemExit(cmd_docs_migrated(args, ws_root))
     if args.cmd == "handoff":
         raise SystemExit(cmd_handoff(args, ws_root))
     if args.cmd == "stats":
         raise SystemExit(cmd_stats(args))
+    if args.cmd in ("diagnostics", "diag"):
+        raise SystemExit(cmd_diagnostics(args))
     if args.cmd == "model-mode":
         raise SystemExit(cmd_model_mode(args, ws_root))
 

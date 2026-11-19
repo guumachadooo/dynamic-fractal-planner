@@ -9,6 +9,7 @@ Supports:
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import copy
 import importlib.util
@@ -40,6 +41,7 @@ import complexity_triage  # noqa: E402
 import log_digest  # noqa: E402
 import model_mode_cache  # noqa: E402
 import planner_state  # noqa: E402
+import plugin_diagnostics  # noqa: E402
 import repo_map  # noqa: E402
 import schema_migrations  # noqa: E402
 import verify_universal  # noqa: E402
@@ -186,10 +188,23 @@ def run_script(
     )
 
 
+_GIT_TEMPLATE_DIR: Path | None = None
+
+
+def _get_git_template() -> Path:
+    global _GIT_TEMPLATE_DIR
+    if _GIT_TEMPLATE_DIR is None or not (_GIT_TEMPLATE_DIR / ".git").is_dir():
+        tpl = Path(tempfile.mkdtemp(prefix="dfp_git_tpl_"))
+        subprocess.run(["git", "init", "-q"], cwd=str(tpl), check=True)
+        with (tpl / ".git" / "config").open("a", encoding="utf-8") as fh:
+            fh.write("[user]\n\temail = test@example.com\n\tname = Test User\n")
+        _GIT_TEMPLATE_DIR = tpl
+        atexit.register(shutil.rmtree, str(tpl), True)
+    return _GIT_TEMPLATE_DIR
+
+
 def init_git_repo(repo: Path) -> None:
-    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(repo), check=True)
+    shutil.copytree(_get_git_template() / ".git", repo / ".git")
 
 
 class TestSchemaMigrations(unittest.TestCase):
@@ -981,16 +996,28 @@ class TestV3Features(unittest.TestCase):
             })
             self.assertEqual(st_ok, {})
 
-            # Circuit Breaker on 4 edits to same file without passing build
-            for _ in range(4):
+            # Batched 5 edits in the SAME invocation must NOT trip Circuit Breaker
+            for _ in range(5):
                 run_hook("planner_post_tool.py", {
                     "workspacePaths": [str(repo)],
                     "artifactDirectoryPath": art,
                     "toolCall": {"name": "edit_file", "args": {"Path": str(repo / "app.py")}},
                 })
-            _, _, cb_edit = run_hook("planner_pre_invocation.py", {
+            _, _, cb_batch = run_hook("planner_pre_invocation.py", {
                 "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": "Fix test", "invocationNum": 3,
             })
+            self.assertNotIn("CIRCUIT BREAKER", json.dumps(cb_batch))
+
+            # Circuit Breaker DOES trigger across 4 distinct edit invocations without passing build/test
+            for inv_num in (4, 5, 6):
+                run_hook("planner_post_tool.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(repo / "app.py")}},
+                })
+                _, _, cb_edit = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": "Fix test", "invocationNum": inv_num,
+                })
             cb_edit_msg = cb_edit["injectSteps"][0]["systemMessage"]["systemMessage"]
             self.assertIn("CIRCUIT BREAKER", cb_edit_msg)
             self.assertIn("edited 4x", cb_edit_msg)
@@ -1040,6 +1067,30 @@ class TestV3Features(unittest.TestCase):
                 "toolCall": {"name": "run_command", "args": {"CommandLine": "dotnet build Foo.csproj -v:detailed"}},
             })
             self.assertNotIn("overwrite", cg_dn_keep)
+            _, _, cg_py = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest tests/"}},
+            })
+            self.assertEqual(cg_py.get("overwrite", {}).get("CommandLine"), "pytest tests/ -q --tb=short")
+            _, _, cg_py_v = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest -v tests/"}},
+            })
+            self.assertNotIn("overwrite", cg_py_v)
+            _, _, cg_grep = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "grep -n foo scripts/plan_tool.py"}},
+            })
+            self.assertNotIn("overwrite", cg_grep)
+            _, _, cg_pt = run_hook("planner_guard_command.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "python3 scripts/plan_tool.py status"}},
+            })
+            self.assertIn("PLANNER_ARTIFACT_DIR=", cg_pt.get("overwrite", {}).get("CommandLine", ""))
 
             # Pre-push blocked when code edited with needs_build=True
             hs_b = json.loads((Path(art) / "scratch" / ".hook_state.json").read_text(encoding="utf-8"))
@@ -1299,8 +1350,9 @@ class TestCavernV1V2V3Parity(unittest.TestCase):
             self.assertIn("UNIVERSAL VERIFY PASS", v_pass.stdout)
 
     def test_cavern_v1_v2_and_live_parity(self) -> None:
-        v1_cavern = json.loads((FIXTURES_DIR / "profile_v1_cavern.json").read_text(encoding="utf-8"))
-        self._assert_parity_for_profile("v1_cavern_fixture", v1_cavern)
+        if not FAST_MODE:  # v1->v3 migration parity already covered by TestSchemaMigrations fixtures
+            v1_cavern = json.loads((FIXTURES_DIR / "profile_v1_cavern.json").read_text(encoding="utf-8"))
+            self._assert_parity_for_profile("v1_cavern_fixture", v1_cavern)
 
         v2_cavern = json.loads((FIXTURES_DIR / "profile_v2_cavern.json").read_text(encoding="utf-8"))
         self.assertEqual(v2_cavern.get("schema_version"), 2)
@@ -1912,6 +1964,539 @@ class TestAutoModelMode(unittest.TestCase):
             self.assertIn("PLAN GATE", dec_new.get("reason", ""))
 
 
+class TestSymbolicTelegraphicStyle(unittest.TestCase):
+    def test_symbolic_telegraphic_en_rules_templates_and_nudges(self) -> None:
+        agents_txt = (PLUGIN_ROOT / "rules" / "AGENTS.md").read_text(encoding="utf-8")
+        mem_skill = (PLUGIN_ROOT / "skills" / "project-memory" / "SKILL.md").read_text(encoding="utf-8")
+        plan_skill = (PLUGIN_ROOT / "skills" / "dynamic-planner" / "SKILL.md").read_text(encoding="utf-8")
+
+        for txt in (agents_txt, mem_skill, plan_skill):
+            self.assertIn("symbolic telegraphic en", txt.lower())
+        self.assertIn("user's language", agents_txt)
+        self.assertIn("regardless of chat language", agents_txt)
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            planner_state.bootstrap_workspace(repo)
+
+            docs_dir = repo / ".agents" / "docs"
+            for name in ("PROJECT_HISTORY.md", "SAVED_IDEAS.md", "EXTRA_REQUESTS.md"):
+                content = (docs_dir / name).read_text(encoding="utf-8")
+                self.assertIn("STYLE|lossless symbolic telegraphic EN", content)
+                self.assertIn("->", content)
+
+            _, pending = planner_state.get_pending_extra_requests(repo, {})
+            self.assertEqual(pending, [])
+
+            # Stale memory docs + 2 dirty code files trigger MEMORY_FEEDBACK with symbolic telegraphic EN hint
+            old_ts = time.time() - 7200
+            for doc in docs_dir.glob("*.md"):
+                os.utime(doc, (old_ts, old_ts))
+            for idx in range(2):
+                (repo / f"mod_{idx}.py").write_text(f"val = {idx}\n", encoding="utf-8")
+
+            conv_id = f"sym_style_test_{os.getpid()}"
+            marker = Path(f"/tmp/.agy_mem_reminded_{conv_id}")
+            if marker.exists():
+                marker.unlink()
+            try:
+                _, _, dec_mem = run_hook("planner_guard_command.py", {
+                    "conversationId": conv_id,
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m 'test'"}},
+                })
+                self.assertEqual(dec_mem.get("decision"), "deny")
+                self.assertIn("symbolic telegraphic EN", dec_mem.get("reason", ""))
+            finally:
+                if marker.exists():
+                    marker.unlink()
+
+            # Long-chat QUOTA TIP nudge includes symbolic telegraphic EN guidance
+            run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "Check status",
+                "invocationNum": 1,
+            })
+            hook_file = Path(art) / "scratch" / ".hook_state.json"
+            hs = json.loads(hook_file.read_text(encoding="utf-8"))
+            hs["total_turns"] = 25
+            hs["handoff_nudged"] = False
+            hook_file.write_text(json.dumps(hs), encoding="utf-8")
+            _, _, nudge_out = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "Turn 26",
+                "invocationNum": 1,
+            })
+            nudge_str = json.dumps(nudge_out)
+            self.assertIn("QUOTA TIP", nudge_str)
+            self.assertIn("symbolic telegraphic EN", nudge_str)
+
+    def test_auto_upgrade_legacy_profile_and_empty_boilerplate_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+            agents_dir = repo / ".agents"
+            docs_dir = agents_dir / "docs"
+            docs_dir.mkdir(parents=True)
+
+            v1_text = (FIXTURES_DIR / "profile_v1_generic.json").read_text(encoding="utf-8")
+            prof_file = agents_dir / "planner_profile.json"
+            prof_file.write_text(v1_text, encoding="utf-8")
+
+            (docs_dir / "PROJECT_HISTORY.md").write_text(
+                "# Project History & Engineering Pitfalls (`PROJECT_HISTORY.md`)\n\n"
+                "> **Chronological Archive Only:** Never write `Current State`.\n\n"
+                "## 1. Environment & Stack Overview\n"
+                "- (Document runtime/build/test commands and key environments here.)\n\n"
+                "## 2. Technical Lessons & Known Pitfalls\n"
+                "- (Record non-obvious bugs, edge cases, and invariants so future sessions never repeat them.)\n\n"
+                "## 3. Version History (Newest First)\n"
+                "<!-- MAINTENANCE RULE: Always PREPEND -->\n",
+                encoding="utf-8",
+            )
+            (docs_dir / "SAVED_IDEAS.md").write_text(
+                "# Saved Ideas & Archived Prototypes (`SAVED_IDEAS.md`)\n\n"
+                "> Stores promising ideas.\n\n---\n",
+                encoding="utf-8",
+            )
+            (docs_dir / "EXTRA_REQUESTS.md").write_text(
+                "# Extra Request Queue (Parallel `/btw` Threads)\n\n"
+                "> **Instructions for the Primary Agent:**\n"
+                "> Before finishing any task, read this file.\n\n"
+                "## Pending Extra Requests\n(No pending requests.)\n\n"
+                "## Completed Requests\n(No completed requests recorded yet.)\n",
+                encoding="utf-8",
+            )
+
+            rc, err, ss = run_hook("planner_session_start.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+            })
+            self.assertEqual(rc, 0, err)
+            ss_msg = ss["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("AUTO_UPGRADED|", ss_msg)
+            self.assertNotIn("DOCS_AUTO_MIGRATE", ss_msg)
+
+            upgraded_prof = json.loads(prof_file.read_text(encoding="utf-8"))
+            self.assertEqual(upgraded_prof["schema_version"], 3)
+            self.assertEqual(upgraded_prof["docs_format_version"], 1)
+            self.assertEqual(upgraded_prof["custom_owner_note"], "preserve-me-losslessly")
+
+            for name in ("PROJECT_HISTORY.md", "SAVED_IDEAS.md", "EXTRA_REQUESTS.md"):
+                self.assertIn("STYLE|lossless symbolic telegraphic EN", (docs_dir / name).read_text(encoding="utf-8"))
+            self.assertEqual(planner_state.get_pending_extra_requests(repo, {})[1], [])
+
+    def test_auto_migrate_populated_legacy_docs_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+            agents_dir = repo / ".agents"
+            docs_dir = agents_dir / "docs"
+            docs_dir.mkdir(parents=True)
+
+            v2_prof = {"schema_version": 2, "project_name": "PopulatedLegacy", "build_rules": []}
+            prof_file = agents_dir / "planner_profile.json"
+            prof_file.write_text(json.dumps(v2_prof), encoding="utf-8")
+
+            pop_hist = "# Project History\n\n## 3. Version History\n- 2026-01-10: Corrigido bug no AudioTrack\n"
+            pop_ideas = "# Saved Ideas\n\n- Ideia shader bloom com render target separado\n"
+            empty_extra = (
+                "# Extra Request Queue\n\n"
+                "## Pending Extra Requests\n(No pending requests.)\n\n"
+                "## Completed Requests\n(No completed requests recorded yet.)\n"
+            )
+            (docs_dir / "PROJECT_HISTORY.md").write_text(pop_hist, encoding="utf-8")
+            (docs_dir / "SAVED_IDEAS.md").write_text(pop_ideas, encoding="utf-8")
+            (docs_dir / "EXTRA_REQUESTS.md").write_text(empty_extra, encoding="utf-8")
+
+            # 1. SessionStart upgrades profile v2->v3 & empty EXTRA_REQUESTS.md, preserves populated docs byte-for-byte
+            rc, err, ss = run_hook("planner_session_start.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+            })
+            self.assertEqual(rc, 0, err)
+            ss_msg = ss["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("DOCS_AUTO_MIGRATE|v0->v1", ss_msg)
+            self.assertIn("PROJECT_HISTORY.md", ss_msg)
+            self.assertIn("SAVED_IDEAS.md", ss_msg)
+            self.assertNotIn("EXTRA_REQUESTS.md", ss_msg.split("DOCS_AUTO_MIGRATE", 1)[1].split("ACT:", 1)[0])
+
+            prof_after_ss = json.loads(prof_file.read_text(encoding="utf-8"))
+            self.assertEqual(prof_after_ss["schema_version"], 3)
+            self.assertEqual(prof_after_ss.get("docs_format_version", 0), 0)
+            self.assertEqual((docs_dir / "PROJECT_HISTORY.md").read_text(encoding="utf-8"), pop_hist)
+            self.assertEqual((docs_dir / "SAVED_IDEAS.md").read_text(encoding="utf-8"), pop_ideas)
+            self.assertIn("STYLE|lossless symbolic telegraphic EN", (docs_dir / "EXTRA_REQUESTS.md").read_text(encoding="utf-8"))
+
+            # 2. PreInvocation injects [DOCS_AUTO_MIGRATE once per turn & Neon handoff does not re-inject
+            prompt = "Fix bug in AudioTrack"
+            _, _, pre1 = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": prompt,
+                "invocationNum": 1,
+            })
+            pre1_msg = pre1["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("[DOCS_AUTO_MIGRATE|v0->v1|", pre1_msg)
+
+            _, _, pre_handoff = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": prompt,
+                "invocationNum": 1,
+            })
+            self.assertEqual(pre_handoff, {})
+
+            # 3. docs-migrated fails before populated docs are converted
+            dm_fail = run_script("plan_tool.py", ["--workspace", str(repo), "docs-migrated"])
+            self.assertNotEqual(dm_fail.returncode, 0)
+            self.assertIn("DOCS_MIGRATION_INCOMPLETE", dm_fail.stdout)
+
+            # 4. Convert populated docs and stamp docs_format_version=1
+            (docs_dir / "PROJECT_HISTORY.md").write_text(
+                "# Project History\n> STYLE|lossless symbolic telegraphic EN ONLY\n- 2026-01-10|fix|AudioTrack glitch -> sync buffer\n",
+                encoding="utf-8",
+            )
+            (docs_dir / "SAVED_IDEAS.md").write_text(
+                "# Saved Ideas\n> STYLE|lossless symbolic telegraphic EN ONLY\n- IDEA|bloom shader -> deferred | offscreen RT\n",
+                encoding="utf-8",
+            )
+            dm_ok = run_script("plan_tool.py", ["--workspace", str(repo), "docs-migrated"])
+            self.assertEqual(dm_ok.returncode, 0, dm_ok.stdout + dm_ok.stderr)
+            self.assertIn("DOCS_MIGRATED|docs_format_version=1", dm_ok.stdout)
+            prof_done = json.loads(prof_file.read_text(encoding="utf-8"))
+            self.assertEqual(prof_done["docs_format_version"], 1)
+
+            # 5. Fast path on subsequent SessionStart & new-turn PreInvocation
+            _, _, ss2 = run_hook("planner_session_start.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+            })
+            self.assertNotIn("DOCS_AUTO_MIGRATE", ss2["injectSteps"][0]["systemMessage"]["systemMessage"])
+            _, _, pre2 = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "New task turn 2",
+                "invocationNum": 1,
+            })
+            self.assertNotIn("DOCS_AUTO_MIGRATE", json.dumps(pre2))
+
+    def test_handoff_v1_marker_and_future_schema_safety(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+            planner_state.bootstrap_workspace(repo)
+
+            ho = run_script("plan_tool.py", ["--workspace", str(repo), "handoff", "--summary", "fix|a.py", "--next", "test"])
+            self.assertEqual(ho.returncode, 0, ho.stdout + ho.stderr)
+            ho_txt = (repo / ".agents" / "docs" / "HANDOFF.md").read_text(encoding="utf-8")
+            self.assertIn("fmt=1", ho_txt)
+            self.assertTrue(planner_state.doc_has_current_format(".agents/docs/HANDOFF.md", ho_txt))
+
+            future_prof = {"schema_version": 99, "docs_format_version": 99, "project_name": "FutureApp"}
+            future_raw = json.dumps(future_prof)
+            prof_path = repo / ".agents" / "planner_profile.json"
+            prof_path.write_text(future_raw, encoding="utf-8")
+            up = planner_state.auto_upgrade_workspace(repo)
+            self.assertIsNone(up["profile_migrated"])
+            self.assertEqual(prof_path.read_text(encoding="utf-8"), future_raw)
+
+    def test_verify_universal_dedup_plugin_tests_and_git_stat(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+            # 1. should_run_plugin_tests skips redundant re-run when tests already passed since last plugin edit
+            hook_file = Path(art) / "scratch" / ".hook_state.json"
+            hook_file.parent.mkdir(parents=True, exist_ok=True)
+            now = time.time()
+            hook_file.write_text(json.dumps({
+                "needs_plugin_tests": False,
+                "last_plugin_edit_ts": now - 10,
+                "last_plugin_test_ts": now - 1,
+                "needs_build": True,
+                "needs_verify": True,
+                "file_edit_counts": {"app.py": 3},
+                "file_edit_last_inv": {"app.py": "1:2"},
+            }), encoding="utf-8")
+            with _patched_env({"PLANNER_ARTIFACT_DIR": art, "CAVERN_ARTIFACT_DIR": art}):
+                self.assertFalse(verify_universal.should_run_plugin_tests(PLUGIN_ROOT, PLUGIN_ROOT, ["README.md"], False))
+                self.assertTrue(verify_universal.should_run_plugin_tests(PLUGIN_ROOT, PLUGIN_ROOT, ["README.md"], True))
+
+            hook_file.write_text(json.dumps({
+                "needs_plugin_tests": True,
+                "last_plugin_edit_ts": now,
+                "last_plugin_test_ts": now - 10,
+            }), encoding="utf-8")
+            with _patched_env({"PLANNER_ARTIFACT_DIR": art, "CAVERN_ARTIFACT_DIR": art}):
+                self.assertTrue(verify_universal.should_run_plugin_tests(repo, PLUGIN_ROOT, [], False))
+
+            # 2. Chained `pytest && python3 verify_universal.py` clears BOTH needs_verify AND needs_build
+            hook_file.write_text(json.dumps({
+                "needs_build": True,
+                "needs_verify": True,
+                "file_edit_counts": {"app.py": 3},
+                "file_edit_last_inv": {"app.py": "1:2"},
+            }), encoding="utf-8")
+            run_hook("planner_post_tool.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "exitCode": 0,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest -q && python3 scripts/verify_universal.py"}},
+            })
+            hs_after = json.loads(hook_file.read_text(encoding="utf-8"))
+            self.assertFalse(hs_after.get("needs_verify"))
+            self.assertFalse(hs_after.get("needs_build"))
+            self.assertEqual(hs_after.get("file_edit_counts"), {})
+
+            # 3. verify_universal.py --git-stat appends git status -s and git diff --stat
+            (repo / "app.py").write_text("x = 2\n", encoding="utf-8")
+            res_gs = run_script(
+                "verify_universal.py",
+                ["--workspace", str(repo), "--git-stat"],
+                cwd=repo,
+                env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1", "PLANNER_ARTIFACT_DIR": art, "CAVERN_ARTIFACT_DIR": art},
+            )
+            self.assertEqual(res_gs.returncode, 0, res_gs.stdout + res_gs.stderr)
+            self.assertIn("UNIVERSAL VERIFY PASS", res_gs.stdout)
+            self.assertIn("M app.py", res_gs.stdout)
+            self.assertIn("1 file changed", res_gs.stdout)
+
+    def test_plugin_edits_not_double_counted_in_blast_radius(self) -> None:
+        with tempfile.TemporaryDirectory() as art:
+            run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(PLUGIN_ROOT)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "Fix hook bug",
+                "invocationNum": 1,
+            })
+            for rel in ("hooks/planner_stop.py", "hooks/planner_state.py", "scripts/plan_tool.py"):
+                run_hook("planner_post_tool.py", {
+                    "workspacePaths": [str(PLUGIN_ROOT)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(PLUGIN_ROOT / rel)}},
+                })
+            hs = json.loads((Path(art) / "scratch" / ".hook_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(hs.get("plugin_files_edited") or []), 3)
+            self.assertEqual(hs.get("code_files_edited") or [], [])
+
+    def test_root_agents_md_auto_migration_and_opt_out(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+            planner_state.bootstrap_workspace(repo)
+            # Simulate an outdated project that also has verbose root AGENTS.md
+            prof_file = repo / ".agents" / "planner_profile.json"
+            prof = json.loads(prof_file.read_text(encoding="utf-8"))
+            prof["docs_format_version"] = 0
+            prof_file.write_text(json.dumps(prof), encoding="utf-8")
+
+            root_agents = repo / "AGENTS.md"
+            verbose_agents = "# Project Rules\n\nPlease make sure to always run npm test before pushing.\n"
+            root_agents.write_text(verbose_agents, encoding="utf-8")
+
+            managed = planner_state.get_managed_project_docs(repo, prof)
+            self.assertIn("AGENTS.md", managed)
+
+            rc, err, ss = run_hook("planner_session_start.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+            })
+            self.assertEqual(rc, 0, err)
+            ss_msg = ss["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("DOCS_AUTO_MIGRATE|v0->v1", ss_msg)
+            self.assertIn("AGENTS.md", ss_msg)
+            # Never overwritten by Python
+            self.assertEqual(root_agents.read_text(encoding="utf-8"), verbose_agents)
+
+            # Opt-out via docs_migration.include_root_agent_docs: false excludes root AGENTS.md
+            prof["docs_migration"] = {"include_root_agent_docs": False}
+            prof_file.write_text(json.dumps(prof), encoding="utf-8")
+            self.assertNotIn("AGENTS.md", planner_state.get_managed_project_docs(repo, prof))
+
+            # Re-enable, convert AGENTS.md, and stamp docs-migrated
+            del prof["docs_migration"]
+            prof_file.write_text(json.dumps(prof), encoding="utf-8")
+            root_agents.write_text(
+                "# Rules\n> STYLE|lossless symbolic telegraphic EN ONLY\n- Pre-push -> `npm test`.\n",
+                encoding="utf-8",
+            )
+            dm = run_script("plan_tool.py", ["--workspace", str(repo), "docs-migrated"])
+            self.assertEqual(dm.returncode, 0, dm.stdout + dm.stderr)
+            self.assertEqual(json.loads(prof_file.read_text(encoding="utf-8"))["docs_format_version"], 1)
+
+    def test_unstructured_prose_skips_auto_reqs_echo(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            prose = (
+                "Eu percebi que tem um problema no sistema. "
+                "Precisa melhorar o cache da api no servidor e também corrigir o fluxo de build e testes antes de publicar a nova versão."
+            )
+            _, _, pre = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": prose,
+                "invocationNum": 1,
+            })
+            msg = pre["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("[Triage|", msg)
+            self.assertIn("JIT|", msg)
+            self.assertNotIn("REQS|", msg)
+
+
+class TestSelfDiagnostics(unittest.TestCase):
+    def test_diagnostics_isolation_redaction_and_ring_buffer(self) -> None:
+        # 1. Isolated during tests without PLANNER_DIAGNOSTICS_DIR
+        with _patched_env({"PLANNER_DISABLE_TELEMETRY": "1", "PLANNER_DIAGNOSTICS_DIR": ""}):
+            self.assertIsNone(plugin_diagnostics.resolve_diagnostics_file())
+            self.assertFalse(plugin_diagnostics.record_anomaly("hook_slow", "test.py", "sig", "detail"))
+
+        # 2. Secret redaction + ring-buffer trimming
+        with tempfile.TemporaryDirectory() as diag_dir:
+            fake_ghp = "ghp_" + "A1b2C3d4E5" * 3
+            fake_sk = "sk-" + "proj-" + "AbCdEf123456789012"
+            fake_bearer = "Bearer " + "tokSecretVal123456"
+            with _patched_env({"PLANNER_DIAGNOSTICS_DIR": diag_dir}):
+                ok = plugin_diagnostics.record_anomaly(
+                    "hook_exception",
+                    "test_hook.py",
+                    "ValueError:test",
+                    f"bad {fake_ghp} and {fake_sk} auth={fake_bearer}",
+                )
+                self.assertTrue(ok)
+                diag_file = Path(diag_dir) / "anomalies.jsonl"
+                txt = diag_file.read_text(encoding="utf-8")
+                self.assertNotIn(fake_ghp, txt)
+                self.assertNotIn(fake_sk, txt)
+                self.assertNotIn("tokSecretVal123456", txt)
+                self.assertIn("<REDACTED>", txt)
+
+                # Write >240 bulky entries to exceed TRIM_THRESHOLD_BYTES and cap at <= 200 lines
+                pad = "X" * 190
+                for idx in range(250):
+                    plugin_diagnostics.record_anomaly("hook_slow", "test.py", f"s:{idx}", f"{idx}:{pad}")
+                lines = [ln for ln in diag_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+                self.assertLessEqual(len(lines), plugin_diagnostics.MAX_ANOMALY_LINES)
+
+    def test_diagnostics_detectors_and_cli_report(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art, tempfile.TemporaryDirectory() as diag_dir:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+            planner_state.bootstrap_workspace(repo)
+            env_diag = {"PLANNER_DIAGNOSTICS_DIR": diag_dir}
+
+            # 1. record_hook_exception captures exception type + frame
+            with _patched_env(env_diag):
+                try:
+                    raise RuntimeError("boom_diag_test")
+                except RuntimeError as exc:
+                    self.assertTrue(plugin_diagnostics.record_hook_exception("fake_hook.py", exc, repo=repo))
+
+            # 2. stop_gate_loop: 2 consecutive identical Stop blocks record loop; passing Stop resets streak
+            hook_file = Path(art) / "scratch" / ".hook_state.json"
+            hook_file.parent.mkdir(parents=True, exist_ok=True)
+            hook_file.write_text(json.dumps({"needs_build": True, "code_files_edited": ["app.py"]}), encoding="utf-8")
+            for _ in range(2):
+                _, _, st = run_hook("planner_stop.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "fullyIdle": True,
+                    "terminationReason": "NO_TOOL_CALL",
+                }, env_extra=env_diag)
+                self.assertEqual(st.get("decision"), "continue")
+
+            hs = json.loads(hook_file.read_text(encoding="utf-8"))
+            self.assertEqual(hs.get("stop_block_streak"), 2)
+            hs["needs_build"] = False
+            hook_file.write_text(json.dumps(hs), encoding="utf-8")
+            _, _, st_ok = run_hook("planner_stop.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "fullyIdle": True,
+                "terminationReason": "NO_TOOL_CALL",
+            }, env_extra=env_diag)
+            self.assertEqual(st_ok, {})
+            self.assertEqual(json.loads(hook_file.read_text(encoding="utf-8")).get("stop_block_streak"), 0)
+
+            # 3. guard_deny_burst: 2 consecutive read-budget denies in same turn
+            big_py = repo / "big.py"
+            big_py.write_text("\n".join(f"x_{i} = {i}" for i in range(340)), encoding="utf-8")
+            for _ in range(2):
+                _, _, rd = run_hook("planner_guard_read.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "read_file", "args": {"Path": str(big_py)}},
+                }, env_extra=env_diag)
+                self.assertEqual(rd.get("decision"), "deny")
+
+            # 4. circuit_breaker_suspect & injection_bloat in PreInvocation
+            prompt = "1. Fix auth\n2. Add pytest tests\n3. Update API"
+            hook_file.write_text(json.dumps({
+                "turn_id": 1,
+                "total_turns": 1,
+                "turn_sig": f"1:{planner_state.prompt_hash(prompt)}",
+                "prompt_hash": planner_state.prompt_hash(prompt),
+                "turn_started_ts": time.time(),
+                "last_activity_ts": time.time(),
+                "last_invocation_num": 1,
+                "triage": {"tier": 2, "tier_name": "META_MODULES", "detected_domains": ["api-backend", "tests-qa"]},
+                "file_edit_counts": {"app.py": 4},
+                "same_cmd_fails": 0,
+                "last_build_failed": False,
+            }), encoding="utf-8")
+            env_bloat = {"PLANNER_DIAGNOSTICS_DIR": diag_dir, "PLANNER_INJECTION_BLOAT_CHARS": "50"}
+            _, _, pre = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": prompt,
+                "invocationNum": 2,
+            }, env_extra=env_bloat)
+            self.assertIn("CIRCUIT BREAKER", json.dumps(pre))
+
+            # 5. CLI `plan_tool.py diag`, filtering, SessionStart scoping & `--clear`
+            diag_out = run_script("plan_tool.py", ["diag"], env_extra=env_diag)
+            self.assertEqual(diag_out.returncode, 0, diag_out.stdout + diag_out.stderr)
+            for expected in ("hook_exception", "stop_gate_loop", "guard_deny_burst", "circuit_breaker_suspect", "injection_bloat"):
+                self.assertIn(expected, diag_out.stdout)
+
+            filt_out = run_script("plan_tool.py", ["diag", "--kind", "stop_gate_loop"], env_extra=env_diag)
+            self.assertEqual(filt_out.returncode, 0)
+            self.assertIn("stop_gate_loop", filt_out.stdout)
+            self.assertNotIn("guard_deny_burst", filt_out.stdout)
+
+            # User repo SessionStart MUST NOT inject DIAGNOSTICS|, PLUGIN_ROOT SessionStart MUST
+            _, _, ss_user = run_hook("planner_session_start.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+            }, env_extra=env_diag)
+            self.assertNotIn("DIAGNOSTICS|", json.dumps(ss_user))
+
+            _, _, ss_plugin = run_hook("planner_session_start.py", {
+                "workspacePaths": [str(PLUGIN_ROOT)],
+                "artifactDirectoryPath": art,
+            }, env_extra=env_diag)
+            self.assertIn("DIAGNOSTICS|", ss_plugin["injectSteps"][0]["systemMessage"]["systemMessage"])
+
+            clr = run_script("plan_tool.py", ["diag", "--clear"], env_extra=env_diag)
+            self.assertEqual(clr.returncode, 0)
+            self.assertIn("DIAGNOSTICS_CLEARED|", clr.stdout)
+            empty_out = run_script("plan_tool.py", ["diag"], env_extra=env_diag)
+            self.assertIn("DIAGNOSTICS|total=0|clean", empty_out.stdout)
+
+
 def _stamp_plugin_tests_passed() -> None:
     art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
     if not art_dir or os.environ.get("PLANNER_NO_HOOK_STAMP"):
@@ -1934,6 +2519,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run Dynamic Fractal Planner regression tests.")
     parser.add_argument("--fast", action="store_true", help="Run in-memory single-process tests (<5s).")
     parser.add_argument("--full", action="store_true", help="Run full subprocess integration tests (default).")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose per-test output (verbosity=2).")
     args, remaining = parser.parse_known_args()
     FAST_MODE = bool(args.fast and not args.full)
 
@@ -1943,7 +2529,7 @@ def main() -> int:
         suite = loader.loadTestsFromNames(targets, sys.modules[__name__])
     else:
         suite = loader.loadTestsFromModule(sys.modules[__name__])
-    runner = unittest.TextTestRunner(verbosity=2)
+    runner = unittest.TextTestRunner(verbosity=2 if args.verbose else 1)
     result = runner.run(suite)
     if result.wasSuccessful():
         _stamp_plugin_tests_passed()

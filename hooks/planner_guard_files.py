@@ -7,8 +7,10 @@ and invisible Tier>=2 git snapshot before 1st code edit.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -28,8 +30,25 @@ def allow() -> None:
     print(json.dumps({"decision": "allow"}))
 
 
-def reply(decision: str, reason: str) -> None:
+def reply(
+    decision: str,
+    reason: str,
+    payload: dict[str, Any] | None = None,
+    repo: Path | None = None,
+) -> None:
     print(json.dumps({"decision": decision, "reason": reason}, ensure_ascii=False))
+    if decision in ("deny", "force_ask") and payload is not None:
+        try:
+            _ensure_paths()
+            from planner_state import get_paths, load_json  # noqa: E402
+            from plugin_diagnostics import record_guard_deny_if_burst  # noqa: E402
+
+            _, _, _, hook_file = get_paths(payload)
+            hook_state = load_json(hook_file)
+            rule_sig = reason.split("|", 1)[0].split("(", 1)[0].strip()[:40]
+            record_guard_deny_if_burst("planner_guard_files.py", rule_sig, reason, hook_file, hook_state, repo=repo)
+        except Exception:
+            pass
 
 
 def _strip_line_comment(line: str) -> str:
@@ -241,153 +260,181 @@ def main() -> None:
         allow()
         return
 
-    payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
-    tool = payload.get("toolCall") or {}
-    tool_name = (tool.get("name") or "").lower()
-    args = tool.get("args") or {}
-    raw_path = args.get("Path") or args.get("TargetFile") or ""
-    if not raw_path:
-        allow()
-        return
-
-    _ensure_paths()
-    from planner_state import (  # noqa: E402
-        get_paths,
-        get_planner_mode,
-        has_active_turn_plan,
-        is_app_code_path,
-        is_plugin_path,
-        load_json,
-        load_project_profile,
-        normalize_rel_path,
-        record_telemetry,
-        resolve_plugin_root,
-        resolve_repo_root,
-        scan_secrets_and_conflicts,
-    )
-
-    repo = resolve_repo_root(payload)
-    profile = load_project_profile(repo)
-
-    # 1. Declarative per-project file guards (e.g., targetSdkVersion="28")
-    hit = check_declarative_file_guards(tool_name, args, raw_path, repo, profile)
-    if hit:
-        reply(hit[0], hit[1])
-        return
-
-    # 1b. Frozen historical fixture protection (v1 + v2)
-    plugin_rel, in_plugin = is_plugin_path(raw_path)
-    if in_plugin and re.match(r"^tests/fixtures/profile_v[12]_.*\.json$", plugin_rel):
-        if (resolve_plugin_root() / plugin_rel).exists():
-            reply(
-                "force_ask",
-                f"PLUGIN SAFETY GUARD|Frozen fixture `{plugin_rel}` is a backward-compat contract. Add migrator in `scripts/schema_migrations.py` instead.",
-            )
+    t0 = time.monotonic()
+    repo: Path | None = None
+    try:
+        payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
+        tool = payload.get("toolCall") or {}
+        tool_name = (tool.get("name") or "").lower()
+        args = tool.get("args") or {}
+        raw_path = args.get("Path") or args.get("TargetFile") or ""
+        if not raw_path:
+            allow()
             return
 
-    # 1c. Secret & merge-conflict shield
-    sg = profile.get("secret_guard") or {}
-    if sg.get("enabled", True):
-        written_text = (
-            (args.get("Replacement") or args.get("ReplacementContent") or "")
-            if tool_name in ("edit_file", "replace_file_content")
-            else (args.get("Content") or args.get("CodeContent") or "")
+        _ensure_paths()
+        from planner_state import (  # noqa: E402
+            get_paths,
+            get_planner_mode,
+            has_active_turn_plan,
+            is_app_code_path,
+            is_plugin_path,
+            load_json,
+            load_project_profile,
+            normalize_rel_path,
+            record_telemetry,
+            resolve_plugin_root,
+            resolve_repo_root,
+            scan_secrets_and_conflicts,
         )
-        rel_for_sec = plugin_rel if in_plugin else normalize_rel_path(raw_path, repo)[0]
-        sec_hits = scan_secrets_and_conflicts(written_text, rel_path=rel_for_sec, check_filename=True)
-        if sec_hits:
-            record_telemetry("shift_left_secret_conflict", {"file": rel_for_sec})
-            reply("deny", "SECRET/CONFLICT SHIELD|" + " ; ".join(sec_hits[:3]))
+
+        repo = resolve_repo_root(payload)
+        profile = load_project_profile(repo)
+
+        # 1. Declarative per-project file guards (e.g., targetSdkVersion="28")
+        hit = check_declarative_file_guards(tool_name, args, raw_path, repo, profile)
+        if hit:
+            reply(hit[0], hit[1], payload=payload, repo=repo)
             return
 
-    # 1d. Shift-left fail diff_rules before disk write
-    sl_hit = check_shift_left_diff_rules(tool_name, args, raw_path, repo, profile)
-    if sl_hit:
-        record_telemetry("shift_left_diff_rule", {"path": raw_path})
-        reply("deny", sl_hit)
-        return
+        # 1b. Frozen historical fixture protection (v1 + v2)
+        plugin_rel, in_plugin = is_plugin_path(raw_path)
+        if in_plugin and re.match(r"^tests/fixtures/profile_v[12]_.*\.json$", plugin_rel):
+            if (resolve_plugin_root() / plugin_rel).exists():
+                reply(
+                    "force_ask",
+                    f"PLUGIN SAFETY GUARD|Frozen fixture `{plugin_rel}` is a backward-compat contract. Add migrator in `scripts/schema_migrations.py` instead.",
+                    payload=payload,
+                    repo=repo,
+                )
+                return
 
-    # 1e. Destructive write_file shield (>150L existing code)
-    dw_hit = check_destructive_write(tool_name, args, raw_path, repo, profile, in_plugin, plugin_rel)
-    if dw_hit:
-        ev = "destructive_write_force_ask" if dw_hit[0] == "force_ask" else "full_rewrite_denied"
-        record_telemetry(ev, {"path": raw_path})
-        reply(dw_hit[0], dw_hit[1])
-        return
+        # 1c. Secret & merge-conflict shield
+        sg = profile.get("secret_guard") or {}
+        if sg.get("enabled", True):
+            written_text = (
+                (args.get("Replacement") or args.get("ReplacementContent") or "")
+                if tool_name in ("edit_file", "replace_file_content")
+                else (args.get("Content") or args.get("CodeContent") or "")
+            )
+            rel_for_sec = plugin_rel if in_plugin else normalize_rel_path(raw_path, repo)[0]
+            sec_hits = scan_secrets_and_conflicts(written_text, rel_path=rel_for_sec, check_filename=True)
+            if sec_hits:
+                record_telemetry("shift_left_secret_conflict", {"file": rel_for_sec})
+                reply("deny", "SECRET/CONFLICT SHIELD|" + " ; ".join(sec_hits[:3]), payload=payload, repo=repo)
+                return
 
-    # 2. Plan Gate (strict) vs Blast Radius Guard (lean) + invisible Tier>=2 snapshot
-    is_plugin_protected = in_plugin and plugin_rel.lower().endswith((".py", ".json", ".md", ".sh"))
-    is_app = is_app_code_path(raw_path, repo, profile)
-    if is_app or is_plugin_protected:
-        _, task_md, _, hook_file = get_paths(payload)
-        hook_state = load_json(hook_file)
-        mode = get_planner_mode(profile, payload, hook_state=hook_state)
-        plan_ready = has_active_turn_plan(payload, hook_state)
-        triage = hook_state.get("triage")
-        if not triage:
-            from complexity_triage import analyze_prompt  # noqa: E402
+        # 1d. Shift-left fail diff_rules before disk write
+        sl_hit = check_shift_left_diff_rules(tool_name, args, raw_path, repo, profile)
+        if sl_hit:
+            record_telemetry("shift_left_diff_rule", {"path": raw_path})
+            reply("deny", sl_hit, payload=payload, repo=repo)
+            return
 
-            triage = analyze_prompt(payload.get("lastUserInput") or "", repo)
-        tier = int(triage.get("tier") or 0)
-        edited = list(hook_state.get("code_files_edited") or []) + [
-            f"plugin:{p}" for p in (hook_state.get("plugin_files_edited") or [])
-        ]
-        edit_key = f"plugin:{plugin_rel}" if in_plugin else normalize_rel_path(raw_path, repo)[0]
+        # 1e. Destructive write_file shield (>150L existing code)
+        dw_hit = check_destructive_write(tool_name, args, raw_path, repo, profile, in_plugin, plugin_rel)
+        if dw_hit:
+            ev = "destructive_write_force_ask" if dw_hit[0] == "force_ask" else "full_rewrite_denied"
+            record_telemetry(ev, {"path": raw_path})
+            reply(dw_hit[0], dw_hit[1], payload=payload, repo=repo)
+            return
 
-        if mode == "strict":
-            if not plan_ready:
-                is_second_file = len(edited) >= 1 and edit_key not in edited
-                reads_no_plan = int(hook_state.get("code_reads_without_plan") or 0)
-                if tier >= 2 or is_second_file or reads_no_plan >= 4 or (in_plugin and plugin_rel.startswith(("hooks/", "scripts/"))):
-                    why = (
-                        f"Tier {tier} ({triage.get('tier_name')})"
-                        if tier >= 2
-                        else (
-                            f"modifying core plugin file `{plugin_rel}`"
-                            if in_plugin
-                            else ("editing multiple source files" if is_second_file else f"read {reads_no_plan} source files w/o plan")
-                        )
-                    )
-                    plan_cli = PLUGIN_ROOT / "scripts" / "plan_tool.py"
-                    reply(
-                        "deny",
-                        f"PLAN GATE ({why}): Initialize plan BEFORE editing -> `python3 {plan_cli} init --tier {max(2, tier) if (is_second_file or in_plugin) else max(1, tier)} --goal \"...\" --req \"REQ-01: ...\"` (at `{task_md}`).",
-                    )
-                    return
-        else:
-            # lean mode: Blast Radius Guard on simple turns (Tier<=1) w/o active plan
-            # Default action is non-blocking "warn" so Antigravity's permission dialog is never spammed
-            # with one-time-only `force_ask` prompts. Projects can opt-in to `"action": "force_ask"`,
-            # which still asks at most ONCE per turn (cleared once approved).
-            br_cfg = profile.get("blast_radius") if isinstance(profile.get("blast_radius"), dict) else {}
-            if br_cfg.get("enabled", True) is not False:
-                max_simple = int(br_cfg.get("simple_tier_max_files") or 3)
-                br_action = str(br_cfg.get("action") or "warn").strip().lower()
-                if tier <= 1 and not plan_ready and edit_key not in edited and len(edited) >= max_simple:
-                    if br_action == "force_ask":
-                        if not hook_state.get("blast_radius_approved"):
-                            record_telemetry("blast_radius_force_ask", {"edited": len(edited)})
-                            reply(
-                                "force_ask",
-                                f"BLAST RADIUS GUARD|Simple Tier {tier} turn already edited {len(edited)} code files; editing `{edit_key}` expands scope. Confirm?",
+        # 2. Plan Gate (strict) vs Blast Radius Guard (lean) + invisible Tier>=2 snapshot
+        is_plugin_protected = in_plugin and plugin_rel.lower().endswith((".py", ".json", ".md", ".sh"))
+        is_app = is_app_code_path(raw_path, repo, profile)
+        if is_app or is_plugin_protected:
+            _, task_md, _, hook_file = get_paths(payload)
+            hook_state = load_json(hook_file)
+            mode = get_planner_mode(profile, payload, hook_state=hook_state)
+            plan_ready = has_active_turn_plan(payload, hook_state)
+            triage = hook_state.get("triage")
+            if not triage:
+                from complexity_triage import analyze_prompt  # noqa: E402
+
+                triage = analyze_prompt(payload.get("lastUserInput") or "", repo)
+            tier = int(triage.get("tier") or 0)
+            plugin_edited = [f"plugin:{p}" for p in (hook_state.get("plugin_files_edited") or [])]
+            raw_plugin_set = set(hook_state.get("plugin_files_edited") or [])
+            code_edited = [c for c in (hook_state.get("code_files_edited") or []) if c not in raw_plugin_set]
+            edited = code_edited + plugin_edited
+            edit_key = f"plugin:{plugin_rel}" if in_plugin else normalize_rel_path(raw_path, repo)[0]
+
+            if mode == "strict":
+                if not plan_ready:
+                    is_second_file = len(edited) >= 1 and edit_key not in edited
+                    reads_no_plan = int(hook_state.get("code_reads_without_plan") or 0)
+                    if tier >= 2 or is_second_file or reads_no_plan >= 4 or (in_plugin and plugin_rel.startswith(("hooks/", "scripts/"))):
+                        why = (
+                            f"Tier {tier} ({triage.get('tier_name')})"
+                            if tier >= 2
+                            else (
+                                f"modifying core plugin file `{plugin_rel}`"
+                                if in_plugin
+                                else ("editing multiple source files" if is_second_file else f"read {reads_no_plan} source files w/o plan")
                             )
-                            return
-                    elif br_action != "off" and not hook_state.get("blast_radius_warned"):
-                        from planner_state import save_json  # noqa: E402
+                        )
+                        plan_cli = PLUGIN_ROOT / "scripts" / "plan_tool.py"
+                        reply(
+                            "deny",
+                            f"PLAN GATE ({why}): Initialize plan BEFORE editing -> `python3 {plan_cli} init --tier {max(2, tier) if (is_second_file or in_plugin) else max(1, tier)} --goal \"...\" --req \"REQ-01: ...\"` (at `{task_md}`).",
+                            payload=payload,
+                            repo=repo,
+                        )
+                        return
+            else:
+                br_cfg = profile.get("blast_radius") if isinstance(profile.get("blast_radius"), dict) else {}
+                if br_cfg.get("enabled", True) is not False:
+                    max_simple = int(br_cfg.get("simple_tier_max_files") or 3)
+                    br_action = str(br_cfg.get("action") or "warn").strip().lower()
+                    if tier <= 1 and not plan_ready and edit_key not in edited and len(edited) >= max_simple:
+                        if br_action == "force_ask":
+                            if not hook_state.get("blast_radius_approved"):
+                                record_telemetry("blast_radius_force_ask", {"edited": len(edited)})
+                                from plugin_diagnostics import record_anomaly  # noqa: E402
 
-                        hook_state["blast_radius_warned"] = True
-                        hook_state["blast_radius_notified"] = False
-                        save_json(hook_file, hook_state)
-                        record_telemetry("blast_radius_warn", {"edited": len(edited)})
+                                record_anomaly(
+                                    "blast_radius_suspect",
+                                    "planner_guard_files.py",
+                                    f"T{tier}:force_ask",
+                                    f"T{tier} edited={len(edited)} next={edit_key}",
+                                    repo=repo,
+                                )
+                                reply(
+                                    "force_ask",
+                                    f"BLAST RADIUS GUARD|Simple Tier {tier} turn already edited {len(edited)} code files; editing `{edit_key}` expands scope. Confirm?",
+                                    payload=payload,
+                                    repo=repo,
+                                )
+                                return
+                        elif br_action != "off" and not hook_state.get("blast_radius_warned"):
+                            from planner_state import save_json  # noqa: E402
 
-        if tier >= 2 and is_app and not in_plugin and not hook_state.get("turn_snapshot_taken"):
-            _capture_invisible_snapshot(repo, hook_file, hook_state)
+                            hook_state["blast_radius_warned"] = True
+                            hook_state["blast_radius_notified"] = False
+                            save_json(hook_file, hook_state)
+                            record_telemetry("blast_radius_warn", {"edited": len(edited)})
 
-    allow()
+            if tier >= 2 and is_app and not in_plugin and not hook_state.get("turn_snapshot_taken"):
+                _capture_invisible_snapshot(repo, hook_file, hook_state)
+
+        allow()
+    finally:
+        if (time.monotonic() - t0) * 1000.0 >= float(os.environ.get("PLANNER_SLOW_HOOK_MS") or 1500.0):
+            _ensure_paths()
+            from plugin_diagnostics import check_slow_hook  # noqa: E402
+
+            check_slow_hook("planner_guard_files.py", t0, repo=repo)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as exc:
+        try:
+            _ensure_paths()
+            from plugin_diagnostics import record_hook_exception  # noqa: E402
+
+            record_hook_exception("planner_guard_files.py", exc)
+        except Exception:
+            pass
         print('{"decision": "allow"}')

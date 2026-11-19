@@ -24,6 +24,7 @@ from model_mode_cache import (  # noqa: E402
     prepare_unseen_classification,
 )
 from schema_migrations import (  # noqa: E402
+    CURRENT_DOCS_FORMAT_VERSION,
     CURRENT_SCHEMA_VERSION,
     DEFAULT_BLAST_RADIUS,
     DEFAULT_READ_BUDGET,
@@ -93,36 +94,37 @@ PROJECT_SCAN_SKIP_DIRS = {
     "bin", "obj", "__pycache__", ".venv", "venv",
 }
 
-PROJECT_HISTORY_TEMPLATE = """# Project History & Engineering Pitfalls (`PROJECT_HISTORY.md`)
+PROJECT_HISTORY_TEMPLATE = """# Project History & Pitfalls (`PROJECT_HISTORY.md`)
 
-> **Chronological Archive Only:** Live workspace state, git status, and pending extra requests are injected dynamically at startup by `SessionStart`. **Never write `"Current State"` or `"Current Version"` headers in this static file.**
->
-> **How to Update:** Use Section 2 for reusable pitfalls/constraints and **prepend** concise 1–4 line milestone entries directly below the comment in Section 3 (newest first).
+> RULE|chronological archive ONLY (`SessionStart` injects live git/versions/queue) -> `!static("Current State"|"Current Version")`.
+> STYLE|lossless symbolic telegraphic EN ONLY (`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`, verbatim `path:line`, `symbol()`, invariants).
 
 ---
 
-## 1. Environment & Stack Overview
-- (Document runtime/build/test commands and key environments here.)
+## 1. Env & Stack
+<!-- ENV|runtime/build/test cmds & key constraints -->
 
-## 2. Technical Lessons & Known Pitfalls
-- (Record non-obvious bugs, edge cases, and invariants so future sessions never repeat them.)
+## 2. Pitfalls & Invariants
+<!-- FORMAT: - PITFALL|<path:sym> -> <root-cause/constraint> -> <safe fix> -->
 
 ## 3. Version History (Newest First)
-<!-- MAINTENANCE RULE: Always PREPEND new entries immediately below this comment (newest first). Never label any entry as "Current State". -->
+<!-- RULE: PREPEND 1-3L entries directly below (newest first). !static("Current State"). -->
+<!-- FORMAT: - YYYY-MM-DD|<tag>|<scope/file:sym> <change> -> <effect> | verified:<cmd> -->
 """
 
-SAVED_IDEAS_TEMPLATE = """# Saved Ideas & Archived Prototypes (`SAVED_IDEAS.md`)
+SAVED_IDEAS_TEMPLATE = """# Saved Ideas & Prototypes (`SAVED_IDEAS.md`)
 
-> Stores promising ideas, designs, algorithms, or snippets that were deferred or replaced temporarily, so they can be revisited cleanly later.
+> Deferred ideas/designs/algos/snippets for later revisit.
+> STYLE|lossless symbolic telegraphic EN ONLY (`!articles/copulas/filler`, ops `-> | && || !`, verbatim `path:sym`/snippets).
+<!-- FORMAT: - IDEA|<name> -> <why deferred> | <key mechanism/snippet> -->
 
 ---
 """
 
-EXTRA_REQUESTS_TEMPLATE = """# Extra Request Queue (Parallel `/btw` Threads)
+EXTRA_REQUESTS_TEMPLATE = """# Extra Request Queue (`/btw` Threads)
 
-> **Instructions for the Primary Agent:**
-> Before finishing any task, running `git commit`, or `git push`, read this file.
-> - If items exist under **Pending Extra Requests** (other than `(No pending requests.)`), plan and implement them first, then move them to **Completed Requests** restoring `(No pending requests.)`.
+> GATE|check pre-finish, `git commit` & `git push`: implement pending items -> move to `## Completed Requests` -> restore `(No pending requests.)`.
+> STYLE|lossless symbolic telegraphic EN ONLY (`!articles/filler`, ops `-> | &&`, verbatim `path:sym`). Format: `- REQ|<scope> -> <goal/constraint>`.
 
 ## Pending Extra Requests
 (No pending requests.)
@@ -130,6 +132,13 @@ EXTRA_REQUESTS_TEMPLATE = """# Extra Request Queue (Parallel `/btw` Threads)
 ## Completed Requests
 (No completed requests recorded yet.)
 """
+
+DOCS_STYLE_MARKER = "STYLE|lossless symbolic telegraphic EN"
+HANDOFF_FORMAT_MARKER = f"fmt={CURRENT_DOCS_FORMAT_VERSION}"
+_LEGACY_HISTORY_PLACEHOLDERS = {
+    "- (document runtime/build/test commands and key environments here.)",
+    "- (record non-obvious bugs, edge cases, and invariants so future sessions never repeat them.)",
+}
 
 
 def is_bypass_enabled() -> bool:
@@ -633,32 +642,28 @@ def resolve_extra_requests_rel(profile: dict[str, Any]) -> str:
     return (profile.get("extra_requests_file") or DEFAULT_EXTRA_REQUESTS_FILE).strip()
 
 
-def get_pending_extra_requests(repo: Path, profile: dict[str, Any] | None = None) -> tuple[str, list[str]]:
-    prof = profile if profile is not None else load_project_profile(repo)
-    rel = resolve_extra_requests_rel(prof)
-    extra_file = repo / rel
-    if not extra_file.is_file():
-        return rel, []
-    try:
-        text = extra_file.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return rel, []
+_PENDING_HEADING_ALTS = r"(?:Pending Extra Requests|Pedidos Extras Pendentes|Extra Requests|Pending|Queue)"
+_COMPLETED_HEADING_ALTS = r"(?:Completed Requests|Conclu[ií]dos|Completed)"
+_PENDING_SEC_RE = re.compile(
+    rf"^#{{2,3}}\s+{_PENDING_HEADING_ALTS}(?:\s*:)?[ \t]*\r?\n(.*?)(?=^#{{1,3}}\s+|\Z)",
+    flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+_PENDING_SEC_H1_RE = re.compile(
+    rf"^#\s+{_PENDING_HEADING_ALTS}(?:\s*:)?[ \t]*\r?\n(.*?)(?=^#\s+|\Z)",
+    flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+_COMPLETED_SEC_RE = re.compile(
+    rf"^#{{1,3}}\s+{_COMPLETED_HEADING_ALTS}(?:\s*:)?[ \t]*\r?\n(.*?)(?=^#{{1,3}}\s+|\Z)",
+    flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+_PENDING_HEADING_LINE_RE = re.compile(rf"^#{{1,3}}\s+{_PENDING_HEADING_ALTS}(?:\s*:)?\s*$", re.IGNORECASE)
+_COMPLETED_HEADING_LINE_RE = re.compile(rf"^#{{1,3}}\s+{_COMPLETED_HEADING_ALTS}(?:\s*:)?\s*$", re.IGNORECASE)
 
-    heading_alts = r"(?:Pending Extra Requests|Pedidos Extras Pendentes|Extra Requests|Pending|Queue)"
-    m = re.search(
-        rf"^#{{2,3}}\s+{heading_alts}(?:\s*:)?[ \t]*\r?\n(.*?)(?=^#{{1,3}}\s+|\Z)",
-        text,
-        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
-    )
-    if not m:
-        m = re.search(
-            rf"^#\s+{heading_alts}(?:\s*:)?[ \t]*\r?\n(.*?)(?=^#\s+|\Z)",
-            text,
-            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
-        )
-    if not m:
-        return rel, []
 
+def _extract_pending_extra_items(text: str) -> list[str]:
+    m = _PENDING_SEC_RE.search(text) or _PENDING_SEC_H1_RE.search(text)
+    if not m:
+        return []
     pending: list[str] = []
     for ln in m.group(1).splitlines():
         s = ln.strip()
@@ -671,7 +676,20 @@ def get_pending_extra_requests(repo: Path, profile: dict[str, Any] | None = None
         ):
             continue
         pending.append(s)
-    return rel, pending
+    return pending
+
+
+def get_pending_extra_requests(repo: Path, profile: dict[str, Any] | None = None) -> tuple[str, list[str]]:
+    prof = profile if profile is not None else load_project_profile(repo)
+    rel = resolve_extra_requests_rel(prof)
+    extra_file = repo / rel
+    if not extra_file.is_file():
+        return rel, []
+    try:
+        text = extra_file.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return rel, []
+    return rel, _extract_pending_extra_items(text)
 
 
 def is_real_project_root(repo: Path) -> bool:
@@ -835,6 +853,233 @@ def _detect_starter_build_rules(repo: Path) -> list[dict[str, Any]]:
     return rules
 
 
+def get_managed_project_docs(repo: Path, profile: dict[str, Any] | None = None) -> list[str]:
+    """Return existing plugin-managed `.md` docs in `repo` (excluding `.agents/docs/archive/`)."""
+    candidates: list[str] = [
+        ".agents/docs/PROJECT_HISTORY.md",
+        ".agents/docs/SAVED_IDEAS.md",
+        ".agents/docs/EXTRA_REQUESTS.md",
+        ".agents/docs/HANDOFF.md",
+    ]
+
+    def _add_candidate(raw_rel: Any, allow_root_md: bool = False) -> None:
+        if not isinstance(raw_rel, str):
+            return
+        rel = raw_rel.strip().replace("\\", "/").lstrip("./")
+        if not rel or rel.startswith("/") or ".." in rel.split("/") or not rel.lower().endswith(".md"):
+            return
+        if rel.startswith(".agents/docs/archive/"):
+            return
+        if not allow_root_md and not rel.startswith(".agents/docs/"):
+            return
+        if rel not in candidates:
+            candidates.append(rel)
+
+    if isinstance(profile, dict):
+        _add_candidate(profile.get("extra_requests_file"))
+        sess = profile.get("session")
+        if isinstance(sess, dict):
+            for p in sess.get("extra_docs") or []:
+                _add_candidate(p)
+        mf = profile.get("memory_feedback")
+        if isinstance(mf, dict):
+            for p in mf.get("docs") or []:
+                _add_candidate(p)
+        dm = profile.get("docs_migration")
+        if isinstance(dm, dict):
+            for p in dm.get("extra_paths") or []:
+                _add_candidate(p, allow_root_md=True)
+        if not isinstance(dm, dict) or dm.get("include_root_agent_docs", True) is not False:
+            for root_doc in ("AGENTS.md", "GEMINI.md"):
+                _add_candidate(root_doc, allow_root_md=True)
+    else:
+        for root_doc in ("AGENTS.md", "GEMINI.md"):
+            _add_candidate(root_doc, allow_root_md=True)
+
+    return [rel for rel in candidates if (repo / rel).is_file()]
+
+
+def doc_has_current_format(rel: str, text: str) -> bool:
+    """Return True if a managed doc carries the current symbolic telegraphic EN format marker."""
+    norm = (rel or "").replace("\\", "/")
+    explicit = f"dfp:format={CURRENT_DOCS_FORMAT_VERSION}"
+    if norm.endswith("/HANDOFF.md") or norm == "HANDOFF.md":
+        return (HANDOFF_FORMAT_MARKER in text) or (DOCS_STYLE_MARKER in text) or (explicit in text)
+    return (DOCS_STYLE_MARKER in text) or (explicit in text)
+
+
+def is_unmodified_legacy_doc(rel: str, text: str, repo: Path | None = None) -> bool:
+    """Return True ONLY when `text` is pure unmodified legacy template boilerplate (zero user content)."""
+    norm = (rel or "").replace("\\", "/")
+    if norm.endswith("/HANDOFF.md") or norm == "HANDOFF.md":
+        return False
+
+    if norm.endswith("/EXTRA_REQUESTS.md"):
+        if _extract_pending_extra_items(text):
+            return False
+        for ln in text.splitlines():
+            s = ln.strip()
+            if re.match(r"^#{2,3}\s+", s) and not (
+                _PENDING_HEADING_LINE_RE.match(s) or _COMPLETED_HEADING_LINE_RE.match(s)
+            ):
+                return False
+        m_done = _COMPLETED_SEC_RE.search(text)
+        if m_done:
+            done_clean = re.sub(r"<!--.*?-->", "", m_done.group(1), flags=re.DOTALL)
+            for ln in done_clean.splitlines():
+                s = ln.strip()
+                if s and not s.startswith("("):
+                    return False
+        outside = _PENDING_SEC_RE.sub("", text)
+        if outside == text:
+            outside = _PENDING_SEC_H1_RE.sub("", text)
+        outside = _COMPLETED_SEC_RE.sub("", outside)
+        outside = re.sub(r"<!--.*?-->", "", outside, flags=re.DOTALL)
+        for ln in outside.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            if not (s.startswith(("#", ">", "(")) or s in ("---", "***")):
+                return False
+        return True
+
+    stripped = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    if norm.endswith("/SAVED_IDEAS.md"):
+        for ln in stripped.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            if not (s.startswith(("#", ">")) or s in ("---", "***")):
+                return False
+        return True
+
+    if norm.endswith("/PROJECT_HISTORY.md"):
+        for ln in stripped.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            if s.startswith(("#", ">")) or s in ("---", "***") or s.lower() in _LEGACY_HISTORY_PLACEHOLDERS:
+                continue
+            return False
+        return True
+
+    return False
+
+
+def _template_for_managed_doc(rel: str) -> str | None:
+    norm = (rel or "").replace("\\", "/")
+    if norm.endswith("/PROJECT_HISTORY.md"):
+        return PROJECT_HISTORY_TEMPLATE
+    if norm.endswith("/SAVED_IDEAS.md"):
+        return SAVED_IDEAS_TEMPLATE
+    if norm.endswith("/EXTRA_REQUESTS.md"):
+        return EXTRA_REQUESTS_TEMPLATE
+    return None
+
+
+def auto_upgrade_workspace(repo: Path) -> dict[str, Any]:
+    """Upgrade outdated profile schema (v1/v2->v3) & untouched legacy templates in place (0 tokens)."""
+    res: dict[str, Any] = {
+        "profile_migrated": None,
+        "boilerplate_upgraded": [],
+        "docs_needing_ai_conversion": [],
+        "docs_format_stamped": False,
+        "current_docs_format": 0,
+        "target_docs_format": CURRENT_DOCS_FORMAT_VERSION,
+    }
+    if not is_real_project_root(repo) or not (repo / ".agents").is_dir():
+        return res
+
+    profile_path = repo / ".agents" / "planner_profile.json"
+    raw: dict[str, Any] = {}
+    is_future_schema = False
+    profile_dirty = False
+
+    if profile_path.is_file():
+        try:
+            loaded = json.loads(profile_path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            return res
+        if not isinstance(loaded, dict):
+            return res
+        raw = loaded
+        raw_ver = raw.get("schema_version")
+        is_future_schema = isinstance(raw_ver, int) and not isinstance(raw_ver, bool) and raw_ver > CURRENT_SCHEMA_VERSION
+        if not is_future_schema:
+            migrated, resolved_ver, _ = migrate_profile(raw)
+            if migrated != raw:
+                old_v = raw_ver if (isinstance(raw_ver, int) and not isinstance(raw_ver, bool)) else 1
+                res["profile_migrated"] = (old_v, resolved_ver)
+                raw = migrated
+                profile_dirty = True
+
+        doc_ver_raw = raw.get("docs_format_version")
+        try:
+            doc_ver = int(doc_ver_raw) if (doc_ver_raw is not None and not isinstance(doc_ver_raw, bool)) else 0
+        except (TypeError, ValueError):
+            doc_ver = 0
+        res["current_docs_format"] = doc_ver
+        if doc_ver >= CURRENT_DOCS_FORMAT_VERSION:
+            if profile_dirty and not is_future_schema:
+                profile_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return res
+
+    managed = get_managed_project_docs(repo, raw)
+    if not managed:
+        if profile_dirty and profile_path.is_file() and not is_future_schema:
+            profile_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return res
+
+    for rel in managed:
+        p = repo / rel
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+        if doc_has_current_format(rel, txt):
+            continue
+        tmpl = _template_for_managed_doc(rel)
+        if tmpl is not None and is_unmodified_legacy_doc(rel, txt, repo=repo):
+            p.write_text(tmpl, encoding="utf-8")
+            res["boilerplate_upgraded"].append(rel)
+        else:
+            res["docs_needing_ai_conversion"].append(rel)
+
+    if not res["docs_needing_ai_conversion"] and profile_path.is_file() and not is_future_schema:
+        raw["docs_format_version"] = CURRENT_DOCS_FORMAT_VERSION
+        profile_dirty = True
+        res["docs_format_stamped"] = True
+        res["current_docs_format"] = CURRENT_DOCS_FORMAT_VERSION
+
+    if profile_dirty and profile_path.is_file() and not is_future_schema:
+        profile_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    return res
+
+
+def mark_docs_migrated(repo: Path, force: bool = False) -> tuple[bool, str, list[str]]:
+    """Validate that managed docs carry current format marker and stamp `docs_format_version`."""
+    auto_upgrade_workspace(repo)
+    profile = load_project_profile(repo)
+    managed = get_managed_project_docs(repo, profile)
+    remaining = [
+        rel
+        for rel in managed
+        if not doc_has_current_format(rel, (repo / rel).read_text(encoding="utf-8", errors="ignore"))
+    ]
+    if remaining and not force:
+        return False, "Docs still missing symbolic telegraphic EN format marker", remaining
+
+    profile_path = repo / ".agents" / "planner_profile.json"
+    if not profile_path.is_file():
+        bootstrap_workspace(repo)
+    raw = load_json(profile_path)
+    raw_ver = raw.get("schema_version")
+    if isinstance(raw_ver, int) and not isinstance(raw_ver, bool) and raw_ver > CURRENT_SCHEMA_VERSION:
+        return False, f"Profile schema_version {raw_ver} > supported v{CURRENT_SCHEMA_VERSION}", []
+    migrated, _, _ = migrate_profile(raw)
+    migrated["docs_format_version"] = CURRENT_DOCS_FORMAT_VERSION
+    profile_path.write_text(json.dumps(migrated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True, str(profile_path), managed
+
+
 def bootstrap_workspace(repo: Path, name: str = "", force: bool = False) -> tuple[list[str], list[str]]:
     """Create missing `.agents/docs/*` and `.agents/planner_profile.json` without overwriting existing files."""
     agents_dir = repo / ".agents"
@@ -860,8 +1105,14 @@ def bootstrap_workspace(repo: Path, name: str = "", force: bool = False) -> tupl
     if profile_path.exists() and not force:
         skipped.append(profile_path.relative_to(repo).as_posix())
     else:
+        managed = get_managed_project_docs(repo, {})
+        all_current = all(
+            doc_has_current_format(rel, (repo / rel).read_text(encoding="utf-8", errors="ignore"))
+            for rel in managed
+        )
         profile = {
             "schema_version": CURRENT_SCHEMA_VERSION,
+            "docs_format_version": CURRENT_DOCS_FORMAT_VERSION if all_current else 0,
             "project_name": name or repo.name,
             "planner_mode": "lean",
             "read_budget": dict(DEFAULT_READ_BUDGET),

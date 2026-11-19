@@ -17,11 +17,13 @@ from typing import Any
 
 HOOKS_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = HOOKS_DIR.parent
+SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 
 
 def _ensure_paths() -> None:
-    if str(HOOKS_DIR) not in sys.path:
-        sys.path.insert(0, str(HOOKS_DIR))
+    for p in (str(HOOKS_DIR), str(SCRIPTS_DIR)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
 
 
 def allow(overwrite_cmd: str | None = None) -> None:
@@ -31,12 +33,34 @@ def allow(overwrite_cmd: str | None = None) -> None:
         print(json.dumps({"decision": "allow"}))
 
 
-def reply(decision: str, reason: str) -> None:
+def reply(
+    decision: str,
+    reason: str,
+    payload: dict[str, Any] | None = None,
+    repo: Path | None = None,
+) -> None:
     print(json.dumps({"decision": decision, "reason": reason}, ensure_ascii=False))
+    if decision in ("deny", "force_ask") and payload is not None:
+        try:
+            _ensure_paths()
+            from planner_state import get_paths, load_json  # noqa: E402
+            from plugin_diagnostics import record_guard_deny_if_burst  # noqa: E402
+
+            _, _, _, hook_file = get_paths(payload)
+            hook_state = load_json(hook_file)
+            head = reason.split("|", 1)[0].split("(", 1)[0].strip()[:40]
+            if head == "DENY" and "|" in reason:
+                sub = reason.split("|", 1)[1].strip().split()[0][:28]
+                rule_sig = f"DENY:{sub}"
+            else:
+                rule_sig = head
+            record_guard_deny_if_burst("planner_guard_command.py", rule_sig, reason, hook_file, hook_state, repo=repo)
+        except Exception:
+            pass
 
 
-def deny(reason: str) -> None:
-    reply("deny", reason)
+def deny(reason: str, payload: dict[str, Any] | None = None, repo: Path | None = None) -> None:
+    reply("deny", reason, payload=payload, repo=repo)
 
 
 def split_shell_segments(cmd: str) -> list[str]:
@@ -377,8 +401,8 @@ def check_commit_memory_feedback(
         return custom_msg
     target_doc = next((r for r in doc_rels if (repo / r).is_file()), doc_rels[0])
     return (
-        f"Memory Feedback: {len(changed_code)} code files changed without recent update to `{target_doc}`. "
-        f"Record non-obvious fix/milestone in `{target_doc}` or retry `git commit` if N/A."
+        f"MEMORY_FEEDBACK|{len(changed_code)} code files changed w/o recent `{target_doc}` update -> "
+        f"prepend 1-3L milestone/pitfall in symbolic telegraphic EN (`!articles/filler`, ops `-> | &&`, verbatim `path:sym`) or retry `git commit` if N/A."
     )
 
 
@@ -603,10 +627,30 @@ def _inject_dotnet_minimal(cmd: str) -> str:
     )
 
 
+def _inject_pytest_quiet(cmd: str) -> str:
+    """Append `-q --tb=short` to bare `pytest` segments lacking verbosity/tb flags."""
+    def _rewrite_seg(match: re.Match[str]) -> str:
+        seg = match.group(0)
+        if re.search(r"(?<!\S)(?:-q\b|--quiet\b|-v\b|--verbose\b|--tb\b|--tb=|-h\b|--help\b)", seg):
+            return seg
+        m_redir = re.search(r"\s+(?:\d*>>?|\&>)\s*\S+(?:\s+2>&1)?\s*$", seg)
+        flags = " -q --tb=short"
+        if m_redir:
+            pos = m_redir.start()
+            return seg[:pos] + flags + seg[pos:]
+        return seg + flags
+
+    return re.sub(
+        r"(?:[^\n;|&]*?)(?<![A-Za-z0-9_./])(?:python(?:\d+(?:\.\d+)?)?\s+-m\s+)?pytest\b[^\n;|&]*",
+        _rewrite_seg,
+        cmd,
+    )
+
+
 def maybe_rewrite_command(cmd: str, repo: Path, payload: dict[str, Any]) -> str | None:
     from planner_state import prompt_hash, resolve_artifact_dir  # noqa: E402
 
-    updated = _inject_dotnet_minimal(cmd)
+    updated = _inject_pytest_quiet(_inject_dotnet_minimal(cmd))
 
     if ".agents/scripts/plan_tool.py" in updated and not (repo / ".agents/scripts/plan_tool.py").exists():
         updated = updated.replace(".agents/scripts/plan_tool.py", str(PLUGIN_ROOT / "scripts/plan_tool.py"))
@@ -614,10 +658,9 @@ def maybe_rewrite_command(cmd: str, repo: Path, payload: dict[str, Any]) -> str 
         updated = updated.replace(".agents/scripts/verify_universal.py", str(PLUGIN_ROOT / "scripts/verify_universal.py"))
 
     invokes_tool = any(
-        ("plan_tool.py" in seg or "verify_universal.py" in seg or "verify_changes.py" in seg or "run_plugin_tests.py" in seg)
-        and re.search(
-            r"(?:^|\s)(?:(?:python(?:\d+(?:\.\d+)?)?|/[^\s]+/python(?:\d+(?:\.\d+)?)?)\s+)?[^\n]*(?:plan_tool|verify_universal|verify_changes|run_plugin_tests)\.py\b",
-            seg,
+        re.match(
+            r"^(?:(?:python(?:\d+(?:\.\d+)?)?|/[^\s]+/python(?:\d+(?:\.\d+)?)?)\s+(?:-\S+\s+)*)?(?:\./|\S*/)?(?:plan_tool|verify_universal|verify_changes|run_plugin_tests)\.py(?:\s|$)",
+            strip_env_prefix(seg)[1],
         )
         for seg in split_shell_segments(updated)
     )
@@ -642,59 +685,75 @@ def main() -> None:
         allow()
         return
 
-    payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
-    tool = payload.get("toolCall") or {}
-    args = tool.get("args") or {}
-    cmd = (args.get("CommandLine") or "").strip()
-    if not cmd:
-        allow()
-        return
+    t0 = time.monotonic()
+    repo: Path | None = None
+    try:
+        payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
+        tool = payload.get("toolCall") or {}
+        args = tool.get("args") or {}
+        cmd = (args.get("CommandLine") or "").strip()
+        if not cmd:
+            allow()
+            return
 
-    _ensure_paths()
-    from planner_state import get_paths, load_json, load_project_profile, resolve_repo_root  # noqa: E402
+        _ensure_paths()
+        from planner_state import get_paths, load_json, load_project_profile, resolve_repo_root  # noqa: E402
 
-    repo = resolve_repo_root(payload)
-    profile = load_project_profile(repo)
-    segments = split_shell_segments(cmd)
+        repo = resolve_repo_root(payload)
+        profile = load_project_profile(repo)
+        segments = split_shell_segments(cmd)
 
-    cat_msg = check_raw_cat_log(cmd, repo, profile)
-    if cat_msg:
-        deny(cat_msg)
-        return
+        cat_msg = check_raw_cat_log(cmd, repo, profile)
+        if cat_msg:
+            deny(cat_msg, payload=payload, repo=repo)
+            return
 
-    extra_msg = check_extra_requests_before_ship(segments, repo, profile)
-    if extra_msg:
-        deny(extra_msg)
-        return
+        extra_msg = check_extra_requests_before_ship(segments, repo, profile)
+        if extra_msg:
+            deny(extra_msg, payload=payload, repo=repo)
+            return
 
-    plan_msg = check_plan_before_commit(segments, payload)
-    if plan_msg:
-        deny(plan_msg)
-        return
+        plan_msg = check_plan_before_commit(segments, payload)
+        if plan_msg:
+            deny(plan_msg, payload=payload, repo=repo)
+            return
 
-    _, _, _, hook_file = get_paths(payload)
-    hook_state = load_json(hook_file)
+        _, _, _, hook_file = get_paths(payload)
+        hook_state = load_json(hook_file)
 
-    mem_msg = check_commit_memory_feedback(segments, payload, repo, profile, hook_state)
-    if mem_msg:
-        deny(mem_msg)
-        return
+        mem_msg = check_commit_memory_feedback(segments, payload, repo, profile, hook_state)
+        if mem_msg:
+            deny(mem_msg, payload=payload, repo=repo)
+            return
 
-    cmd_msg = check_declarative_command_guards(segments, repo, profile)
-    if cmd_msg:
-        deny(cmd_msg)
-        return
+        cmd_msg = check_declarative_command_guards(segments, repo, profile)
+        if cmd_msg:
+            deny(cmd_msg, payload=payload, repo=repo)
+            return
 
-    push_hit = check_pre_push_flight(segments, repo, profile, hook_state)
-    if push_hit:
-        reply(push_hit[0], push_hit[1])
-        return
+        push_hit = check_pre_push_flight(segments, repo, profile, hook_state)
+        if push_hit:
+            reply(push_hit[0], push_hit[1], payload=payload, repo=repo)
+            return
 
-    allow(maybe_rewrite_command(cmd, repo, payload))
+        allow(maybe_rewrite_command(cmd, repo, payload))
+    finally:
+        if (time.monotonic() - t0) * 1000.0 >= float(os.environ.get("PLANNER_SLOW_HOOK_MS") or 1500.0):
+            _ensure_paths()
+            from plugin_diagnostics import check_slow_hook  # noqa: E402
+
+            check_slow_hook("planner_guard_command.py", t0, repo=repo)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as exc:
+        try:
+            _ensure_paths()
+            from plugin_diagnostics import record_hook_exception  # noqa: E402
+
+            record_hook_exception("planner_guard_command.py", exc)
+        except Exception:
+            pass
         print('{"decision": "allow"}')

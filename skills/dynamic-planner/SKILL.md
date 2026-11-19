@@ -23,6 +23,7 @@ Scripts (`~/.gemini/config/plugins/dynamic-fractal-planner/scripts/`): `plan_too
 - `Tier 2 (META_MODULES)` -> `>=3` REQs \|\| `>=2` domains -> auto-REQs + domain JITs (`MOD-*`).
 - `Tier 3 (FRACTAL_DEEP)` -> high coupling/arch -> `MOD-DISCOVERY -> MOD-CONTRACT -> MOD-IMPL -> MOD-HARDEN -> MOD-AUDIT`.
 - Token Diet: `repo_map.py --workspace .` (`/tmp` cache) | `read_file` `<=250L` slice | `log_digest.py <log>`.
+- Doc/Plan Style: ALL `plan_tool.py` args (`--goal`, `--req`, `--evidence`, `--summary`, `--next`) && agent memory docs -> lossless symbolic telegraphic EN (`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`, verbatim `path:sym`, invariants).
 - External API Docs (MCP): Unknown external APIs/SDKs/flags -> consult `Context7` (`resolve-library-id`->`query-docs`) \|\| `Google Developer Knowledge` (`search_documents`/`answer_query`) BEFORE guessing.
-- Key CLI ops: `triage --prompt "..."` | `init` | `start` | `expand-step` | `add-module` | `done` | `req-verify` | `finish --evidence "..."` | `model-mode {set|get|list|clear}` | `undo-turn [--dry-run]` | `handoff --summary "..." --next "..."` | `stats`.
-- Verify pre-stop: `verify_universal.py [--build]` (`Stop` runs silent static checks on `needs_verify && !needs_build`).
+- Key CLI ops: `triage --prompt "..."` | `init` | `start` | `expand-step` | `add-module` | `done` | `req-verify` | `finish --evidence "..."` | `model-mode {set|get|list|clear}` | `docs-migrated` | `diag [--clear]` | `undo-turn [--dry-run]` | `handoff --summary "..." --next "..."` | `stats`.
+- Verify pre-stop: `verify_universal.py [--build] [--full] --git-stat` (1-shot static + `--fast` plugin tests + diff; chain deterministic steps w/ `&&` in 1 command; minimal 1-2L `edit_file` anchors; `Stop` runs silent static checks on `needs_verify && !needs_build`).

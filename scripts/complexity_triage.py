@@ -263,7 +263,7 @@ def _count_action_clauses(text: str) -> int:
     return active
 
 
-def extract_auto_reqs(prompt: str, max_reqs: int = 8) -> list[str]:
+def extract_auto_reqs(prompt: str, max_reqs: int = 6, structured_only: bool = False) -> list[str]:
     """Extract compact `REQ-01: ...` items from a user prompt in pure Python (0 LLM turns)."""
     text = (prompt or "").strip()
     if not text:
@@ -285,6 +285,10 @@ def extract_auto_reqs(prompt: str, max_reqs: int = 8) -> list[str]:
                 if len(item) >= 6 and item not in candidates:
                     candidates.append(item)
 
+    is_structured = bool(candidates)
+    if structured_only and not is_structured:
+        return []
+
     if not candidates:
         raw_chunks = re.split(
             r"(?:[\n;!?]+|\.(?:\s+|$)|,\s+(?:e|and|mas|plus|também|tambem|also)\s+|\s+(?:além disso|alem disso|outra coisa|e também|e tambem|and also)\s+)",
@@ -304,7 +308,7 @@ def extract_auto_reqs(prompt: str, max_reqs: int = 8) -> list[str]:
     reqs: list[str] = []
     seen: set[str] = set()
     for item in candidates:
-        clean = item[:85].rstrip(" .,;:") + ("..." if len(item) > 85 else "")
+        clean = item[:65].rstrip(" .,;:") + ("..." if len(item) > 65 else "")
         low = clean.lower()
         if low in seen:
             continue

@@ -687,6 +687,20 @@ def should_run_plugin_tests(
         return True
     if os.environ.get("PLANNER_RUNNING_PLUGIN_TESTS") == "1":
         return False
+    art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
+    if art_dir:
+        hook_file = Path(art_dir) / "scratch" / ".hook_state.json"
+        if hook_file.is_file():
+            try:
+                data = json.loads(hook_file.read_text(encoding="utf-8"))
+                last_pt = float(data.get("last_plugin_test_ts") or 0.0)
+                last_pe = float(data.get("last_plugin_edit_ts") or 0.0)
+                if data.get("needs_plugin_tests") is False and last_pt > 0.0 and last_pt >= last_pe:
+                    return False
+                if data.get("needs_plugin_tests"):
+                    return True
+            except Exception:
+                pass
     try:
         if repo.resolve() == plugin_root.resolve() and changed:
             return True
@@ -696,26 +710,18 @@ def should_run_plugin_tests(
         cand = str(repo / f) if not Path(f).is_absolute() else f
         if is_plugin_path(cand)[1]:
             return True
-    art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
-    if art_dir:
-        hook_file = Path(art_dir) / "scratch" / ".hook_state.json"
-        if hook_file.is_file():
-            try:
-                data = json.loads(hook_file.read_text(encoding="utf-8"))
-                if data.get("needs_plugin_tests"):
-                    return True
-            except Exception:
-                pass
     return False
 
 
-def run_plugin_tests(plugin_root: Path, fails: list[str]) -> bool:
+def run_plugin_tests(plugin_root: Path, fails: list[str], fast: bool = True) -> bool:
     test_script = plugin_root / "tests" / "run_plugin_tests.py"
     if not test_script.is_file():
         fails.append(f"Plugin test runner missing at `{test_script}`.")
         return False
     cmd = [sys.executable, str(test_script)]
-    if os.environ.get("PLANNER_PLUGIN_TEST_DEPTH") == "1" or os.environ.get("PLANNER_PLUGIN_TEST_FAST") == "1":
+    if os.environ.get("PLANNER_PLUGIN_TEST_FULL") != "1" and (
+        fast or os.environ.get("PLANNER_PLUGIN_TEST_DEPTH") == "1" or os.environ.get("PLANNER_PLUGIN_TEST_FAST") == "1"
+    ):
         cmd.append("--fast")
     print(f"Running plugin regression suite: `{test_script}`")
     res = subprocess.run(
@@ -726,14 +732,18 @@ def run_plugin_tests(plugin_root: Path, fails: list[str]) -> bool:
         timeout=240,
         check=False,
     )
+    if res.returncode == 0:
+        combined = [ln.strip() for ln in (res.stderr + "\n" + res.stdout).splitlines() if ln.strip()]
+        summary = [ln for ln in combined if ln.startswith("Ran ") or ln == "OK" or ln.startswith("OK ")]
+        for ln in (summary or combined[-2:]):
+            print(ln)
+        return True
     if res.stdout.strip():
         print(res.stdout.rstrip())
     if res.stderr.strip():
         print(res.stderr.rstrip(), file=sys.stderr)
-    if res.returncode != 0:
-        fails.append(f"Plugin regression tests failed (exit {res.returncode}).")
-        return False
-    return True
+    fails.append(f"Plugin regression tests failed (exit {res.returncode}).")
+    return False
 
 
 def update_hook_verify_stamp(built: bool, plugin_tests_passed: bool = False) -> None:
@@ -765,6 +775,9 @@ def main() -> None:
     parser.add_argument("--build", action="store_true", help="Run matching project build_rules or verify_command.")
     parser.add_argument("--force-build", action="store_true", help="Force build_rules even without matching file diffs.")
     parser.add_argument("--plugin-tests", action="store_true", help="Run plugin self-test suite (`tests/run_plugin_tests.py`).")
+    parser.add_argument("--fast", action="store_true", help="Use fast in-memory mode for plugin tests (default).")
+    parser.add_argument("--full", action="store_true", help="Run full subprocess plugin tests instead of --fast.")
+    parser.add_argument("--git-stat", action="store_true", help="On pass, append compact git status -s and git diff --stat (1-shot verify).")
     parser.add_argument("--workspace", default=None)
     parser.add_argument("--files", nargs="*", default=None)
     args = parser.parse_args()
@@ -785,7 +798,7 @@ def main() -> None:
         if not fails and run_legacy_verify_command(repo, profile, build_req, fails):
             built = True
         if not fails and should_run_plugin_tests(repo, plugin_root, changed, args.plugin_tests):
-            plugin_tests_ran = run_plugin_tests(plugin_root, fails)
+            plugin_tests_ran = run_plugin_tests(plugin_root, fails, fast=(not args.full))
 
     print(f"Audited {len(changed)} changed file(s).")
     if warns:
@@ -806,6 +819,21 @@ def main() -> None:
         extra_note.append("plugin tests passed")
     suffix = f" ({', '.join(extra_note)})" if extra_note else ""
     print("UNIVERSAL VERIFY PASS: All guardrails satisfied." + suffix)
+
+    if args.git_stat and (repo / ".git").exists():
+        for gargs in (["status", "-s"], ["diff", "--stat"]):
+            try:
+                gres = subprocess.run(
+                    ["git", "-C", str(repo), *gargs],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    check=False,
+                )
+                if gres.returncode == 0 and gres.stdout.strip():
+                    print(gres.stdout.rstrip())
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ Circuit Breaker, Memory Anchor (every 14 invocations if open_reqs>=3), and long-
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -50,15 +51,30 @@ def main() -> None:
         print("{}")
         return
 
+    t0 = time.monotonic()
+    repo: Path | None = None
+    try:
+        _run_pre_invocation_inner(t0)
+    finally:
+        if (time.monotonic() - t0) * 1000.0 >= float(os.environ.get("PLANNER_SLOW_HOOK_MS") or 1500.0):
+            _ensure_paths()
+            from plugin_diagnostics import check_slow_hook  # noqa: E402
+
+            check_slow_hook("planner_pre_invocation.py", t0)
+
+
+def _run_pre_invocation_inner(t0: float) -> None:
     payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     _ensure_paths()
 
     from planner_state import (  # noqa: E402
+        auto_upgrade_workspace,
         detect_doc_mcps,
         format_doc_mcp_hint,
         get_paths,
         has_active_turn_plan,
         is_eco_mode_prompt,
+        is_real_project_root,
         load_json,
         load_project_profile,
         normalize_model_key,
@@ -134,6 +150,11 @@ def main() -> None:
             "code_files_edited": [],
             "plugin_files_edited": [],
             "file_edit_counts": {},
+            "file_edit_last_inv": {},
+            "guard_denies": {},
+            "stop_block_sig": "",
+            "stop_block_streak": 0,
+            "cb_turn_count": 0,
             "same_cmd_fails": 0,
             "last_failed_cmd_sig": "",
             "cb_triggered_key": "",
@@ -150,6 +171,7 @@ def main() -> None:
             "last_plugin_test_ts": prev_pt_ts,
             "handoff_nudged": prev_handoff_nudged,
             "post_commit_nudge": prev_post_commit,
+            "docs_migrate_nudged": False,
             "model_classify_prompted": "",
             "native_plan_turn_sig": "",
             "native_plan_active_ts": 0.0,
@@ -205,7 +227,19 @@ def main() -> None:
         cb_reason = f"`{top_f}` edited {top_c}x without passing build/test"
     if cb_key and hook_state.get("cb_triggered_key") != cb_key:
         hook_state["cb_triggered_key"] = cb_key
+        cb_turn_count = int(hook_state.get("cb_turn_count") or 0) + 1
+        hook_state["cb_turn_count"] = cb_turn_count
         record_telemetry("circuit_breaker", {"reason": cb_reason})
+        if (cb_key.startswith("edit:") and same_fails == 0 and not hook_state.get("last_build_failed")) or cb_turn_count >= 2:
+            from plugin_diagnostics import record_anomaly  # noqa: E402
+
+            record_anomaly(
+                "circuit_breaker_suspect",
+                "planner_pre_invocation.py",
+                cb_key,
+                f"{cb_reason} | same_fails={same_fails} build_fail={bool(hook_state.get('last_build_failed'))} turn_cb={cb_turn_count}",
+                repo=repo,
+            )
         cb_doc_suffix = ""
         if doc_mcps.get("gdk") and doc_mcps.get("context7"):
             cb_doc_suffix = " | verify API/flags via GDK/Context7"
@@ -231,10 +265,10 @@ def main() -> None:
         if mode == "lean":
             from complexity_triage import extract_auto_reqs  # noqa: E402
 
-            auto_reqs = extract_auto_reqs(last_input)
-            jits = _compact_domain_checklists(domains, profile, max_items=6)
+            auto_reqs = [] if mode_src == "auto:native_plan_turn" else extract_auto_reqs(last_input, max_reqs=6, structured_only=True)
+            jits = _compact_domain_checklists(domains, profile, max_items=4)
             inject_lines.append(
-                f"[Planner Triage|T{tier} {triage.get('tier_name')}|mode={mode_tag}|dom={dom_str}|mods={mods}|strat={triage.get('research_strategy')}]"
+                f"[Triage|T{tier}|mode={mode_tag}|dom={dom_str}]"
             )
             if auto_reqs:
                 inject_lines.append("REQS|" + " | ".join(auto_reqs))
@@ -288,6 +322,15 @@ def main() -> None:
         inject_lines.append(
             f"[BLAST RADIUS|T{tier} edited {total_ed} files] Scope expanded beyond simple fix -> keep edits tightly scoped to the request."
         )
+        from plugin_diagnostics import record_anomaly  # noqa: E402
+
+        record_anomaly(
+            "blast_radius_suspect",
+            "planner_pre_invocation.py",
+            f"T{tier}:warn",
+            f"T{tier} edited={total_ed} (code={len(hook_state.get('code_files_edited') or [])},plugin={len(hook_state.get('plugin_files_edited') or [])})",
+            repo=repo,
+        )
 
     # Direct doc-lookup routing for Tier 0/1 technical queries (once per turn, suppressed in ECO_MODE)
     if not eco_mode and doc_hint_line and not hook_state.get("doc_hint_injected"):
@@ -304,6 +347,27 @@ def main() -> None:
                 inject_lines.append(cls_prompt)
                 record_telemetry("model_mode_classify_prompt", {"model": mkey})
 
+    # Event-driven auto-migration nudge for outdated project docs (once per turn, Neon-handoff-safe, suppressed in ECO_MODE)
+    if (
+        not eco_mode
+        and not hook_state.get("docs_migrate_nudged")
+        and is_real_project_root(repo)
+        and (repo / ".agents" / "planner_profile.json").is_file()
+    ):
+        up_info = auto_upgrade_workspace(repo)
+        pending_docs = up_info.get("docs_needing_ai_conversion") or []
+        if pending_docs:
+            hook_state["docs_migrate_nudged"] = True
+            cur_dv = int(up_info.get("current_docs_format") or 0)
+            tgt_dv = int(up_info.get("target_docs_format") or 1)
+            record_telemetry("docs_auto_migrate_prompt", {"files": len(pending_docs), "from": cur_dv, "to": tgt_dv})
+            inject_lines.append(
+                f"[DOCS_AUTO_MIGRATE|v{cur_dv}->v{tgt_dv}|files={','.join(pending_docs)}]\n"
+                f"ACT|Legacy project docs detected -> BEFORE/WITH this task, read (<=250L slices if >150L) && losslessly convert listed files to symbolic telegraphic EN "
+                f"(`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`, verbatim `path:line`/`symbol()`/dates/invariants, include `STYLE|lossless symbolic telegraphic EN ONLY` header && keep exact `## Pending Extra Requests`/`## Completed Requests` headings), "
+                f"then stamp `python3 {plan_cli} docs-migrated`."
+            )
+
     # Long-chat quota nudge (~25 turns or post-commit, suppressed in ECO_MODE)
     total_turns = int(hook_state.get("total_turns") or 1)
     if (
@@ -314,7 +378,7 @@ def main() -> None:
         hook_state["handoff_nudged"] = True
         hook_state["post_commit_nudge"] = False
         inject_lines.append(
-            f"[QUOTA TIP|turns={total_turns}] Run `python3 {plan_cli} handoff --summary \"...\" --next \"...\"` && start fresh chat to cut context cost."
+            f"[QUOTA TIP|turns={total_turns}] Run `python3 {plan_cli} handoff --summary \"...\" --next \"...\"` (symbolic telegraphic EN) && start fresh chat to cut context cost."
         )
 
     save_json(hook_file, hook_state)
@@ -323,9 +387,23 @@ def main() -> None:
         print("{}")
         return
 
+    msg_text = "\n".join(inject_lines)
+    bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1200)
+    if len(msg_text) > bloat_limit:
+        from plugin_diagnostics import record_anomaly  # noqa: E402
+
+        largest_prefix = max(inject_lines, key=len).split("|", 1)[0][:32]
+        record_anomaly(
+            "injection_bloat",
+            "planner_pre_invocation.py",
+            "pre_invocation:bloat",
+            f"chars={len(msg_text)} lines={len(inject_lines)} top={largest_prefix}",
+            repo=repo,
+        )
+
     print(
         json.dumps(
-            {"injectSteps": [{"systemMessage": {"systemMessage": "\n".join(inject_lines)}}]},
+            {"injectSteps": [{"systemMessage": {"systemMessage": msg_text}}]},
             ensure_ascii=False,
         )
     )
@@ -334,5 +412,12 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as exc:
+        try:
+            _ensure_paths()
+            from plugin_diagnostics import record_hook_exception  # noqa: E402
+
+            record_hook_exception("planner_pre_invocation.py", exc)
+        except Exception:
+            pass
         print("{}")

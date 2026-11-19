@@ -7,6 +7,7 @@ import copy
 from typing import Any, Callable
 
 CURRENT_SCHEMA_VERSION = 3
+CURRENT_DOCS_FORMAT_VERSION = 1
 
 DEFAULT_MEMORY_DOCS = [
     ".agents/docs/PROJECT_HISTORY.md",

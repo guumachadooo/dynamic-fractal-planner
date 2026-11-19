@@ -6,6 +6,7 @@ universal build/test status (`needs_build` + `last_build_failed`), and plugin te
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -14,6 +15,7 @@ from typing import Any
 
 HOOKS_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = HOOKS_DIR.parent
+SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 
 TRACKED_TOOLS = frozenset({
     "read_file",
@@ -65,6 +67,19 @@ def _cmd_signature(cmd: str) -> str:
     return " ".join(tokens[:3])[:80]
 
 
+def _bump_file_edit_invocation(hook_state: dict[str, Any], key: str) -> None:
+    """Increment per-file edit count at most once per LLM invocation so batched edits never trip CB."""
+    cur_inv = f"{hook_state.get('turn_sig') or ''}:{int(hook_state.get('last_invocation_num') or 0)}"
+    last_map = dict(hook_state.get("file_edit_last_inv") or {})
+    if last_map.get(key) == cur_inv:
+        return
+    last_map[key] = cur_inv
+    counts = dict(hook_state.get("file_edit_counts") or {})
+    counts[key] = int(counts.get(key) or 0) + 1
+    hook_state["file_edit_last_inv"] = last_map
+    hook_state["file_edit_counts"] = counts
+
+
 def _matches_build_rule(cmd: str, profile: dict[str, Any]) -> bool:
     if UNIVERSAL_BUILD_TEST_RE.search(cmd):
         return True
@@ -88,6 +103,19 @@ def main() -> None:
         _emit_ok(is_pre)
         return
 
+    t0 = time.monotonic()
+    try:
+        _run_post_tool_inner(is_pre)
+    finally:
+        if (time.monotonic() - t0) * 1000.0 >= float(os.environ.get("PLANNER_SLOW_HOOK_MS") or 1500.0):
+            if str(SCRIPTS_DIR) not in sys.path:
+                sys.path.insert(0, str(SCRIPTS_DIR))
+            from plugin_diagnostics import check_slow_hook  # noqa: E402
+
+            check_slow_hook("planner_post_tool.py", t0)
+
+
+def _run_post_tool_inner(is_pre: bool) -> None:
     payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     tool = payload.get("toolCall") or {}
     name = (tool.get("name") or "").lower()
@@ -171,23 +199,18 @@ def main() -> None:
             if plugin_rel not in p_edited:
                 p_edited.append(plugin_rel)
             hook_state["plugin_files_edited"] = p_edited
-            counts = dict(hook_state.get("file_edit_counts") or {})
-            ek = f"plugin:{plugin_rel}"
-            counts[ek] = int(counts.get(ek) or 0) + 1
-            hook_state["file_edit_counts"] = counts
+            _bump_file_edit_invocation(hook_state, f"plugin:{plugin_rel}")
             changed = True
         if path and is_verifiable_path(path, repo, profile):
             rel, _ = normalize_rel_path(path, repo)
             hook_state["needs_verify"] = True
             hook_state["last_edit_ts"] = now
-            if is_app_code_path(path, repo, profile):
+            if not in_plugin and is_app_code_path(path, repo, profile):
                 edited = list(hook_state.get("code_files_edited") or [])
                 if rel not in edited:
                     edited.append(rel)
                 hook_state["code_files_edited"] = edited
-                counts = dict(hook_state.get("file_edit_counts") or {})
-                counts[rel] = int(counts.get(rel) or 0) + 1
-                hook_state["file_edit_counts"] = counts
+                _bump_file_edit_invocation(hook_state, rel)
                 if is_build_relevant_path(path, repo, profile):
                     hook_state["needs_build"] = True
             changed = True
@@ -234,6 +257,11 @@ def main() -> None:
                     hook_state["last_plugin_test_ts"] = max(now, last_pe)
                     hook_state["needs_plugin_tests"] = False
                     changed = True
+                if hook_state.get("file_edit_counts") or hook_state.get("file_edit_last_inv") or hook_state.get("cb_triggered_key"):
+                    hook_state["file_edit_counts"] = {}
+                    hook_state["file_edit_last_inv"] = {}
+                    hook_state["cb_triggered_key"] = ""
+                    changed = True
 
             if ("verify_universal.py" in cmd or "verify_changes.py" in cmd) and "||" not in cmd and ";" not in cmd:
                 last_v = float(hook_state.get("last_verify_ts") or 0.0)
@@ -246,13 +274,15 @@ def main() -> None:
                         hook_state["last_build_failed"] = False
                         hook_state["last_build_ts"] = now
                         hook_state["file_edit_counts"] = {}
+                        hook_state["file_edit_last_inv"] = {}
                         hook_state["cb_triggered_key"] = ""
                     changed = True
-            elif _matches_build_rule(cmd, profile) and "||" not in cmd and ";" not in cmd:
+            if _matches_build_rule(cmd, profile) and "||" not in cmd and ";" not in cmd:
                 hook_state["needs_build"] = False
                 hook_state["last_build_failed"] = False
                 hook_state["last_build_ts"] = now
                 hook_state["file_edit_counts"] = {}
+                hook_state["file_edit_last_inv"] = {}
                 hook_state["cb_triggered_key"] = ""
                 changed = True
 
@@ -266,5 +296,13 @@ if __name__ == "__main__":
     _is_pre = "--pre" in sys.argv[1:]
     try:
         main()
-    except Exception:
+    except Exception as exc:
+        try:
+            if str(SCRIPTS_DIR) not in sys.path:
+                sys.path.insert(0, str(SCRIPTS_DIR))
+            from plugin_diagnostics import record_hook_exception  # noqa: E402
+
+            record_hook_exception("planner_post_tool.py", exc)
+        except Exception:
+            pass
         _emit_ok(_is_pre)
