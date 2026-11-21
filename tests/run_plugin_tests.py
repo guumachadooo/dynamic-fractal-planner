@@ -3260,7 +3260,9 @@ class TestV25EvolutionMechanics(unittest.TestCase):
     def test_m6_btw_queue_intent_and_ultra_terse_hint(self) -> None:
         for p in (
             "manda ele fazer push quando acabar",
+            "lembra ele de fazer push quando acabar",
             "quando terminar, atualiza o README",
+            "coloca nas requests para testar",
             "tell the main agent to run install.sh when it finishes",
             "/btw queue release",
         ):
@@ -3268,6 +3270,7 @@ class TestV25EvolutionMechanics(unittest.TestCase):
             self.assertTrue(res.get("btw_queue_intent"), p)
 
         self.assertFalse(complexity_triage.detect_btw_queue_intent("Fix layout clipping in Button.tsx"))
+        self.assertFalse(planner_state.is_plugin_path(str(PLUGIN_ROOT / ".agents" / "docs" / "EXTRA_REQUESTS.md"))[1])
 
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
             repo = Path(td)
@@ -3275,12 +3278,27 @@ class TestV25EvolutionMechanics(unittest.TestCase):
             (repo / ".agents").mkdir()
             (repo / ".agents" / "planner_profile.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
 
+            # Editing plugin's .agents/docs/EXTRA_REQUESTS.md must NOT flip needs_plugin_tests
+            _, _, post_extra = run_hook(
+                "planner_post_tool.py",
+                {
+                    "workspacePaths": [str(PLUGIN_ROOT)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(PLUGIN_ROOT / ".agents" / "docs" / "EXTRA_REQUESTS.md")}},
+                },
+            )
+            self.assertEqual(post_extra, {})
+            hook_file = Path(art) / "scratch" / ".hook_state.json"
+            if hook_file.is_file():
+                self.assertFalse(json.loads(hook_file.read_text(encoding="utf-8")).get("needs_plugin_tests"))
+
+            # Short /btw prompt injects ONLY [BTW_QUEUE] without [Triage|, JIT|, or DOC_LOOKUP|
             _, _, pre_btw = run_hook(
                 "planner_pre_invocation.py",
                 {
                     "workspacePaths": [str(repo)],
                     "artifactDirectoryPath": art,
-                    "lastUserInput": "manda ele fazer push quando acabar",
+                    "lastUserInput": "lembra ele de fazer push no React quando acabar",
                     "invocationNum": 1,
                 },
             )
@@ -3288,6 +3306,27 @@ class TestV25EvolutionMechanics(unittest.TestCase):
             self.assertIn("[BTW_QUEUE]", msg_btw)
             self.assertIn(".agents/docs/EXTRA_REQUESTS.md", msg_btw)
             self.assertIn("<=2L", msg_btw)
+            self.assertNotIn("[Triage|", msg_btw)
+            self.assertNotIn("JIT|", msg_btw)
+            self.assertNotIn("DOC_LOOKUP|", msg_btw)
+
+            # Stop-gate circuit breaker: blocks streak 1 & 2, fails open at streak 3
+            hs_blk = json.loads(hook_file.read_text(encoding="utf-8"))
+            hs_blk["needs_build"] = True
+            hook_file.write_text(json.dumps(hs_blk), encoding="utf-8")
+            stop_payload = {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "fullyIdle": True,
+                "terminationReason": "NO_TOOL_CALL",
+            }
+            _, _, st1 = run_hook("planner_stop.py", stop_payload)
+            _, _, st2 = run_hook("planner_stop.py", stop_payload)
+            _, _, st3 = run_hook("planner_stop.py", stop_payload)
+            self.assertEqual(st1.get("decision"), "continue")
+            self.assertEqual(st2.get("decision"), "continue")
+            self.assertEqual(st3, {})
+            self.assertEqual(json.loads(hook_file.read_text(encoding="utf-8")).get("stop_block_streak"), 0)
 
             with tempfile.TemporaryDirectory() as art2:
                 _, _, pre_norm = run_hook(

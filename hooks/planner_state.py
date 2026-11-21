@@ -450,6 +450,10 @@ def is_plugin_path(path_str: str) -> tuple[str, bool]:
         for root in candidates:
             try:
                 rel = pv.relative_to(root).as_posix()
+                if rel in (".agents", ".diagnostics", ".last_good_backup", ".git") or rel.startswith(
+                    (".agents/", ".diagnostics/", ".last_good_backup/", ".git/")
+                ):
+                    return rel, False
                 return rel, True
             except ValueError:
                 continue

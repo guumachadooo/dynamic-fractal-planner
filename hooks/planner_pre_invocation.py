@@ -272,6 +272,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
         )
         if _append_within_budget(btw_line):
             hook_state["btw_injected"] = True
+    is_btw_short = bool(triage.get("btw_queue_intent")) and len(last_input.strip()) <= 260
 
     # Circuit Breaker: >=2 consecutive same cmd fails OR >=4 edits to same file without passing build
     same_fails = int(hook_state.get("same_cmd_fails") or 0)
@@ -312,9 +313,10 @@ def _run_pre_invocation_inner(t0: float) -> None:
             f"[CIRCUIT BREAKER|{cb_reason}] STOP blind retries -> re-read exact error, rethink root cause, or ask user{cb_doc_suffix}."
         )
 
-    # Triage injection (once per turn when plan not created)
+    # Triage injection (once per turn when plan not created; skipped on short /btw prompts)
     if (
-        not plan_ready
+        not is_btw_short
+        and not plan_ready
         and not hook_state.get("triage_injected")
         and (tier >= 2 or (tier == 1 and int(triage.get("breadth_est") or 0) >= 2))
     ):
@@ -404,13 +406,13 @@ def _run_pre_invocation_inner(t0: float) -> None:
         )
 
     # Domain lenses (1-line active-domain critique, suppressed in ECO_MODE & within bloat budget)
-    if not eco_mode and not plan_ready and not hook_state.get("lens_injected") and tier >= 1:
+    if not is_btw_short and not eco_mode and not plan_ready and not hook_state.get("lens_injected") and tier >= 1:
         lens_line = _compact_domain_lenses(list(triage.get("detected_domains") or []), profile)
         if lens_line and _append_within_budget(lens_line):
             hook_state["lens_injected"] = True
 
     # Direct doc-lookup routing for Tier 0/1 technical queries (once per turn, suppressed in ECO_MODE)
-    if not eco_mode and doc_hint_line and not hook_state.get("doc_hint_injected"):
+    if not is_btw_short and not eco_mode and doc_hint_line and not hook_state.get("doc_hint_injected"):
         hook_state["doc_hint_injected"] = True
         inject_lines.append(doc_hint_line)
 

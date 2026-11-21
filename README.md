@@ -1,4 +1,4 @@
-# Dynamic Fractal Planner v3 (`plugin 2.5.0`)
+# Dynamic Fractal Planner v3 (`plugin 2.5.1`)
 
 Quota-efficient adaptive planning, 4-layer context-aware triage, token-diet read/terminal guards, shift-left shields, forward wiring-gate, read-only recon sweep, multi-layer build cascade/dedup & anti-rot memory. Python stdlib only.
 

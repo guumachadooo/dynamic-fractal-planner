@@ -135,13 +135,23 @@ def main() -> None:
 
         sig = "|".join(r.split("->")[0].strip()[:40] for r in reasons[:2])
         streak = (int(hook_state.get("stop_block_streak") or 0) + 1) if hook_state.get("stop_block_sig") == sig else 1
+        max_streak = max(2, int(os.environ.get("PLANNER_STOP_MAX_STREAK") or 3))
         hook_state["stop_block_sig"] = sig
         hook_state["stop_block_streak"] = streak
         save_json(hook_file, hook_state)
         if streak >= 2:
             from plugin_diagnostics import record_anomaly  # noqa: E402
 
-            record_anomaly("stop_gate_loop", "planner_stop.py", sig, f"streak={streak} | {reasons[0][:140]}", repo=repo)
+            detail = f"streak={streak} | {reasons[0][:140]}"
+            if streak >= max_streak:
+                detail = f"breaker_tripped=true | {detail}"
+            record_anomaly("stop_gate_loop", "planner_stop.py", sig, detail, repo=repo)
+        if streak >= max_streak:
+            hook_state["stop_block_streak"] = 0
+            hook_state["stop_block_sig"] = ""
+            save_json(hook_file, hook_state)
+            allow_stop()
+            return
 
         print(
             json.dumps(

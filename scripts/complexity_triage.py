@@ -316,7 +316,10 @@ _DOC_INTENT_PATTERNS = [compile_kw_regex(k) for k in DOC_INTENT_KEYWORDS]
 _BTW_QUEUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*/btw\b", re.IGNORECASE),
     re.compile(r"\b(?:manda|diz|diga|fala|avisa|pede|pe[cç]a)\s+(?:pra\s+|para\s+)?(?:ele|ela|o\s+agente(?:\s+principal)?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:lembra|anota|registra)\s+(?:pra\s+|para\s+|de\s+)?(?:ele|ela|o\s+agente(?:\s+principal)?)\b", re.IGNORECASE),
     re.compile(r"\b(?:quando|assim\s+que|depois\s+(?:que)?)\s+(?:ele\s+)?(?:acabar|terminar|finalizar|concluir)\b", re.IGNORECASE),
+    re.compile(r"\b(?:adiciona|coloca|bota|p[oõ]e)\w*\s+nas?\s+(?:extra\s+)?requests?\b", re.IGNORECASE),
+    re.compile(r"\bdepois\s+disso\b", re.IGNORECASE),
     re.compile(r"\b(?:coloca\w*\s+na\s+fila|enfileira\w*|para\s+o\s+agente\s+principal)\b", re.IGNORECASE),
     re.compile(r"\b(?:tell|ask|have)\s+(?:him|her|it|the\s+main\s+agent)\s+to\b", re.IGNORECASE),
     re.compile(r"\b(?:when|once|after)\s+(?:it|he|she|the\s+main\s+agent)\s+(?:finishes|is\s+done|completes)\b", re.IGNORECASE),
