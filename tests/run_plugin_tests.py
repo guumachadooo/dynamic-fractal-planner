@@ -97,20 +97,27 @@ def run_hook(
     script_name: str,
     payload: dict[str, Any],
     env_extra: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
 ) -> tuple[int, str, dict[str, Any]]:
     merged_env = {"PLANNER_DISABLE_TELEMETRY": "1"}
     if env_extra:
         merged_env.update(env_extra)
+    cli_args = list(extra_args or [])
     if FAST_MODE:
         mod = _load_mod(HOOKS_DIR / script_name)
         rc = 0
-        with _patched_env(merged_env, stdin_txt=json.dumps(payload)) as (out_buf, err_buf):
-            try:
-                mod.main()
-            except SystemExit as exc:
-                rc = int(exc.code) if isinstance(exc.code, int) else (0 if exc.code is None else 1)
-            out_txt = out_buf.getvalue().strip()
-            err_txt = err_buf.getvalue().strip()
+        old_argv = sys.argv
+        try:
+            sys.argv = [str(HOOKS_DIR / script_name), *cli_args]
+            with _patched_env(merged_env, stdin_txt=json.dumps(payload)) as (out_buf, err_buf):
+                try:
+                    mod.main()
+                except SystemExit as exc:
+                    rc = int(exc.code) if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+                out_txt = out_buf.getvalue().strip()
+                err_txt = err_buf.getvalue().strip()
+        finally:
+            sys.argv = old_argv
         parsed: dict[str, Any] = {}
         if out_txt:
             try:
@@ -122,7 +129,7 @@ def run_hook(
     env = os.environ.copy()
     env.update(merged_env)
     res = subprocess.run(
-        [sys.executable, str(HOOKS_DIR / script_name)],
+        [sys.executable, str(HOOKS_DIR / script_name), *cli_args],
         input=json.dumps(payload),
         text=True,
         capture_output=True,
@@ -2495,6 +2502,295 @@ class TestSelfDiagnostics(unittest.TestCase):
             self.assertIn("DIAGNOSTICS_CLEARED|", clr.stdout)
             empty_out = run_script("plan_tool.py", ["diag"], env_extra=env_diag)
             self.assertIn("DIAGNOSTICS|total=0|clean", empty_out.stdout)
+
+
+class TestAdaptiveTriageAndContinuity(unittest.TestCase):
+    def test_single_prompt_adaptive_triage(self) -> None:
+        # 1. Explicit file refs >=4 -> T>=2; URLs + framework tokens (Next.js/Vue.js) ignored
+        r_files = complexity_triage.analyze_prompt(
+            "Adjust hooks/a.py, hooks/b.py, scripts/c.py and tests/d.py after checking https://example.com/foo.js and Next.js / Vue.js"
+        )
+        self.assertGreaterEqual(r_files["tier"], 2)
+        self.assertEqual(len(r_files["file_refs"]), 4)
+
+        # 2. Broad cross-cutting scope disqualifies tiny_fix -> T>=2
+        r_broad = complexity_triage.analyze_prompt("Fix typo across all files")
+        self.assertNotEqual(r_broad["intent"], "tiny_fix")
+        self.assertGreaterEqual(r_broad["tier"], 2)
+
+        # 3. Verb-chained "e/and" splits into >=2 clauses vs noun pair stays 1 clause
+        r_verb = complexity_triage.analyze_prompt("corrige o auth e adiciona testes")
+        r_noun = complexity_triage.analyze_prompt("atualiza hooks e scripts")
+        self.assertGreaterEqual(r_verb["breadth_est"], 2)
+        self.assertEqual(r_noun["breadth_est"], 1)
+
+        # 4. Greeting + question -> Tier 0 pure_question
+        r_greet_q = complexity_triage.analyze_prompt("Oi, tudo bem? Como funciona o plugin?")
+        self.assertEqual(r_greet_q["tier"], 0)
+        self.assertEqual(r_greet_q["intent"], "pure_question")
+
+        # 5. Read-only catch-up capped vs explicit audit/plan proposal preserved
+        r_ro = complexity_triage.analyze_prompt(
+            "Só me situa como está o sistema de auth e hooks, ainda não faz nada nem altera arquivo"
+        )
+        self.assertEqual(r_ro["intent"], "read_only_analysis")
+        self.assertLessEqual(r_ro["tier"], 1)
+
+        r_plan = complexity_triage.analyze_prompt(
+            "Não faça merge ainda, mas faça uma auditoria e um plano de arquitetura para migrar o backend e testes"
+        )
+        self.assertEqual(r_plan["intent"], "plan_proposal")
+        self.assertGreaterEqual(r_plan["tier"], 2)
+
+        # 6. Long pasted quote (>120 chars) stripped from imperative scoring
+        big_quote = '"' + ("Tier 3 refactor architecture pipeline migration across 5 files and rewrite everything. " * 2) + '"'
+        r_quoted_q = complexity_triage.analyze_prompt(
+            f"Valeu! Só me explica o que significa esse trecho {big_quote}?"
+        )
+        self.assertEqual(r_quoted_q["tier"], 0)
+        self.assertEqual(r_quoted_q["intent"], "pure_question")
+
+        # 7. unique_edited_files deduplicates plugin files listed in both code & plugin sets
+        deduped = planner_state.unique_edited_files({
+            "code_files_edited": ["hooks/a.py", "src/app.py"],
+            "plugin_files_edited": ["hooks/a.py"],
+        })
+        self.assertEqual(deduped, ["src/app.py", "plugin:hooks/a.py"])
+
+    def test_multiturn_task_context_continuity(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art, tempfile.TemporaryDirectory() as diag_dir:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "src").mkdir()
+            env_diag = {"PLANNER_DIAGNOSTICS_DIR": diag_dir}
+            hook_file = Path(art) / "scratch" / ".hook_state.json"
+
+            # Turn 1: Large Tier 3 proposal (0 edits)
+            t1_prompt = "Audita e refatora toda a arquitetura de pipeline e hooks do backend e testes antes do deploy"
+            _, _, pre1 = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": t1_prompt,
+                "invocationNum": 1,
+            }, env_extra=env_diag)
+            self.assertIn("[Triage|T3", pre1["injectSteps"][0]["systemMessage"]["systemMessage"])
+
+            # Turn 2: Approval follow-up inherits T3 + domains + avoids Blast Radius / triage_mismatch on 6 edits
+            t2_prompt = "Muito bom, pode fazer tudo isso que você propôs!"
+            _, _, pre2 = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": t2_prompt,
+                "invocationNum": 1,
+            }, env_extra=env_diag)
+            msg2 = pre2["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("[Triage|T3(ctx)|", msg2)
+            hs2 = json.loads(hook_file.read_text(encoding="utf-8"))
+            self.assertEqual(hs2["triage"]["source"], "context_approval")
+
+            for idx in range(6):
+                fp = repo / "src" / f"m{idx}.py"
+                fp.write_text("x = 1\n", encoding="utf-8")
+                _, _, dec = run_hook("planner_guard_files.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "lastUserInput": t2_prompt,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(fp), "Target": "x = 1", "Replacement": "x = 2"}},
+                }, env_extra=env_diag)
+                self.assertEqual(dec.get("decision"), "allow")
+                run_hook("planner_post_tool.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(fp)}},
+                }, env_extra=env_diag)
+
+            _, _, pre2_next = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": t2_prompt,
+                "invocationNum": 2,
+            }, env_extra=env_diag)
+            self.assertNotIn("BLAST RADIUS", json.dumps(pre2_next))
+            _, _, stop2 = run_hook("planner_stop.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "fullyIdle": True,
+                "terminationReason": "NO_TOOL_CALL",
+            }, env_extra=env_diag)
+            self.assertEqual(stop2, {})
+            diag_file = Path(diag_dir) / "anomalies.jsonl"
+            self.assertFalse(diag_file.is_file() and diag_file.read_text(encoding="utf-8").strip())
+
+            # Intervening Q&A turns preserve proposed T3 context across 3 turns
+            with tempfile.TemporaryDirectory() as art_qa:
+                for p in (
+                    t1_prompt,
+                    "O que é a opção 1?",
+                    "Qual arquivo muda?",
+                ):
+                    run_hook("planner_pre_invocation.py", {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art_qa,
+                        "lastUserInput": p,
+                        "invocationNum": 1,
+                    }, env_extra=env_diag)
+                _, _, pre_t4 = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art_qa,
+                    "lastUserInput": "Perfeito, pode seguir com tudo isso!",
+                    "invocationNum": 1,
+                }, env_extra=env_diag)
+                self.assertIn("[Triage|T3(ctx)|", pre_t4["injectSteps"][0]["systemMessage"]["systemMessage"])
+
+            # Exclusions & in_progress continuation rules (pure analyze_prompt + context state)
+            now = 1_700_000_000.0
+            ctx_proposed = {
+                "turn_id": 1,
+                "tier": 3,
+                "depth_level": "high",
+                "depth_signals": ["arquitetura"],
+                "detected_domains": ["api-backend"],
+                "doc_lookup_targets": ["context7"],
+                "file_refs": [],
+                "status": "proposed",
+                "build_failed": False,
+                "ts": now - 60.0,
+                "ttl_secs": 1800.0,
+            }
+            self.assertEqual(complexity_triage.analyze_prompt("Valeu, obrigado!", repo, context=ctx_proposed, now=now)["tier"], 0)
+            self.assertEqual(complexity_triage.analyze_prompt("Fix typo in helper.py", repo, context=ctx_proposed, now=now)["tier"], 0)
+            expired = dict(ctx_proposed, ts=now - 2000.0)
+            self.assertEqual(complexity_triage.analyze_prompt("Sim, pode fazer tudo isso", repo, context=expired, now=now)["tier"], 0)
+
+            ctx_prog = dict(ctx_proposed, status="in_progress")
+            self.assertEqual(complexity_triage.analyze_prompt("ok", repo, context=ctx_prog, now=now)["tier"], 0)
+            r_cont = complexity_triage.analyze_prompt("continua a parte 2", repo, context=ctx_prog, now=now)
+            self.assertEqual(r_cont["tier"], 3)
+            self.assertEqual(r_cont["source"], "context_continuation")
+
+            # Post-commit clears carried task_context
+            cleared = planner_state.build_carried_task_context(
+                {"turn_id": 2, "triage": {"tier": 3}, "code_files_edited": ["a.py"], "post_commit_nudge": True},
+                {},
+                now,
+            )
+            self.assertEqual(cleared, {})
+
+    def test_exit_plan_mode_live_plan_escalation(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art, tempfile.TemporaryDirectory() as diag_dir:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / "src").mkdir()
+            env_diag = {"PLANNER_DIAGNOSTICS_DIR": diag_dir}
+            vague = "arruma aí"
+
+            # 1. Vague Turn 1 + 5-file exit_plan_mode(plan=...) upgrades to T3(plan) on handoff
+            _, _, pre1 = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-pro-orchestrator-neon",
+                "lastUserInput": vague,
+                "invocationNum": 1,
+            }, env_extra=env_diag)
+            self.assertEqual(pre1, {})
+
+            plan_5 = (
+                "1. Fix auth in src/a.py\n"
+                "2. Update API in src/b.py\n"
+                "3. Refactor core in src/c.py\n"
+                "4. Add pytest tests in tests/d.py\n"
+                "5. Update CI in scripts/e.py"
+            )
+            _, _, pre_exit = run_hook("planner_post_tool.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-pro-orchestrator-neon",
+                "lastUserInput": vague,
+                "toolCall": {"name": "exit_plan_mode", "args": {"plan": plan_5}},
+            }, env_extra=env_diag, extra_args=["--pre"])
+            self.assertEqual(pre_exit.get("decision"), "allow")
+
+            # Neon handoff re-invokes with invocationNum=1 and same prompt -> injects T3(plan) + JIT
+            _, _, pre_exec = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "modelName": "gemini-4-hydrogen",
+                "lastUserInput": vague,
+                "invocationNum": 1,
+            }, env_extra=env_diag)
+            exec_msg = pre_exec["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("[Triage|T3(plan)|", exec_msg)
+            self.assertIn("JIT|", exec_msg)
+
+            for idx in range(5):
+                fp = repo / "src" / f"p{idx}.py"
+                fp.write_text("x = 1\n", encoding="utf-8")
+                run_hook("planner_guard_files.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "lastUserInput": vague,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(fp), "Target": "x = 1", "Replacement": "x = 2"}},
+                }, env_extra=env_diag)
+                run_hook("planner_post_tool.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(fp)}},
+                }, env_extra=env_diag)
+
+            _, _, pre_after = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": vague,
+                "invocationNum": 2,
+            }, env_extra=env_diag)
+            self.assertNotIn("BLAST RADIUS", json.dumps(pre_after))
+            _, _, stop_ok = run_hook("planner_stop.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "fullyIdle": True,
+                "terminationReason": "NO_TOOL_CALL",
+            }, env_extra=env_diag)
+            self.assertEqual(stop_ok, {})
+            diag_file = Path(diag_dir) / "anomalies.jsonl"
+            self.assertFalse(diag_file.is_file() and diag_file.read_text(encoding="utf-8").strip())
+
+            # 2. Vague Turn 1 + 1-file plan stays T1 and STILL warns Blast Radius on 4th edit
+            with tempfile.TemporaryDirectory() as art_small:
+                run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art_small,
+                    "modelName": "gemini-pro-orchestrator-neon",
+                    "lastUserInput": vague,
+                    "invocationNum": 1,
+                }, env_extra=env_diag)
+                run_hook("planner_post_tool.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art_small,
+                    "modelName": "gemini-pro-orchestrator-neon",
+                    "lastUserInput": vague,
+                    "toolCall": {"name": "exit_plan_mode", "args": {"plan": "1. Fix typo in src/only.py"}},
+                }, env_extra=env_diag, extra_args=["--pre"])
+                for idx in range(4):
+                    fp = repo / "src" / f"s{idx}.py"
+                    fp.write_text("x = 1\n", encoding="utf-8")
+                    run_hook("planner_guard_files.py", {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art_small,
+                        "lastUserInput": vague,
+                        "toolCall": {"name": "edit_file", "args": {"Path": str(fp), "Target": "x = 1", "Replacement": "x = 2"}},
+                    }, env_extra=env_diag)
+                    run_hook("planner_post_tool.py", {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art_small,
+                        "toolCall": {"name": "edit_file", "args": {"Path": str(fp)}},
+                    }, env_extra=env_diag)
+                _, _, pre_warn = run_hook("planner_pre_invocation.py", {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art_small,
+                    "lastUserInput": vague,
+                    "invocationNum": 2,
+                }, env_extra=env_diag)
+                self.assertIn("BLAST RADIUS", json.dumps(pre_warn))
 
 
 def _stamp_plugin_tests_passed() -> None:

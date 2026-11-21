@@ -52,6 +52,7 @@ def main() -> None:
             load_project_profile,
             resolve_repo_root,
             save_json,
+            unique_edited_files,
         )
 
         repo = resolve_repo_root(payload)
@@ -116,15 +117,17 @@ def main() -> None:
                 save_json(hook_file, hook_state)
             triage = hook_state.get("triage") or {}
             tier = int(triage.get("tier") or 0)
-            n_ed = len(hook_state.get("code_files_edited") or []) + len(hook_state.get("plugin_files_edited") or [])
+            n_ed = len(unique_edited_files(hook_state))
             if triage and tier <= 1 and n_ed >= 5:
                 from plugin_diagnostics import record_anomaly  # noqa: E402
 
+                src = triage.get("source") or "prompt"
+                conf = triage.get("confidence") or "?"
                 record_anomaly(
                     "triage_mismatch",
                     "planner_stop.py",
                     f"T{tier}:edited_{n_ed}",
-                    f"T{tier} under-triaged -> edited {n_ed} files",
+                    f"T{tier} under-triaged -> edited {n_ed} files | src={src} conf={conf}",
                     repo=repo,
                 )
             allow_stop()

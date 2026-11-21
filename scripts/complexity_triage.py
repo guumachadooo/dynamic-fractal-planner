@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +149,134 @@ SMALL_CONVERSATIONAL = {
     "pode seguir", "yes", "no", "go ahead", "proceed", "tudo bem",
 }
 
+_GREETING_LEAD_RE = re.compile(
+    r"^(?:(?:oi+|ol[aá]+|e\s+a[ií]|fala|bom\s+dia|boa\s+tarde|boa\s+noite|"
+    r"tudo\s+bem|td\s+bem|como\s+vai|hey|hi+|hello|good\s+(?:morning|afternoon|evening))"
+    r"(?:[\s,!?.:-]+|$))+",
+    re.IGNORECASE,
+)
+
+_FRAMEWORK_DOT_TOKENS = frozenset({
+    "next.js", "vue.js", "node.js", "three.js", "react.js", "nuxt.js",
+    "express.js", "solid.js", "alpine.js", "nest.js", "chart.js", "d3.js",
+})
+
+_FILE_EXT_PAT = (
+    r"py|js|jsx|mjs|cjs|ts|tsx|cs|csproj|sln|vb|fs|java|kt|kts|swift|rs|go|"
+    r"c|cpp|cc|h|hpp|rb|php|sql|sh|bash|yml|yaml|toml|html|css|scss|xml|json|"
+    r"jsonl|axml|resx|md|txt|gradle|props|targets|lock|env|ini|cfg|conf"
+)
+
+_FILE_REF_RE = re.compile(
+    rf"(?<![\w/.-])("
+    rf"(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.-]+\.(?:{_FILE_EXT_PAT})(?![\w.-])"
+    rf"|(?:Makefile|Dockerfile|Jenkinsfile)(?![\w.-])"
+    rf")",
+    re.IGNORECASE,
+)
+
+_URL_RE = re.compile(r"https?://[^\s)\"'>]+", re.IGNORECASE)
+_FENCED_BLOCK_RE = re.compile(r"```[\s\S]{120,}?```")
+_DOUBLE_QUOTE_LONG_RE = re.compile(r'["“][^"”]{120,}["”]')
+_BLOCKQUOTE_RUN_RE = re.compile(r"(?:^|\n)(?:>[^\n]*(?:\n|$))+")
+
+
+@lru_cache(maxsize=512)
+def compile_kw_regex(kw: str) -> re.Pattern[str]:
+    k = kw.strip().lower()
+    is_prefix = k.endswith("*")
+    core = k[:-1] if is_prefix else k
+    escaped = re.escape(core)
+    start_bound = "" if core.startswith(".") else r"(?<![\w])"
+    end_bound = r"[\w]*" if is_prefix else r"(?![\w])"
+    return re.compile(f"{start_bound}{escaped}{end_bound}", re.IGNORECASE)
+
+
+_BROAD_SCOPE_PATTERNS = [
+    compile_kw_regex(p)
+    for p in (
+        "todos os", "todas as", "projeto inteiro", "repositório inteiro", "repositorio inteiro",
+        "vários arquivos", "varios arquivos", "cada arquivo", "tudo isso",
+        "all files", "all hooks", "all endpoints", "across the", "entire repo",
+        "entire project", "whole codebase", "every file", "multiple files",
+        "project-wide", "repo-wide", "everywhere",
+    )
+]
+
+_READ_ONLY_GUARD_PATTERNS = [
+    compile_kw_regex(p)
+    for p in (
+        "ainda não faz", "ainda nao faz", "não faz isso", "nao faz isso",
+        "não mexe", "nao mexe", "sem alterar", "sem editar", "sem modificar",
+        "somente leitura", "só leitura", "so leitura", "só me situa", "so me situa",
+        "me situa", "só analisa", "so analisa", "don't edit", "do not edit",
+        "read-only", "read only", "just explain", "without modifying", "without editing",
+    )
+]
+
+_PLAN_PROPOSAL_PATTERNS = [
+    compile_kw_regex(p)
+    for p in (
+        "plano", "plan", "auditoria", "audit", "audita", "propõe", "propoe",
+        "propose", "architect*", "arquitetura", "roadmap",
+    )
+]
+
+_GRATITUDE_PATTERNS = [
+    compile_kw_regex(p)
+    for p in (
+        "obrigad*", "valeu", "brigad*", "agradeç*", "agradec*",
+        "thanks", "thank you", "thx", "ty", "tmj",
+    )
+]
+
+_DIRECT_APPROVAL_PATTERNS = [
+    compile_kw_regex(p)
+    for p in (
+        "pode fazer", "pode seguir", "pode rodar", "pode aplicar", "pode ir",
+        "manda ver", "bora", "fechou", "aprovado", "approved", "lgtm",
+        "go ahead", "proceed", "do it", "faz isso", "faz tudo", "faça tudo",
+        "faca tudo", "aplica", "executa", "vai fundo", "corrige aí", "corrige ai",
+        "corrija aí", "corrija ai", "arruma aí", "arruma ai", "segue em frente",
+    )
+]
+
+_BARE_APPROVAL_WORDS = frozenset({"sim", "yes", "pode"})
+_PRAISE_ACK_PATTERNS = [
+    compile_kw_regex(p)
+    for p in (
+        "muito bom", "ótimo", "otimo", "perfeito", "excelente", "show",
+        "massa", "top", "legal", "gostei", "looks good", "sounds good",
+        "great", "awesome", "nice", "ok", "beleza", "certo", "combinado",
+    )
+]
+_APPROVAL_VERB_PATTERNS = [
+    compile_kw_regex(p)
+    for p in (
+        "pode", "faz", "fazer", "faça", "faca", "aplica", "aplicar",
+        "executa", "executar", "implementa", "implementar", "manda",
+        "segue", "seguir", "proceed", "go ahead", "do", "vai",
+    )
+]
+_ANAPHORIC_REF_RE = re.compile(
+    r"(?:tudo\s+isso|esse\s+plano|essa\s+proposta|essas\s+mudan[cç]as|"
+    r"op[cç][aã]o\s+\d+|fase\s+\d+|all\s+of\s+(?:it|that)|that\s+plan|"
+    r"those\s+changes|as\s+proposed|option\s+\d+|phase\s+\d+)",
+    re.IGNORECASE,
+)
+
+_CONTINUATION_PATTERNS = [
+    compile_kw_regex(p)
+    for p in (
+        "continua", "continue", "faz o resto", "faça o resto", "faca o resto",
+        "próxima parte", "proxima parte", "próximo passo", "proximo passo",
+        "next step", "next part", "retoma", "resume", "tenta de novo",
+        "try again", "fix that error", "corrige esse erro", "arruma esse erro",
+        "termina o resto", "finish the rest",
+    )
+]
+_PART_STEP_RE = re.compile(r"\b(?:parte|part|etapa|step)\s+\d+\b", re.IGNORECASE)
+
 GDK_DOC_KEYWORDS = (
     "android", "androidmanifest*", "targetsdk*", "mediastore", "mediasession",
     "audiotrack", "audiomanager", "foreground", "notification*", "saf", "ndk",
@@ -176,17 +306,6 @@ DOC_INTENT_KEYWORDS = (
 )
 
 GDK_DOMAINS = frozenset({"media-native"})
-
-
-def compile_kw_regex(kw: str) -> re.Pattern[str]:
-    k = kw.strip().lower()
-    is_prefix = k.endswith("*")
-    core = k[:-1] if is_prefix else k
-    escaped = re.escape(core)
-    start_bound = "" if core.startswith(".") else r"(?<![\w])"
-    end_bound = r"[\w]*" if is_prefix else r"(?![\w])"
-    return re.compile(f"{start_bound}{escaped}{end_bound}", re.IGNORECASE)
-
 
 _ACTION_PATTERNS = [compile_kw_regex(v) for v in ACTION_VERBS]
 _DEPTH_PATTERNS = [(kw.rstrip("*"), compile_kw_regex(kw)) for kw in HIGH_DEPTH_SIGNALS]
@@ -240,6 +359,94 @@ def _merged_domain_specs(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return merged
 
 
+def _ordered_union(*groups: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for grp in groups:
+        for item in grp or ():
+            s = str(item).strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out
+
+
+def _strip_long_quotes(text: str) -> str:
+    """Strip >=120-char quoted/fenced/blockquote blocks for imperative scoring when >=30 chars remain."""
+    raw = text or ""
+    if len(raw) < 150:
+        return raw
+    stripped = _FENCED_BLOCK_RE.sub(" ", raw)
+    stripped = _DOUBLE_QUOTE_LONG_RE.sub(" ", stripped)
+
+    def _drop_big_bq(m: re.Match[str]) -> str:
+        blk = m.group(0)
+        return "\n" if len(blk.strip()) >= 120 else blk
+
+    stripped = _BLOCKQUOTE_RUN_RE.sub(_drop_big_bq, stripped)
+    stripped = re.sub(r"[ \t]+", " ", stripped).strip()
+    return stripped if len(stripped) >= 30 else raw
+
+
+def _extract_file_refs(text: str) -> list[str]:
+    cleaned = _URL_RE.sub(" ", text or "")
+    refs: list[str] = []
+    seen: set[str] = set()
+    for m in _FILE_REF_RE.finditer(cleaned):
+        tok = m.group(1).strip("`'\",.;:()[]{}")
+        low = tok.lower()
+        if not tok or low in _FRAMEWORK_DOT_TOKENS:
+            continue
+        if low not in seen:
+            seen.add(low)
+            refs.append(tok)
+    return refs
+
+
+def _has_broad_scope(lower_text: str) -> bool:
+    return any(p.search(lower_text) for p in _BROAD_SCOPE_PATTERNS)
+
+
+def _strip_leading_greetings(text: str) -> str:
+    cur = (text or "").strip()
+    while cur:
+        nxt = _GREETING_LEAD_RE.sub("", cur, count=1).strip()
+        if nxt == cur:
+            break
+        cur = nxt
+    return cur
+
+
+def _split_action_clauses(text: str) -> list[str]:
+    primary = re.split(
+        r"(?:[\n;!?]+|\.(?:\s+|$)|,\s+(?:e|and|mas|plus|também|tambem|also)\s+|\s+(?:além disso|alem disso|outra coisa|e também|e tambem|and also)\s+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    out: list[str] = []
+    conj_re = re.compile(r"\s+(?:e|and|then|depois|tamb[eé]m)\s+", re.IGNORECASE)
+    for chunk in primary:
+        c = chunk.strip()
+        if not c:
+            continue
+        parts = conj_re.split(c)
+        if len(parts) == 1:
+            out.append(c)
+            continue
+        buf = parts[0]
+        for nxt in parts[1:]:
+            head = " ".join(nxt.strip().split()[:3]).lower()
+            if any(pat.search(head) for pat in _ACTION_PATTERNS):
+                if buf.strip():
+                    out.append(buf.strip())
+                buf = nxt
+            else:
+                buf = f"{buf} e {nxt}"
+        if buf.strip():
+            out.append(buf.strip())
+    return out
+
+
 def _count_list_items(text: str) -> int:
     count = 0
     for line in text.splitlines():
@@ -249,12 +456,8 @@ def _count_list_items(text: str) -> int:
 
 
 def _count_action_clauses(text: str) -> int:
-    raw_chunks = re.split(
-        r"(?:[\n;!?]+|\.(?:\s+|$)|,\s+(?:e|and|mas|plus|também|tambem|also)\s+|\s+(?:além disso|alem disso|outra coisa|e também|e tambem|and also)\s+)",
-        text.lower(),
-    )
     active = 0
-    for chunk in raw_chunks:
+    for chunk in _split_action_clauses(text.lower()):
         c = chunk.strip()
         if len(c) < 8:
             continue
@@ -329,16 +532,54 @@ def _detect_domains(lower_text: str, domain_specs: dict[str, dict[str, Any]]) ->
 
 
 def _is_pure_question_or_greeting(text: str, action_clauses: int, list_items: int) -> bool:
-    clean = re.sub(r"\s+", " ", text.strip().lower()).rstrip(".!?")
-    if not clean:
+    stripped = _strip_leading_greetings(text)
+    if not stripped:
         return True
-    if clean in SMALL_CONVERSATIONAL:
+    clean = re.sub(r"\s+", " ", stripped.lower()).rstrip(".!?")
+    if not clean or clean in SMALL_CONVERSATIONAL:
         return True
     if len(clean) < 28 and action_clauses == 0 and list_items == 0:
         return True
-    if list_items == 0 and action_clauses == 0 and clean.startswith(QUESTION_ONLY_PREFIXES):
-        return True
+    if list_items == 0 and action_clauses == 0:
+        if clean.startswith(QUESTION_ONLY_PREFIXES) or stripped.rstrip().endswith("?"):
+            return True
     return False
+
+
+def classify_followup_intent(text: str) -> str:
+    """Classify turn follow-up intent: gratitude_close | approval_execute | task_continuation | pure_question | none."""
+    raw = (text or "").strip()
+    if not raw:
+        return "none"
+    lower = re.sub(r"\s+", " ", raw.lower())
+    stripped = _strip_leading_greetings(raw)
+    stripped_clean = re.sub(r"\s+", " ", stripped.lower()).strip(" .!?")
+
+    has_gratitude = any(p.search(lower) for p in _GRATITUDE_PATTERNS)
+    has_action = any(p.search(lower) for p in _ACTION_PATTERNS)
+    has_direct_approval = any(p.search(lower) for p in _DIRECT_APPROVAL_PATTERNS) or (
+        stripped_clean in _BARE_APPROVAL_WORDS
+    )
+    has_praise_ack = any(p.search(lower) for p in _PRAISE_ACK_PATTERNS)
+    has_approval_verb = any(p.search(lower) for p in _APPROVAL_VERB_PATTERNS)
+    has_anaphoric = bool(_ANAPHORIC_REF_RE.search(lower))
+    has_comp_approval = has_praise_ack and (has_approval_verb or has_anaphoric)
+    has_continuation = any(p.search(lower) for p in _CONTINUATION_PATTERNS) or bool(_PART_STEP_RE.search(lower))
+
+    clauses = _count_action_clauses(raw)
+    items = _count_list_items(raw)
+    is_q = _is_pure_question_or_greeting(raw, clauses, items)
+
+    if has_gratitude and not has_action and not has_direct_approval and not has_comp_approval and not has_continuation and not (is_q and "?" in raw):
+        return "gratitude_close"
+    if has_direct_approval or has_comp_approval:
+        return "approval_execute"
+    if has_continuation:
+        return "task_continuation"
+
+    if is_q:
+        return "pure_question"
+    return "none"
 
 
 def build_recommended_modules(
@@ -414,22 +655,125 @@ def build_recommended_modules(
     return modules
 
 
-def analyze_prompt(prompt: str, workspace_root: Path | None = None) -> dict[str, Any]:
-    """Classify prompt breadth, depth, tier (0..3), domains, and recommended modules."""
+_TIER_NAMES = {0: "DIRECT", 1: "STANDARD", 2: "META_MODULES", 3: "FRACTAL_DEEP"}
+_DEPTH_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
+def _research_strategy_for(tier: int, domains: list[str], tiny_fix: bool = False) -> str:
+    if tier == 3 or (tier == 2 and len(domains) >= 3):
+        return "research_subagent_or_scoped_grep"
+    if tier >= 1:
+        return "scoped_grep_and_line_slices"
+    return "inline_grep" if tiny_fix else "none"
+
+
+def _compute_depth_level(depth_hits: list[str], domains: list[str], text_len: int, n_files: int, broad_scope: bool) -> str:
+    depth_score = len(depth_hits) * 2
+    if len(domains) >= 3:
+        depth_score += 3
+    elif len(domains) == 2:
+        depth_score += 2
+    if text_len >= 600:
+        depth_score += 2
+    elif text_len >= 280:
+        depth_score += 1
+    if n_files >= 6:
+        depth_score += 2
+    elif n_files >= 4:
+        depth_score += 1
+    if broad_scope:
+        depth_score += 1
+
+    if depth_score >= 4:
+        return "high"
+    if depth_score >= 2 or len(domains) == 2:
+        return "medium"
+    return "low"
+
+
+def _triage_confidence(tier: int, scoring_len: int, file_refs: list[str], domains: list[str], depth_hits: list[str], list_items: int, source: str, intent: str) -> str:
+    if source in ("context_approval", "context_continuation", "exit_plan_mode"):
+        return "high"
+    if intent in ("gratitude_close", "tiny_fix", "pure_question"):
+        return "high"
+    if tier >= 2 and (len(file_refs) >= 3 or list_items >= 2 or len(domains) >= 2 or len(depth_hits) >= 2):
+        return "high"
+    if tier <= 1 and scoring_len < 40 and not file_refs and not domains:
+        return "low"
+    if tier == 1 and not file_refs and not domains:
+        return "low"
+    return "medium"
+
+
+def analyze_prompt(
+    prompt: str,
+    workspace_root: Path | None = None,
+    context: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Classify prompt breadth, depth, tier (0..3), domains, and recommended modules (w/ multi-turn continuity)."""
     text = (prompt or "").strip()
     lower = text.lower()
+    scoring_text = _strip_long_quotes(text)
+    scoring_lower = scoring_text.lower()
 
     profile = load_project_profile(workspace_root)
     domain_specs = _merged_domain_specs(profile)
 
-    list_items = _count_list_items(text)
-    action_clauses = _count_action_clauses(text)
+    file_refs = _extract_file_refs(text)
     domains = _detect_domains(lower, domain_specs)
     depth_hits = [label for label, pat in _DEPTH_PATTERNS if pat.search(lower)]
     doc_targets = detect_doc_lookup_targets(text, domains)
 
-    is_trivial_chat = _is_pure_question_or_greeting(text, action_clauses, list_items)
-    if is_trivial_chat:
+    list_items = _count_list_items(scoring_text)
+    action_clauses = _count_action_clauses(scoring_text)
+    broad_scope = _has_broad_scope(scoring_lower)
+    followup = classify_followup_intent(scoring_text)
+    has_read_only = any(p.search(scoring_lower) for p in _READ_ONLY_GUARD_PATTERNS)
+    has_plan_prop = any(p.search(scoring_lower) for p in _PLAN_PROPOSAL_PATTERNS)
+
+    tiny_fix_hints = ("typo", "ortografia", "1 linha", "uma linha", "rename", "renomea")
+    raw_breadth = max(list_items, action_clauses, len(file_refs), 1 if (domains or len(scoring_text) > 25) else 0)
+    if broad_scope:
+        raw_breadth = max(raw_breadth, 3)
+
+    is_tiny_fix = (
+        raw_breadth <= 1
+        and len(file_refs) < 2
+        and not broad_scope
+        and len(scoring_text) < 120
+        and len(domains) <= 1
+        and not depth_hits
+        and any(compile_kw_regex(h).search(scoring_lower) for h in tiny_fix_hints)
+    )
+
+    is_pure_q = _is_pure_question_or_greeting(scoring_text, action_clauses, list_items)
+
+    # Check multi-turn context continuity eligibility before early exits
+    cur_ts = float(now if now is not None else time.time())
+    ctx = context if isinstance(context, dict) else {}
+    ctx_tier = int(ctx.get("tier") or 0)
+    ctx_ts = float(ctx.get("ts") or 0.0)
+    ctx_ttl = float(ctx.get("ttl_secs") or 1800.0)
+    ctx_valid = bool(ctx and ctx_tier >= 2 and ctx_ts > 0.0 and (cur_ts - ctx_ts) <= ctx_ttl)
+    ctx_status = str(ctx.get("status") or "")
+    read_only_block = has_read_only and not has_plan_prop
+
+    can_inherit = (
+        ctx_valid
+        and not is_tiny_fix
+        and not read_only_block
+        and followup not in ("gratitude_close", "pure_question")
+        and (
+            (ctx_status == "proposed" and followup in ("approval_execute", "task_continuation"))
+            or (
+                ctx_status == "in_progress"
+                and (followup == "task_continuation" or (bool(ctx.get("build_failed")) and followup == "approval_execute"))
+            )
+        )
+    )
+
+    if not can_inherit and followup == "gratitude_close":
         return {
             "tier": 0,
             "tier_name": "DIRECT",
@@ -440,18 +784,29 @@ def analyze_prompt(prompt: str, workspace_root: Path | None = None) -> dict[str,
             "research_strategy": "none",
             "recommended_modules": [],
             "doc_lookup_targets": doc_targets,
+            "source": "prompt",
+            "intent": "gratitude_close",
+            "confidence": "high",
+            "file_refs": file_refs[:12],
         }
 
-    breadth_est = max(list_items, action_clauses, 1 if (domains or len(text) > 25) else 0)
+    if not can_inherit and is_pure_q:
+        return {
+            "tier": 0,
+            "tier_name": "DIRECT",
+            "breadth_est": 0,
+            "depth_level": "low",
+            "depth_signals": [],
+            "detected_domains": domains,
+            "research_strategy": "none",
+            "recommended_modules": [],
+            "doc_lookup_targets": doc_targets,
+            "source": "prompt",
+            "intent": "pure_question",
+            "confidence": "high",
+            "file_refs": file_refs[:12],
+        }
 
-    tiny_fix_hints = ("typo", "ortografia", "1 linha", "uma linha", "rename", "renomea")
-    is_tiny_fix = (
-        breadth_est <= 1
-        and len(text) < 120
-        and len(domains) <= 1
-        and not depth_hits
-        and any(compile_kw_regex(h).search(lower) for h in tiny_fix_hints)
-    )
     if is_tiny_fix:
         return {
             "tier": 0,
@@ -463,47 +818,54 @@ def analyze_prompt(prompt: str, workspace_root: Path | None = None) -> dict[str,
             "research_strategy": "inline_grep",
             "recommended_modules": [],
             "doc_lookup_targets": doc_targets,
+            "source": "prompt",
+            "intent": "tiny_fix",
+            "confidence": "high",
+            "file_refs": file_refs[:12],
         }
 
-    depth_score = len(depth_hits) * 2
-    if len(domains) >= 3:
-        depth_score += 3
-    elif len(domains) == 2:
-        depth_score += 2
-    if len(text) >= 600:
-        depth_score += 2
-    elif len(text) >= 280:
-        depth_score += 1
+    breadth_est = raw_breadth
+    depth_level = _compute_depth_level(depth_hits, domains, len(scoring_text), len(file_refs), broad_scope)
 
-    if depth_score >= 4:
-        depth_level = "high"
-    elif depth_score >= 2 or len(domains) == 2:
-        depth_level = "medium"
-    else:
-        depth_level = "low"
-
-    if depth_level == "high" and (breadth_est >= 3 or len(domains) >= 2 or len(depth_hits) >= 2 or len(text) >= 400):
+    if depth_level == "high" and (breadth_est >= 3 or len(domains) >= 2 or len(depth_hits) >= 2 or len(scoring_text) >= 400):
         tier = 3
-        tier_name = "FRACTAL_DEEP"
-    elif breadth_est >= 3 or (breadth_est >= 2 and len(domains) >= 2):
+    elif breadth_est >= 3 or len(file_refs) >= 4 or (breadth_est >= 2 and len(domains) >= 2):
         tier = 2
-        tier_name = "META_MODULES"
     elif breadth_est >= 1 or domains or depth_hits:
         tier = 1
-        tier_name = "STANDARD"
     else:
         tier = 0
-        tier_name = "DIRECT"
 
-    if tier == 3 or (tier == 2 and len(domains) >= 3):
-        research_strategy = "research_subagent_or_scoped_grep"
-    elif tier >= 1:
-        research_strategy = "scoped_grep_and_line_slices"
-    else:
-        research_strategy = "inline_grep"
+    source = "prompt"
+    intent = "plan_proposal" if has_plan_prop else "task"
+    inherited_turn: int | None = None
 
+    if read_only_block:
+        intent = "read_only_analysis"
+        tier = 0 if (action_clauses == 0 and list_items == 0 and not depth_hits) else min(tier, 1)
+        if tier <= 1:
+            breadth_est = min(breadth_est, 1)
+
+    if can_inherit:
+        tier = max(tier, ctx_tier)
+        domains = _ordered_union(domains, ctx.get("detected_domains"))
+        doc_targets = _ordered_union(doc_targets, ctx.get("doc_lookup_targets"))
+        depth_hits = _ordered_union(depth_hits, ctx.get("depth_signals"))
+        ctx_depth = str(ctx.get("depth_level") or "low")
+        if _DEPTH_ORDER.get(ctx_depth, 0) > _DEPTH_ORDER.get(depth_level, 0):
+            depth_level = ctx_depth
+        file_refs = _ordered_union(file_refs, ctx.get("file_refs"))
+        breadth_est = max(breadth_est, 3 if tier >= 2 else 1)
+        source = "context_approval" if followup == "approval_execute" else "context_continuation"
+        intent = followup
+        inherited_turn = int(ctx.get("turn_id") or 0)
+
+    tier_name = _TIER_NAMES.get(tier, "DIRECT")
+    research_strategy = _research_strategy_for(tier, domains)
     modules = build_recommended_modules(tier, domains, depth_level, domain_specs)
-    return {
+    confidence = _triage_confidence(tier, len(scoring_text), file_refs, domains, depth_hits, list_items, source, intent)
+
+    result: dict[str, Any] = {
         "tier": tier,
         "tier_name": tier_name,
         "breadth_est": breadth_est,
@@ -513,7 +875,109 @@ def analyze_prompt(prompt: str, workspace_root: Path | None = None) -> dict[str,
         "research_strategy": research_strategy,
         "recommended_modules": modules,
         "doc_lookup_targets": doc_targets,
+        "source": source,
+        "intent": intent,
+        "confidence": confidence,
+        "file_refs": file_refs[:12],
     }
+    if inherited_turn is not None:
+        result["inherited_from_turn"] = inherited_turn
+    return result
+
+
+def analyze_plan_text(plan_text: str, workspace_root: Path | None = None) -> dict[str, Any]:
+    """Extract real scope/tier from native `exit_plan_mode(plan=...)` text."""
+    text = (plan_text or "").strip()
+    lower = text.lower()
+    profile = load_project_profile(workspace_root)
+    domain_specs = _merged_domain_specs(profile)
+
+    file_refs = _extract_file_refs(text)
+    domains = _detect_domains(lower, domain_specs)
+    depth_hits = [label for label, pat in _DEPTH_PATTERNS if pat.search(lower)]
+    doc_targets = detect_doc_lookup_targets(text, domains)
+
+    steps = _count_list_items(text)
+    heading_steps = sum(
+        1 for ln in text.splitlines() if re.match(r"^\s*(?:#{1,4}\s+|STEP\s+\d+|MOD-|PHASE\s+\d+)", ln, re.IGNORECASE)
+    )
+    n_files = len(file_refs)
+    n_steps = max(steps, heading_steps, _count_action_clauses(text))
+    depth_level = _compute_depth_level(depth_hits, domains, len(text), n_files, _has_broad_scope(lower))
+
+    if n_files >= 5 or (n_files >= 3 and (len(domains) >= 2 or len(depth_hits) >= 1)):
+        tier = 3
+    elif n_files >= 3 or (n_files >= 2 and (n_steps >= 3 or len(domains) >= 2)) or n_steps >= 5:
+        tier = 2
+    elif n_files >= 1 or n_steps >= 1:
+        tier = 1
+    else:
+        tier = 0
+
+    return {
+        "tier": tier,
+        "tier_name": _TIER_NAMES.get(tier, "DIRECT"),
+        "breadth_est": max(n_files, n_steps),
+        "depth_level": depth_level,
+        "depth_signals": depth_hits[:8],
+        "detected_domains": domains,
+        "research_strategy": _research_strategy_for(tier, domains),
+        "recommended_modules": build_recommended_modules(tier, domains, depth_level, domain_specs),
+        "doc_lookup_targets": doc_targets,
+        "file_refs": file_refs[:16],
+        "planned_files_est": n_files,
+        "steps_est": n_steps,
+        "source": "exit_plan_mode",
+        "confidence": "high",
+    }
+
+
+def merge_plan_triage(
+    existing_triage: dict[str, Any] | None,
+    plan_triage: dict[str, Any] | None,
+    workspace_root: Path | None = None,
+) -> dict[str, Any]:
+    """Merge prompt triage with live `exit_plan_mode` plan triage (monotonic upgrade)."""
+    base = dict(existing_triage or {})
+    plan = dict(plan_triage or {})
+    old_tier = int(base.get("tier") or 0)
+    new_tier = int(plan.get("tier") or 0)
+    tier = max(old_tier, new_tier)
+
+    domains = _ordered_union(base.get("detected_domains"), plan.get("detected_domains"))
+    doc_targets = _ordered_union(base.get("doc_lookup_targets"), plan.get("doc_lookup_targets"))
+    depth_signals = _ordered_union(base.get("depth_signals"), plan.get("depth_signals"))[:8]
+    file_refs = _ordered_union(base.get("file_refs"), plan.get("file_refs"))[:16]
+
+    d1 = str(base.get("depth_level") or "low")
+    d2 = str(plan.get("depth_level") or "low")
+    depth_level = d2 if _DEPTH_ORDER.get(d2, 0) >= _DEPTH_ORDER.get(d1, 0) else d1
+
+    profile = load_project_profile(workspace_root)
+    domain_specs = _merged_domain_specs(profile)
+
+    out = dict(base)
+    out.update({
+        "tier": tier,
+        "tier_name": _TIER_NAMES.get(tier, "DIRECT"),
+        "breadth_est": max(int(base.get("breadth_est") or 0), int(plan.get("breadth_est") or 0)),
+        "depth_level": depth_level,
+        "depth_signals": depth_signals,
+        "detected_domains": domains,
+        "research_strategy": _research_strategy_for(tier, domains),
+        "recommended_modules": build_recommended_modules(tier, domains, depth_level, domain_specs),
+        "doc_lookup_targets": doc_targets,
+        "file_refs": file_refs,
+        "planned_files_est": int(plan.get("planned_files_est") or len(plan.get("file_refs") or [])),
+        "plan_backed": True,
+    })
+    if new_tier > old_tier or not existing_triage:
+        out["source"] = "exit_plan_mode"
+        out["confidence"] = "high"
+    else:
+        out.setdefault("source", "prompt")
+        out.setdefault("confidence", "high")
+    return out
 
 
 def main() -> None:

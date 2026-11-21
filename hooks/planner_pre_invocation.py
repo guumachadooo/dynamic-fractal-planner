@@ -69,6 +69,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
 
     from planner_state import (  # noqa: E402
         auto_upgrade_workspace,
+        build_carried_task_context,
         detect_doc_mcps,
         format_doc_mcp_hint,
         get_paths,
@@ -84,6 +85,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
         resolve_planner_mode_info,
         resolve_repo_root,
         save_json,
+        unique_edited_files,
     )
 
     repo = resolve_repo_root(payload)
@@ -126,8 +128,9 @@ def _run_pre_invocation_inner(t0: float) -> None:
         prev_last_build_failed = bool(hook_state.get("last_build_failed"))
         prev_handoff_nudged = bool(hook_state.get("handoff_nudged"))
         prev_post_commit = bool(hook_state.get("post_commit_nudge"))
+        carried_ctx = build_carried_task_context(hook_state, load_json(plan_json), now)
         eco = is_eco_mode_prompt(last_input)
-        triage = analyze_prompt(last_input, repo)
+        triage = analyze_prompt(last_input, repo, context=carried_ctx, now=now)
         hook_state = {
             "turn_id": turn_id,
             "total_turns": total_turns,
@@ -137,6 +140,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "last_activity_ts": now,
             "last_invocation_num": inv_num,
             "triage": triage,
+            "task_context": carried_ctx,
             "triage_injected": False,
             "doc_hint_injected": False,
             "blast_radius_warned": False,
@@ -181,7 +185,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
         if not triage:
             from complexity_triage import analyze_prompt  # noqa: E402
 
-            triage = analyze_prompt(last_input, repo)
+            triage = analyze_prompt(last_input, repo, context=hook_state.get("task_context"), now=now)
         hook_state["triage"] = triage
         hook_state["last_invocation_num"] = inv_num
         hook_state["last_activity_ts"] = now
@@ -267,8 +271,10 @@ def _run_pre_invocation_inner(t0: float) -> None:
 
             auto_reqs = [] if mode_src == "auto:native_plan_turn" else extract_auto_reqs(last_input, max_reqs=6, structured_only=True)
             jits = _compact_domain_checklists(domains, profile, max_items=4)
+            triage_src = str(triage.get("source") or "prompt")
+            src_tag = "(ctx)" if triage_src.startswith("context_") else ("(plan)" if triage_src == "exit_plan_mode" else "")
             inject_lines.append(
-                f"[Triage|T{tier}|mode={mode_tag}|dom={dom_str}]"
+                f"[Triage|T{tier}{src_tag}|mode={mode_tag}|dom={dom_str}]"
             )
             if auto_reqs:
                 inject_lines.append("REQS|" + " | ".join(auto_reqs))
@@ -318,7 +324,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
     # Non-blocking Blast Radius heads-up (once per turn, suppressed in ECO_MODE)
     if not eco_mode and hook_state.get("blast_radius_warned") and not hook_state.get("blast_radius_notified"):
         hook_state["blast_radius_notified"] = True
-        total_ed = len(hook_state.get("code_files_edited") or []) + len(hook_state.get("plugin_files_edited") or [])
+        total_ed = len(unique_edited_files(hook_state))
         inject_lines.append(
             f"[BLAST RADIUS|T{tier} edited {total_ed} files] Scope expanded beyond simple fix -> keep edits tightly scoped to the request."
         )

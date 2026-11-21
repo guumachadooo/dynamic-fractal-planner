@@ -1,10 +1,11 @@
-# Dynamic Fractal Planner v3 (`plugin 2.3.0`)
+# Dynamic Fractal Planner v3 (`plugin 2.4.0`)
 
-Quota-efficient adaptive planning, token-diet read/terminal guards, shift-left shields, anti-loop circuit breaker, silent static auto-verify & anti-rot memory. Python stdlib only.
+Quota-efficient adaptive planning, 4-layer context-aware triage, token-diet read/terminal guards, shift-left shields, anti-loop circuit breaker, silent static auto-verify & anti-rot memory. Python stdlib only.
 
 ## Capabilities (`v3`)
 | Area | Mechanism | Behavior |
 | :--- | :--- | :--- |
+| Triage | `complexity_triage.py`, `planner_state.py`, `planner_pre_invocation.py`, `planner_post_tool.py` | 4-layer adaptive triage: structural/semantic prompt signals (file refs, broad scope, verb-chained clauses, read-only vs plan guard, long-quote isolation) + multi-turn `task_context` state machine (30m TTL, survives Q&A, blocks closers/post-commit/bare `ok`) + live `exit_plan_mode(plan=...)` scope escalation + deduped edit counting (`unique_edited_files()`) |
 | Schema | `scripts/schema_migrations.py` | Chained `v1->v2->v3` in-memory migration (`CURRENT_SCHEMA_VERSION=3`); zero legacy repo mutation |
 | Modes | `auto` \| `lean` \| `strict` | `auto`: `<1ms` exact seed/cache hit (`model_mode_cache.py`) \| unseen -> safe `lean` + 1-time doc ctx -> AI `model-mode set` \| `enter/exit_plan_mode` -> auto-pin `lean`; `lean`: auto-REQs + JIT + non-blocking Blast Radius; `strict`: `PLAN GATE` + `finish` |
 | Token Diet | `planner_guard_read.py`, `log_digest.py`, `repo_map.py`, `planner_guard_command.py` | Deny `transcript*.jsonl`; block `>300L` full reads w/ free symbol map; `log_digest.py` error+5L context + `[repeated Nx]`; cached `/tmp` `repo_map.py`; `dotnet build` auto `--nologo -v:minimal`; `pytest` auto `-q --tb=short`; compact test summary |

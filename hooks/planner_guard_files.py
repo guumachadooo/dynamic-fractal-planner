@@ -286,6 +286,7 @@ def main() -> None:
             resolve_plugin_root,
             resolve_repo_root,
             scan_secrets_and_conflicts,
+            unique_edited_files,
         )
 
         repo = resolve_repo_root(payload)
@@ -351,12 +352,9 @@ def main() -> None:
             if not triage:
                 from complexity_triage import analyze_prompt  # noqa: E402
 
-                triage = analyze_prompt(payload.get("lastUserInput") or "", repo)
+                triage = analyze_prompt(payload.get("lastUserInput") or "", repo, context=hook_state.get("task_context"))
             tier = int(triage.get("tier") or 0)
-            plugin_edited = [f"plugin:{p}" for p in (hook_state.get("plugin_files_edited") or [])]
-            raw_plugin_set = set(hook_state.get("plugin_files_edited") or [])
-            code_edited = [c for c in (hook_state.get("code_files_edited") or []) if c not in raw_plugin_set]
-            edited = code_edited + plugin_edited
+            edited = unique_edited_files(hook_state)
             edit_key = f"plugin:{plugin_rel}" if in_plugin else normalize_rel_path(raw_path, repo)[0]
 
             if mode == "strict":

@@ -638,6 +638,65 @@ def has_active_turn_plan(payload: dict[str, Any], hook_state: dict[str, Any]) ->
     return False
 
 
+def unique_edited_files(hook_state: dict[str, Any]) -> list[str]:
+    """Return deduplicated list of edited code + plugin files in a turn."""
+    raw_plugin = [str(p) for p in (hook_state.get("plugin_files_edited") or []) if p]
+    plugin_set = set(raw_plugin)
+    code = [str(c) for c in (hook_state.get("code_files_edited") or []) if c and c not in plugin_set]
+    return code + [f"plugin:{p}" for p in raw_plugin]
+
+
+def build_carried_task_context(
+    prev_state: dict[str, Any] | None,
+    prev_plan_state: dict[str, Any] | None,
+    now: float,
+    ttl_secs: float = 1800.0,
+) -> dict[str, Any]:
+    """Build or preserve compact multi-turn `task_context` for follow-up continuity."""
+    if not isinstance(prev_state, dict) or not prev_state:
+        return {}
+
+    prev_plan = prev_plan_state if isinstance(prev_plan_state, dict) else {}
+    lifecycle = str(prev_plan.get("lifecycle") or "")
+    if prev_state.get("post_commit_nudge") and lifecycle != "awaiting_user":
+        return {}
+
+    prev_triage = prev_state.get("triage") if isinstance(prev_state.get("triage"), dict) else {}
+    prev_tier = int(prev_triage.get("tier") or 0)
+    prev_edited = len(unique_edited_files(prev_state))
+    build_failed = bool(prev_state.get("last_build_failed"))
+
+    if prev_tier >= 2 or prev_edited >= 3:
+        status = "proposed" if (prev_edited == 0 or lifecycle == "awaiting_user") else "in_progress"
+        ts = float(prev_state.get("last_activity_ts") or prev_state.get("turn_started_ts") or now)
+        if ts <= 0.0 or (now - ts) > ttl_secs:
+            return {}
+        return {
+            "turn_id": int(prev_state.get("turn_id") or 0),
+            "tier": max(prev_tier, 2 if prev_edited >= 3 else prev_tier),
+            "depth_level": str(prev_triage.get("depth_level") or "low"),
+            "depth_signals": list(prev_triage.get("depth_signals") or [])[:8],
+            "detected_domains": list(prev_triage.get("detected_domains") or []),
+            "doc_lookup_targets": list(prev_triage.get("doc_lookup_targets") or []),
+            "file_refs": list(prev_triage.get("file_refs") or [])[:12],
+            "status": status,
+            "build_failed": build_failed,
+            "ts": ts,
+            "ttl_secs": ttl_secs,
+        }
+
+    # Preserve prior fresh task_context across intervening Q&A turns (tier <= 1, no edits)
+    if prev_tier <= 1 and prev_edited == 0:
+        prev_ctx = prev_state.get("task_context")
+        if isinstance(prev_ctx, dict) and int(prev_ctx.get("tier") or 0) >= 2:
+            ctx_ts = float(prev_ctx.get("ts") or 0.0)
+            ctx_ttl = float(prev_ctx.get("ttl_secs") or ttl_secs)
+            if ctx_ts > 0.0 and (now - ctx_ts) <= ctx_ttl:
+                return dict(prev_ctx)
+
+    return {}
+
+
 def resolve_extra_requests_rel(profile: dict[str, Any]) -> str:
     return (profile.get("extra_requests_file") or DEFAULT_EXTRA_REQUESTS_FILE).strip()
 

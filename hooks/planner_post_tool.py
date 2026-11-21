@@ -143,6 +143,7 @@ def _run_post_tool_inner(is_pre: bool) -> None:
         record_telemetry,
         resolve_repo_root,
         save_json,
+        unique_edited_files,
     )
 
     args = tool.get("args") or {}
@@ -164,6 +165,17 @@ def _run_post_tool_inner(is_pre: bool) -> None:
                 record_telemetry("model_mode_auto_pin", {"model": normalize_model_key(raw_model), "tool": name})
         hook_state["native_plan_turn_sig"] = str(hook_state.get("turn_sig") or "")
         hook_state["native_plan_active_ts"] = now
+        if name == "exit_plan_mode":
+            plan_text = str(args.get("plan") or "").strip()
+            if plan_text:
+                from complexity_triage import analyze_plan_text, merge_plan_triage  # noqa: E402
+
+                plan_tri = analyze_plan_text(plan_text, repo)
+                merged = merge_plan_triage(hook_state.get("triage"), plan_tri, repo)
+                hook_state["triage"] = merged
+                hook_state["native_plan_backed"] = True
+                if int(merged.get("tier") or 0) >= 2:
+                    hook_state["blast_radius_warned"] = False
         changed = True
     elif name in ("read_file", "view_file"):
         path = args.get("Path") or args.get("AbsolutePath") or args.get("TargetFile") or ""
@@ -217,7 +229,7 @@ def _run_post_tool_inner(is_pre: bool) -> None:
 
         # Once a >max_simple file edit succeeds, mark blast radius approved for the rest of the turn
         max_simple = int((profile.get("blast_radius") or {}).get("simple_tier_max_files") or 3)
-        total_edited = len(hook_state.get("code_files_edited") or []) + len(hook_state.get("plugin_files_edited") or [])
+        total_edited = len(unique_edited_files(hook_state))
         if total_edited > max_simple and not hook_state.get("blast_radius_approved"):
             hook_state["blast_radius_approved"] = True
             changed = True
