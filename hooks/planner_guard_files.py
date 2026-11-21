@@ -114,6 +114,50 @@ def check_declarative_file_guards(
     return None
 
 
+def check_recon_block(
+    raw_path: str,
+    repo: Path,
+    profile: dict[str, Any],
+    payload: dict[str, Any],
+    in_plugin: bool,
+    plugin_rel: str,
+) -> str | None:
+    """Block code edits while MOD-RECON-SWEEP is active, allowing docs/plans/artifacts."""
+    from planner_state import get_paths, is_app_code_path, load_json, normalize_rel_path, record_telemetry  # noqa: E402
+
+    art_dir, _, _, hook_file = get_paths(payload)
+    hook_state = load_json(hook_file)
+    rec = hook_state.get("recon")
+    if not (isinstance(rec, dict) and rec.get("active")):
+        return None
+
+    try:
+        p_res = Path(raw_path).expanduser().resolve()
+        if p_res == art_dir.resolve() or art_dir.resolve() in p_res.parents:
+            return None
+    except Exception:
+        pass
+
+    rel = plugin_rel if in_plugin else normalize_rel_path(raw_path, repo)[0]
+    if in_plugin:
+        if plugin_rel.lower().endswith(".md"):
+            return None
+    elif rel.startswith(".agents/docs/") or Path(rel).suffix.lower() == ".md":
+        return None
+
+    if is_app_code_path(raw_path, repo, profile) or (in_plugin and not plugin_rel.lower().endswith(".md")):
+        record_telemetry("recon_blocked_code_edit", {"file": rel})
+        scope = str(rec.get("scope") or "").strip()
+        scope_tag = f"|scope={scope}" if scope else ""
+        plan_cli = PLUGIN_ROOT / "scripts" / "plan_tool.py"
+        return (
+            f"RECON MODE (read-only{scope_tag})|Code edit `{rel}` DENIED -> "
+            f"log findings as [BUG] | [UNWIRED] | [STRUCTURAL] | [UPGRADE] @ path:line ; "
+            f"run `python3 {plan_cli} recon stop` to resume coding."
+        )
+    return None
+
+
 def check_shift_left_diff_rules(
     tool_name: str,
     args: dict[str, Any],
@@ -136,9 +180,15 @@ def check_shift_left_diff_rules(
     for r in rules:
         if (r.get("severity") or "fail").lower() == "warn":
             continue
-        pref = (r.get("path_prefix") or "").replace("\\", "/")
+        prefs: list[str] = []
+        if r.get("path_prefix"):
+            prefs.append(str(r["path_prefix"]).replace("\\", "/").lstrip("./"))
+        for p in r.get("path_prefixes") or []:
+            ps = str(p).replace("\\", "/").lstrip("./")
+            if ps:
+                prefs.append(ps)
         preg = r.get("path_regex") or ""
-        if pref and not rel.startswith(pref):
+        if prefs and not any(rel.startswith(p) for p in prefs):
             continue
         if preg and not re.search(preg, rel):
             continue
@@ -324,6 +374,12 @@ def main() -> None:
                 record_telemetry("shift_left_secret_conflict", {"file": rel_for_sec})
                 reply("deny", "SECRET/CONFLICT SHIELD|" + " ; ".join(sec_hits[:3]), payload=payload, repo=repo)
                 return
+
+        # 1c2. Read-only forensic recon sweep shield
+        recon_hit = check_recon_block(raw_path, repo, profile, payload, in_plugin, plugin_rel)
+        if recon_hit:
+            reply("deny", recon_hit, payload=payload, repo=repo)
+            return
 
         # 1d. Shift-left fail diff_rules before disk write
         sl_hit = check_shift_left_diff_rules(tool_name, args, raw_path, repo, profile)

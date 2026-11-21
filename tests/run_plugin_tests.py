@@ -2793,6 +2793,516 @@ class TestAdaptiveTriageAndContinuity(unittest.TestCase):
                 self.assertIn("BLAST RADIUS", json.dumps(pre_warn))
 
 
+class TestV25EvolutionMechanics(unittest.TestCase):
+    def test_m1_wiring_gate_orphan_apis_branches_settings_and_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents").mkdir()
+            (repo / "Lib").mkdir()
+            (repo / "Ui").mkdir()
+            (repo / "Lang").mkdir()
+            (repo / "Docs").mkdir()
+            (repo / "Lang" / "Strings.cs").write_text(
+                'class Strings {\n  static Dictionary<string, string> En = new() {\n    ["Hello"] = "Hello",\n  };\n}\n',
+                encoding="utf-8",
+            )
+            (repo / "Lib" / "Settings.cs").write_text(
+                "public class Settings {\n  public bool OldFlag { get; set; }\n}\n",
+                encoding="utf-8",
+            )
+            (repo / "Lib" / "Core.cs").write_text("public class Core { }\n", encoding="utf-8")
+            (repo / "Ui" / "Screen.cs").write_text("class Screen { }\n", encoding="utf-8")
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "wiring_gate": {
+                            "enabled": True,
+                            "severity": "fail",
+                            "library_prefixes": ["Lib/"],
+                            "settings_files": ["Lib/Settings.cs"],
+                        },
+                        "key_parity_rules": [
+                            {
+                                "path": "Lang/Strings.cs",
+                                "added_key_regex": '^\\s*\\["([^"]+)"\\]\\s*=',
+                                "source_key_regex": '\\["([^"]+)"\\]\\s*=',
+                                "target_section_regex": "En = new\\(\\) \\{(.*?)\\};",
+                                "ref_regex": 'S\\["([^"]+)"\\]',
+                                "ref_path_prefixes": ["Ui/"],
+                                "ref_severity": "fail",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+            # Orphan APIs (C#/TS/Py), .md-only mention, identical if/else (brace + Py), unwired setting, missing ref key
+            (repo / "Lib" / "Core.cs").write_text(
+                "public class Core {\n"
+                "  public override string ToString() => \"Core\";\n"
+                "  public void OrphanMethod(int x) {\n"
+                "    if (x > 0) { DoOne(x); } else { DoOne(x); }\n"
+                "  }\n"
+                "  public string BranchOk(bool f) {\n"
+                '    if (f) { return "A"; } else { return "B"; }\n'
+                "  }\n"
+                "  private void DoOne(int x) { }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (repo / "Lib" / "mod.ts").write_text("export function orphanExportFn(v: number) { return v; }\n", encoding="utf-8")
+            (repo / "Lib" / "algo.py").write_text(
+                "def orphan_py_api(x):\n"
+                "    if x:\n"
+                "        return x + 1\n"
+                "    else:\n"
+                "        return x + 1\n",
+                encoding="utf-8",
+            )
+            (repo / "Lib" / "Settings.cs").write_text(
+                "public class Settings {\n  public bool OldFlag { get; set; }\n  public bool UnwiredToggle { get; set; }\n}\n",
+                encoding="utf-8",
+            )
+            (repo / "Docs" / "notes.md").write_text(
+                "Mentions OrphanMethod and orphanExportFn and orphan_py_api and UnwiredToggle.\n",
+                encoding="utf-8",
+            )
+            (repo / "Ui" / "Screen.cs").write_text(
+                'class Screen {\n  void Render(dynamic S, Core c, string dyn) {\n    var ok = c.BranchOk(true);\n    var a = S["Hello"];\n    var b = S["MissingUiKey"];\n    var c2 = S[$"Key_{dyn}"];\n    var commentOnly = "if (a) { b(); } else { b(); }";\n  }\n}\n',
+                encoding="utf-8",
+            )
+
+            res_fail = run_script("verify_universal.py", ["--workspace", str(repo)], cwd=repo, env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"})
+            self.assertNotEqual(res_fail.returncode, 0, res_fail.stdout)
+            self.assertIn("new public symbol `OrphanMethod`", res_fail.stdout)
+            self.assertIn("new public symbol `orphanExportFn`", res_fail.stdout)
+            self.assertIn("new public symbol `orphan_py_api`", res_fail.stdout)
+            self.assertNotIn("BranchOk", res_fail.stdout)
+            self.assertNotIn("ToString", res_fail.stdout)
+            self.assertIn("Lib/Core.cs:4: identical if/else branches", res_fail.stdout)
+            self.assertIn("Lib/algo.py:2: identical if/else branches", res_fail.stdout)
+            self.assertNotIn("Ui/Screen.cs", [ln for ln in res_fail.stdout.splitlines() if "identical if/else" in ln])
+            self.assertIn("setting/config key `UnwiredToggle`", res_fail.stdout)
+            self.assertIn("MissingUiKey", res_fail.stdout)
+            self.assertNotIn("Key_{dyn}", res_fail.stdout)
+
+            # Test warn severity does not fail exit code
+            prof = json.loads((repo / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
+            prof["wiring_gate"]["severity"] = "warn"
+            prof["key_parity_rules"][0]["ref_severity"] = "warn"
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps(prof), encoding="utf-8")
+            res_warn = run_script("verify_universal.py", ["--workspace", str(repo)], cwd=repo, env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"})
+            self.assertEqual(res_warn.returncode, 0, res_warn.stdout)
+            self.assertIn("WARNINGS:", res_warn.stdout)
+            self.assertIn("OrphanMethod", res_warn.stdout)
+
+            # Wire callers, fix identical branches, fix UI key -> clean pass
+            prof["wiring_gate"]["severity"] = "fail"
+            prof["key_parity_rules"][0]["ref_severity"] = "fail"
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps(prof), encoding="utf-8")
+            (repo / "Lib" / "Core.cs").write_text(
+                "public class Core {\n"
+                "  public void OrphanMethod(int x) {\n"
+                "    if (x > 0) { DoOne(x); } else { DoTwo(x); }\n"
+                "  }\n"
+                "  public string BranchOk(bool f) {\n"
+                '    if (f) { return "A"; } else { return "B"; }\n'
+                "  }\n"
+                "  private void DoOne(int x) { }\n"
+                "  private void DoTwo(int x) { }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (repo / "Lib" / "algo.py").write_text(
+                "def orphan_py_api(x):\n    if x:\n        return x + 1\n    else:\n        return x - 1\n",
+                encoding="utf-8",
+            )
+            (repo / "Ui" / "Screen.cs").write_text(
+                'class Screen {\n  void Render(dynamic S, Core c, Settings st) {\n    var ok = c.BranchOk(true);\n    var a = S["Hello"];\n    if (st.UnwiredToggle) { c.OrphanMethod(1); }\n  }\n}\n',
+                encoding="utf-8",
+            )
+            (repo / "Ui" / "consumer.ts").write_text("import { orphanExportFn } from '../Lib/mod';\norphanExportFn(1);\n", encoding="utf-8")
+            (repo / "Ui" / "caller.py").write_text("from Lib.algo import orphan_py_api\norphan_py_api(2)\n", encoding="utf-8")
+            res_pass = run_script("verify_universal.py", ["--workspace", str(repo)], cwd=repo, env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"})
+            self.assertEqual(res_pass.returncode, 0, res_pass.stdout + res_pass.stderr)
+            self.assertNotIn("Wiring-gate", res_pass.stdout)
+
+    def test_m2_recon_sweep_cli_guard_and_turn_continuity(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / "src").mkdir()
+            (repo / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / ".agents" / "docs" / "ROADMAP.md").write_text("# Roadmap\n", encoding="utf-8")
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 3, "code_path_prefixes": ["src/"], "code_extensions": [".py"]}),
+                encoding="utf-8",
+            )
+
+            r_start = run_script(
+                "plan_tool.py",
+                ["--dir", art, "--workspace", str(repo), "recon", "start", "--scope", "Slot 3+5"],
+                cwd=repo,
+            )
+            self.assertEqual(r_start.returncode, 0, r_start.stderr)
+            self.assertIn("RECON_START|active=true|scope=Slot 3+5", r_start.stdout)
+            self.assertIn("[BUG] | [UNWIRED] | [STRUCTURAL] | [UPGRADE]", r_start.stdout)
+
+            # Code edit denied while recon active
+            _, _, fg_code = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(repo / "src" / "app.py"), "Target": "x = 1", "Replacement": "x = 2"}},
+                },
+            )
+            self.assertEqual(fg_code.get("decision"), "deny")
+            self.assertIn("RECON MODE", fg_code.get("reason", ""))
+            self.assertIn("[BUG] | [UNWIRED]", fg_code.get("reason", ""))
+
+            # Docs, roadmaps, and TASK_PLAN.md allowed while recon active
+            _, _, fg_doc = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(repo / ".agents" / "docs" / "ROADMAP.md"), "Target": "# Roadmap", "Replacement": "# Roadmap\n- [BUG] src/app.py:1"}},
+                },
+            )
+            self.assertEqual(fg_doc.get("decision"), "allow")
+            _, _, fg_plan = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "write_file", "args": {"Path": str(Path(art) / "TASK_PLAN.md"), "Content": "# Plan\n"}},
+                },
+            )
+            self.assertEqual(fg_plan.get("decision"), "allow")
+
+            # SessionStart & new-turn PreInvocation carry recon state
+            _, _, ss = run_hook("planner_session_start.py", {"workspacePaths": [str(repo)], "artifactDirectoryPath": art})
+            ss_msg = ss["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("RECON|ACTIVE|scope=Slot 3+5", ss_msg)
+
+            _, _, pre = run_hook(
+                "planner_pre_invocation.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "lastUserInput": "New turn while recon active",
+                    "invocationNum": 1,
+                },
+            )
+            pre_msg = pre["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("[RECON|READ-ONLY|scope=Slot 3+5]", pre_msg)
+
+            r_stat = run_script("plan_tool.py", ["--dir", art, "--workspace", str(repo), "recon", "status"], cwd=repo)
+            self.assertIn("RECON_STATUS|active=true|scope=Slot 3+5", r_stat.stdout)
+
+            r_stop = run_script("plan_tool.py", ["--dir", art, "--workspace", str(repo), "recon", "stop"], cwd=repo)
+            self.assertIn("RECON_STOP|active=false", r_stop.stdout)
+
+            _, _, fg_after = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(repo / "src" / "app.py"), "Target": "x = 1", "Replacement": "x = 2"}},
+                },
+            )
+            self.assertEqual(fg_after.get("decision"), "allow")
+
+    def test_m3_wave_handoff_and_archive_read_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs" / "archive").mkdir(parents=True)
+            big_lines = ["# Archive", "## Sec 1"] + [f"def old_fn_{i}(): pass" for i in range(180)]
+            arch_1 = repo / ".agents" / "docs" / "archive" / "OLD.md"
+            arch_2 = repo / ".agents" / "docs" / "PHASE1.md"
+            arch_3 = repo / ".agents" / "docs" / "LEGACY_PLAN.md"
+            for ap in (arch_1, arch_2, arch_3):
+                ap.write_text("\n".join(big_lines) + "\n", encoding="utf-8")
+
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 3, "archive_docs": [".agents/docs/LEGACY_PLAN.md"]}),
+                encoding="utf-8",
+            )
+
+            res = run_script(
+                "plan_tool.py",
+                [
+                    "--workspace", str(repo),
+                    "handoff",
+                    "--roadmap", ".agents/docs/PHASE2_ROADMAP.md",
+                    "--wave", "W21",
+                    "--archive", ".agents/docs/PHASE1.md",
+                    "--summary", "W20 complete",
+                    "--next", "Audit W21",
+                ],
+                cwd=repo,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            ho_txt = (repo / ".agents" / "docs" / "HANDOFF.md").read_text(encoding="utf-8")
+            self.assertLessEqual(len(ho_txt.splitlines()), 20)
+            self.assertIn("ROADMAP|.agents/docs/PHASE2_ROADMAP.md", ho_txt)
+            self.assertIn("WAVE|W21", ho_txt)
+            self.assertIn("ARCHIVE|.agents/docs/PHASE1.md", ho_txt)
+
+            _, _, ss = run_hook("planner_session_start.py", {"workspacePaths": [str(repo)], "artifactDirectoryPath": art})
+            ss_msg = ss["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("WAVE_BRIDGE|roadmap=.agents/docs/PHASE2_ROADMAP.md|wave=W21|archive=.agents/docs/PHASE1.md", ss_msg)
+
+            # Archive read guard across all 3 mechanisms: archive/ dir, HANDOFF ARCHIVE|, profile.archive_docs
+            for ap in (arch_1, arch_2, arch_3):
+                _, _, deny_full = run_hook("planner_guard_read.py", {"workspacePaths": [str(repo)], "toolCall": {"name": "read_file", "args": {"Path": str(ap)}}})
+                self.assertEqual(deny_full.get("decision"), "deny", ap.name)
+                self.assertIn("ARCHIVE DOC", deny_full.get("reason", ""))
+                self.assertIn("[SYMBOL_MAP]", deny_full.get("reason", ""))
+
+                _, _, deny_open_end = run_hook("planner_guard_read.py", {"workspacePaths": [str(repo)], "toolCall": {"name": "read_file", "args": {"Path": str(ap), "StartLine": 1}}})
+                self.assertEqual(deny_open_end.get("decision"), "deny", ap.name)
+
+                _, _, deny_big_slice = run_hook("planner_guard_read.py", {"workspacePaths": [str(repo)], "toolCall": {"name": "read_file", "args": {"Path": str(ap), "StartLine": 1, "EndLine": 160}}})
+                self.assertEqual(deny_big_slice.get("decision"), "deny", ap.name)
+
+                _, _, allow_slice = run_hook("planner_guard_read.py", {"workspacePaths": [str(repo)], "toolCall": {"name": "read_file", "args": {"Path": str(ap), "StartLine": 1, "EndLine": 80}}})
+                self.assertEqual(allow_slice.get("decision"), "allow", ap.name)
+
+    def test_m4_build_cascade_shadow_dedup_and_diff_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents").mkdir()
+            (repo / "Layer1").mkdir()
+            (repo / "Layer2").mkdir()
+            (repo / "App").mkdir()
+            (repo / "Layer1" / "A.cs").write_text("class A { }\n", encoding="utf-8")
+            (repo / "Layer2" / "B.cs").write_text("class B { }\n", encoding="utf-8")
+            (repo / "App" / "C.cs").write_text("class C { }\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+            # Edit only Layer1; verify continue_on_error=false skips Layer2 and triggers App shadow fallback w/ dedup
+            (repo / "Layer1" / "A.cs").write_text("class A { int x = 1; }\n", encoding="utf-8")
+            (repo / "Layer2" / "B.cs").write_text("class B { void F(object x) { if (x is not null) {} } }\n", encoding="utf-8")
+
+            profile_data = {
+                "schema_version": 3,
+                "diff_rules": [
+                    {
+                        "path_prefixes": ["Layer1/", "Layer2/"],
+                        "path_regex": "\\.cs$",
+                        "forbid_regex": "\\bis\\s+not\\b",
+                        "severity": "fail",
+                        "message": "C# 9 is not forbidden across Layer1 and Layer2.",
+                    }
+                ],
+                "build_rules": [
+                    {
+                        "label": "01_Layer1",
+                        "trigger_path_prefixes": ["Layer1/"],
+                        "trigger_extensions": [".cs"],
+                        "continue_on_error": False,
+                        "command": "python3 -c \"import sys; print('Layer1/A.cs(1,1): error CS0103: MissingX [/repo/L1.csproj]'); sys.exit(1)\"",
+                    },
+                    {
+                        "label": "02_Layer2",
+                        "trigger_path_prefixes": ["Layer1/", "Layer2/"],
+                        "trigger_extensions": [".cs"],
+                        "continue_on_error": False,
+                        "command": "python3 -c \"print('SHOULD_NOT_RUN')\"",
+                    },
+                    {
+                        "label": "03_AppShadow",
+                        "trigger_path_prefixes": ["App/"],
+                        "trigger_extensions": [".cs"],
+                        "command": "python3 -c \"print('NORMAL_OK')\"",
+                        "on_upstream_fail_command": "python3 -c \"import sys; print('Layer1/A.cs(1,1): error CS0103: MissingX [/repo/Shadow.csproj]'); print('App/C.cs(5,2): error CS0246: MissingY [/repo/Shadow.csproj]'); sys.exit(1)\"",
+                    },
+                ],
+            }
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps(profile_data), encoding="utf-8")
+
+            # Shift-left guard & verify_universal both enforce diff_rules.path_prefixes
+            _, _, fg_shift = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "toolCall": {"name": "edit_file", "args": {"Path": str(repo / "Layer1" / "A.cs"), "Target": "int x = 1;", "Replacement": "if (x is not null) {}"}},
+                },
+            )
+            self.assertEqual(fg_shift.get("decision"), "deny")
+            self.assertIn("SHIFT-LEFT BLOCK", fg_shift.get("reason", ""))
+
+            # Clear Layer2 diff_rule violation so --build proceeds to run_build_rules
+            (repo / "Layer2" / "B.cs").write_text("class B { }\n", encoding="utf-8")
+            res_bld = run_script("verify_universal.py", ["--workspace", str(repo), "--build"], cwd=repo, env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1"})
+            self.assertNotEqual(res_bld.returncode, 0)
+            self.assertNotIn("SHOULD_NOT_RUN", res_bld.stdout)
+            self.assertIn("BUILD_SUMMARY|layers=01_Layer1:FAIL(1),02_Layer2:SKIPPED_UPSTREAM,03_AppShadow:SHADOW_FAIL(1)|unique_errors=2|deduped=1", res_bld.stdout)
+
+            # log_digest --errors-only dedup test
+            log_p = repo / "build.log"
+            log_p.write_text(
+                "A.cs(1,1): error CS0103: Foo [/a/L1.csproj]\n"
+                "A.cs(1,1): error CS0103: Foo [/a/Shadow.csproj]\n"
+                "src/x.ts(2,1): error TS2304: Bar\n",
+                encoding="utf-8",
+            )
+            ld_res = run_script("log_digest.py", [str(log_p), "--errors-only"], cwd=repo)
+            self.assertEqual(ld_res.returncode, 0)
+            self.assertIn("[LOG_DIGEST_ERRORS|build.log|unique=2|deduped=1]", ld_res.stdout)
+
+    def test_m5_jit_discovery_and_domain_lenses(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents").mkdir()
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "planner_mode": "lean",
+                        "domains": {
+                            "ui-frontend": {
+                                "lens": "Principal UX/UI: Nielsen heuristics, single primary CTA, zero jargon.",
+                                "checklist": ["Guard responsive layout."],
+                            },
+                            "payments": {
+                                "module_id": "MOD-PAY",
+                                "module_title": "Payments",
+                                "keywords": ["stripe", "billing"],
+                                "lens": "Audit idempotency && webhook replay safety.",
+                                "checklist": ["Verify webhook signature."],
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # T2 -> AUDIT_EXISTING only (no CURATE_OSS), active domain lens only
+            t2_prompt = "1. Update React CSS button spacing\n2. Fix frontend layout clipping\n3. Style responsive modal dialog\n4. Adjust sidebar theme colors"
+            with tempfile.TemporaryDirectory() as art2:
+                _, _, pre2 = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art2,
+                        "lastUserInput": t2_prompt,
+                        "invocationNum": 1,
+                    },
+                )
+                msg2 = pre2["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[Triage|T2", msg2)
+                self.assertIn("DISC|AUDIT_EXISTING:", msg2)
+                self.assertNotIn("CURATE_OSS", msg2)
+                self.assertIn("LENS|ui-frontend:Principal UX/UI", msg2)
+                self.assertNotIn("payments:", msg2)
+
+            # T3 -> AUDIT_EXISTING + CURATE_OSS
+            with tempfile.TemporaryDirectory() as art3:
+                _, _, pre3 = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art3,
+                        "lastUserInput": "Architect and refactor authentication, API endpoints, database schema, billing stripe webhooks, UI layout and test suite across 6 modules",
+                        "invocationNum": 1,
+                    },
+                )
+                msg3 = pre3["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("DISC|AUDIT_EXISTING:", msg3)
+                self.assertIn("CURATE_OSS:", msg3)
+                self.assertIn("LENS|", msg3)
+
+            # ECO_MODE suppresses DISC and LENS
+            with tempfile.TemporaryDirectory() as art_eco:
+                _, _, pre_eco = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art_eco,
+                        "lastUserInput": "low quota: Architect and refactor UI layout, API endpoints, database schema and stripe billing",
+                        "invocationNum": 1,
+                    },
+                )
+                msg_eco = pre_eco["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertNotIn("DISC|", msg_eco)
+                self.assertNotIn("LENS|", msg_eco)
+
+            # Tight bloat budget suppresses secondary DISC/LENS without bloat anomaly
+            with tempfile.TemporaryDirectory() as art_tight:
+                _, _, pre_tight = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art_tight,
+                        "lastUserInput": t2_prompt,
+                        "invocationNum": 1,
+                    },
+                    env_extra={"PLANNER_INJECTION_BLOAT_CHARS": "340"},
+                )
+                msg_tight = pre_tight["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[Triage|", msg_tight)
+                self.assertNotIn("DISC|", msg_tight)
+                self.assertNotIn("LENS|", msg_tight)
+
+    def test_m6_btw_queue_intent_and_ultra_terse_hint(self) -> None:
+        for p in (
+            "manda ele fazer push quando acabar",
+            "quando terminar, atualiza o README",
+            "tell the main agent to run install.sh when it finishes",
+            "/btw queue release",
+        ):
+            res = complexity_triage.analyze_prompt(p)
+            self.assertTrue(res.get("btw_queue_intent"), p)
+
+        self.assertFalse(complexity_triage.detect_btw_queue_intent("Fix layout clipping in Button.tsx"))
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents").mkdir()
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+
+            _, _, pre_btw = run_hook(
+                "planner_pre_invocation.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "lastUserInput": "manda ele fazer push quando acabar",
+                    "invocationNum": 1,
+                },
+            )
+            msg_btw = pre_btw["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("[BTW_QUEUE]", msg_btw)
+            self.assertIn(".agents/docs/EXTRA_REQUESTS.md", msg_btw)
+            self.assertIn("<=2L", msg_btw)
+
+            with tempfile.TemporaryDirectory() as art2:
+                _, _, pre_norm = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art2,
+                        "lastUserInput": "Fix layout clipping in Button.tsx",
+                        "invocationNum": 1,
+                    },
+                )
+                msg_norm = json.dumps(pre_norm)
+                self.assertNotIn("[BTW_QUEUE]", msg_norm)
+
+
 def _stamp_plugin_tests_passed() -> None:
     art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
     if not art_dir or os.environ.get("PLANNER_NO_HOOK_STAMP"):

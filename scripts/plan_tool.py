@@ -732,8 +732,11 @@ def cmd_handoff(args: argparse.Namespace, ws_root: Path) -> int:
 
     summary = (args.summary or "").strip().replace("\n", " ")
     next_act = (args.next or "").strip().replace("\n", " ")
-    if not summary and not next_act:
-        raise SystemExit("`handoff` requires `--summary` or `--next` (or `--clear`).")
+    roadmap = (getattr(args, "roadmap", "") or "").strip().replace("\n", " ")
+    wave = (getattr(args, "wave", "") or "").strip().replace("\n", " ")
+    archives = [str(a).strip().replace("\n", " ") for a in (getattr(args, "archive", None) or []) if str(a).strip()]
+    if not any((summary, next_act, roadmap, wave)):
+        raise SystemExit("`handoff` requires `--summary`, `--next`, `--roadmap`, or `--wave` (or `--clear`).")
 
     branch, head, dirty = "-", "-", "0"
     dirty_preview = ""
@@ -752,6 +755,12 @@ def cmd_handoff(args: argparse.Namespace, ws_root: Path) -> int:
         "# Session Handoff",
         f"ts={int(time.time())}|branch={branch}|head={head}|dirty={dirty}|fmt={CURRENT_DOCS_FORMAT_VERSION}",
     ]
+    if roadmap:
+        lines.append(f"ROADMAP|{roadmap[:180]}")
+    if wave:
+        lines.append(f"WAVE|{wave[:120]}")
+    if archives:
+        lines.append(f"ARCHIVE|{', '.join(archives)[:220]} (!read_full; slice only on demand)")
     if summary:
         lines.append(f"summary|{summary[:300]}")
     if next_act:
@@ -762,6 +771,54 @@ def cmd_handoff(args: argparse.Namespace, ws_root: Path) -> int:
     handoff_file.parent.mkdir(parents=True, exist_ok=True)
     handoff_file.write_text("\n".join(lines[:20]) + "\n", encoding="utf-8")
     print(f"HANDOFF_WRITTEN|{handoff_file}|lines={len(lines[:20])}")
+    return 0
+
+
+def cmd_recon(args: argparse.Namespace, artifact_dir: Path, ws_root: Path) -> int:
+    """Manage read-only forensic recon sweep state (`MOD-RECON-SWEEP`)."""
+    _, _, hook_file = state_paths(artifact_dir)
+    hook_state: dict[str, Any] = {}
+    if hook_file.is_file():
+        try:
+            loaded = json.loads(hook_file.read_text(encoding="utf-8", errors="ignore"))
+            if isinstance(loaded, dict):
+                hook_state = loaded
+        except Exception:
+            hook_state = {}
+
+    sub = args.recon_cmd
+    if sub == "start":
+        scope = (getattr(args, "scope", "") or "").strip().replace("\n", " ")
+        hook_state["recon"] = {
+            "active": True,
+            "scope": scope,
+            "started_at": int(time.time()),
+            "workspace": str(ws_root),
+        }
+        hook_state["recon_injected"] = False
+        hook_file.parent.mkdir(parents=True, exist_ok=True)
+        hook_file.write_text(json.dumps(hook_state, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"RECON_START|active=true|scope={scope or 'full'}|file={hook_file}")
+        print("TAXONOMY|[BUG] | [UNWIRED] | [STRUCTURAL] | [UPGRADE] @ path:line (code edits blocked until `recon stop`)")
+        return 0
+    if sub == "stop":
+        prev = hook_state.get("recon") if isinstance(hook_state.get("recon"), dict) else {}
+        hook_state["recon"] = {
+            "active": False,
+            "scope": str(prev.get("scope") or ""),
+            "started_at": int(prev.get("started_at") or 0),
+            "stopped_at": int(time.time()),
+            "workspace": str(ws_root),
+        }
+        hook_state["recon_injected"] = False
+        hook_file.parent.mkdir(parents=True, exist_ok=True)
+        hook_file.write_text(json.dumps(hook_state, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"RECON_STOP|active=false|file={hook_file}")
+        return 0
+    rec = hook_state.get("recon") if isinstance(hook_state.get("recon"), dict) else {}
+    active = bool(rec.get("active"))
+    scope = str(rec.get("scope") or "-")
+    print(f"RECON_STATUS|active={'true' if active else 'false'}|scope={scope}|taxonomy=[BUG]|[UNWIRED]|[STRUCTURAL]|[UPGRADE] @ path:line")
     return 0
 
 
@@ -985,7 +1042,17 @@ def main() -> None:
     p_ho = sub.add_parser("handoff", help="Write or clear compact <=20L .agents/docs/HANDOFF.md.")
     p_ho.add_argument("--summary", default="")
     p_ho.add_argument("--next", default="")
+    p_ho.add_argument("--roadmap", default="")
+    p_ho.add_argument("--wave", default="")
+    p_ho.add_argument("--archive", action="append")
     p_ho.add_argument("--clear", action="store_true")
+
+    p_rec = sub.add_parser("recon", help="Toggle or inspect read-only forensic recon mode.")
+    rec_sub = p_rec.add_subparsers(dest="recon_cmd", required=True)
+    p_rec_start = rec_sub.add_parser("start")
+    p_rec_start.add_argument("--scope", default="")
+    rec_sub.add_parser("stop")
+    rec_sub.add_parser("status")
 
     p_undo = sub.add_parser("undo-turn", help="Preview or revert code edits from the active turn.")
     p_undo.add_argument("--dry-run", action="store_true")
@@ -1065,6 +1132,8 @@ def main() -> None:
         raise SystemExit(cmd_finish(args, art_dir))
     elif args.cmd == "undo-turn":
         raise SystemExit(cmd_undo_turn(args, art_dir, ws_root))
+    elif args.cmd == "recon":
+        raise SystemExit(cmd_recon(args, art_dir, ws_root))
 
 
 if __name__ == "__main__":

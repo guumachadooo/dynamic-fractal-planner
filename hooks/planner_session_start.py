@@ -63,6 +63,7 @@ def main() -> None:
             get_paths,
             get_pending_extra_requests,
             is_real_project_root,
+            load_json,
             load_project_profile_with_warnings,
             resolve_planner_mode_info,
             resolve_repo_root,
@@ -79,7 +80,7 @@ def main() -> None:
             upgrade_info = auto_upgrade_workspace(repo)
 
         profile, profile_warnings = load_project_profile_with_warnings(repo)
-        _, task_md, _, _ = get_paths(payload)
+        _, task_md, _, hook_file = get_paths(payload)
 
         proj_name = profile.get("project_name") or repo.name
         mode, mode_src, model_name = resolve_planner_mode_info(profile, payload)
@@ -147,7 +148,47 @@ def main() -> None:
         if handoff_file.is_file():
             h_lines = [ln for ln in read_text(handoff_file).splitlines()[:20] if ln.strip()]
             if h_lines:
-                lines.append("HANDOFF|\n" + "\n".join(h_lines))
+                roadmap_ref = ""
+                wave_ref = ""
+                archive_refs: list[str] = []
+                body_lines: list[str] = []
+                for ln in h_lines:
+                    s_ln = ln.strip()
+                    if s_ln.startswith("ROADMAP|"):
+                        roadmap_ref = s_ln[8:].strip()
+                    elif s_ln.startswith("WAVE|"):
+                        wave_ref = s_ln[5:].strip()
+                    elif s_ln.startswith("ARCHIVE|"):
+                        archive_refs.append(s_ln[8:].split("(", 1)[0].strip())
+                    else:
+                        m_rm = re.match(r"^[-*]?\s*\*\*Active Roadmap:\*\*\s*`?([^`\s(]+)`?", s_ln, re.I)
+                        m_wv = re.match(r"^[-*]?\s*\*\*(?:Next Wave Ready|Last Completed):\*\*\s*(.+)$", s_ln, re.I)
+                        if m_rm and not roadmap_ref:
+                            roadmap_ref = m_rm.group(1).strip()
+                        elif m_wv and not wave_ref:
+                            wave_ref = m_wv.group(1).strip()[:80]
+                        body_lines.append(ln)
+                if roadmap_ref or wave_ref:
+                    bridge = f"WAVE_BRIDGE|roadmap={roadmap_ref or '-'}|wave={wave_ref or '-'}"
+                    if archive_refs:
+                        bridge += "|archive=" + ",".join(a for a in archive_refs if a)[:120]
+                    lines.append(bridge)
+                    compact_body = "\n".join(body_lines)
+                    if len(compact_body) > 450:
+                        compact_body = compact_body[:447] + "..."
+                    if compact_body:
+                        lines.append("HANDOFF|\n" + compact_body)
+                else:
+                    compact_body = "\n".join(h_lines)
+                    if len(compact_body) > 700:
+                        compact_body = compact_body[:697] + "..."
+                    lines.append("HANDOFF|\n" + compact_body)
+
+        hook_state = load_json(hook_file)
+        rec = hook_state.get("recon")
+        if isinstance(rec, dict) and rec.get("active"):
+            r_scope = str(rec.get("scope") or "full")
+            lines.append(f"RECON|ACTIVE|scope={r_scope}|taxonomy=[BUG]|[UNWIRED]|[STRUCTURAL]|[UPGRADE] @ path:line")
 
         mem_candidates = []
         for rel in (

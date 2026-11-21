@@ -313,6 +313,24 @@ _GDK_DOC_PATTERNS = [compile_kw_regex(k) for k in GDK_DOC_KEYWORDS]
 _C7_DOC_PATTERNS = [compile_kw_regex(k) for k in CONTEXT7_DOC_KEYWORDS]
 _DOC_INTENT_PATTERNS = [compile_kw_regex(k) for k in DOC_INTENT_KEYWORDS]
 
+_BTW_QUEUE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*/btw\b", re.IGNORECASE),
+    re.compile(r"\b(?:manda|diz|diga|fala|avisa|pede|pe[cç]a)\s+(?:pra\s+|para\s+)?(?:ele|ela|o\s+agente(?:\s+principal)?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:quando|assim\s+que|depois\s+(?:que)?)\s+(?:ele\s+)?(?:acabar|terminar|finalizar|concluir)\b", re.IGNORECASE),
+    re.compile(r"\b(?:coloca\w*\s+na\s+fila|enfileira\w*|para\s+o\s+agente\s+principal)\b", re.IGNORECASE),
+    re.compile(r"\b(?:tell|ask|have)\s+(?:him|her|it|the\s+main\s+agent)\s+to\b", re.IGNORECASE),
+    re.compile(r"\b(?:when|once|after)\s+(?:it|he|she|the\s+main\s+agent)\s+(?:finishes|is\s+done|completes)\b", re.IGNORECASE),
+    re.compile(r"\b(?:queue\s+(?:this\s+)?for\s+(?:the\s+)?main|for\s+the\s+main\s+agent)\b", re.IGNORECASE),
+)
+
+
+def detect_btw_queue_intent(text: str) -> bool:
+    """Detect `/btw` or main-agent queueing intent in short user prompts."""
+    scoring = _strip_long_quotes(text or "").strip()
+    if not scoring or len(scoring) > 500:
+        return False
+    return any(pat.search(scoring) for pat in _BTW_QUEUE_PATTERNS)
+
 
 def detect_doc_lookup_targets(prompt: str, domains: list[str] | None = None) -> list[str]:
     """Return ordered list of relevant doc MCP targets (`gdk`, `context7`) for a prompt."""
@@ -355,7 +373,9 @@ def _merged_domain_specs(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if isinstance(custom, dict):
         for dom, spec in custom.items():
             if isinstance(spec, dict):
-                merged[dom] = dict(spec)
+                base = dict(merged.get(dom) or {})
+                base.update(spec)
+                merged[dom] = base
     return merged
 
 
@@ -729,6 +749,7 @@ def analyze_prompt(
     action_clauses = _count_action_clauses(scoring_text)
     broad_scope = _has_broad_scope(scoring_lower)
     followup = classify_followup_intent(scoring_text)
+    btw_intent = detect_btw_queue_intent(text)
     has_read_only = any(p.search(scoring_lower) for p in _READ_ONLY_GUARD_PATTERNS)
     has_plan_prop = any(p.search(scoring_lower) for p in _PLAN_PROPOSAL_PATTERNS)
 
@@ -788,6 +809,7 @@ def analyze_prompt(
             "intent": "gratitude_close",
             "confidence": "high",
             "file_refs": file_refs[:12],
+            "btw_queue_intent": btw_intent,
         }
 
     if not can_inherit and is_pure_q:
@@ -805,6 +827,7 @@ def analyze_prompt(
             "intent": "pure_question",
             "confidence": "high",
             "file_refs": file_refs[:12],
+            "btw_queue_intent": btw_intent,
         }
 
     if is_tiny_fix:
@@ -822,6 +845,7 @@ def analyze_prompt(
             "intent": "tiny_fix",
             "confidence": "high",
             "file_refs": file_refs[:12],
+            "btw_queue_intent": btw_intent,
         }
 
     breadth_est = raw_breadth
@@ -879,6 +903,7 @@ def analyze_prompt(
         "intent": intent,
         "confidence": confidence,
         "file_refs": file_refs[:12],
+        "btw_queue_intent": btw_intent,
     }
     if inherited_turn is not None:
         result["inherited_from_turn"] = inherited_turn

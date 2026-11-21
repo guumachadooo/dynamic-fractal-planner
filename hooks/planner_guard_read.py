@@ -76,7 +76,7 @@ def main() -> None:
         for p_dir in (str(HOOKS_DIR), str(SCRIPTS_DIR)):
             if p_dir not in sys.path:
                 sys.path.insert(0, p_dir)
-        from planner_state import extract_symbol_map, load_project_profile, record_telemetry, resolve_repo_root  # noqa: E402
+        from planner_state import extract_symbol_map, load_project_profile, normalize_rel_path, record_telemetry, resolve_repo_root  # noqa: E402
 
         if TRANSCRIPT_RE.search(norm_path):
             record_telemetry("read_blocked_transcript")
@@ -134,6 +134,42 @@ def main() -> None:
                 rule_sig="DENY:history",
             )
             return
+
+        rel, _ = normalize_rel_path(raw_path, repo)
+        archive_specs = [str(a).replace("\\", "/").lstrip("./") for a in (profile.get("archive_docs") or []) if str(a).strip()]
+        handoff_p = repo / ".agents" / "docs" / "HANDOFF.md"
+        if handoff_p.is_file():
+            for h_ln in handoff_p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if h_ln.startswith("ARCHIVE|"):
+                    arch_body = h_ln[8:].split("(", 1)[0].strip()
+                    for tok in arch_body.split(","):
+                        t_clean = tok.strip().strip("`").replace("\\", "/").lstrip("./")
+                        if t_clean:
+                            archive_specs.append(t_clean)
+        is_archive = (
+            rel.startswith(".agents/docs/archive/")
+            or "/.agents/docs/archive/" in norm_path
+            or any(rel == sp or rel.endswith("/" + sp) or norm_path.endswith("/" + sp) for sp in archive_specs)
+        )
+        archive_max = int(rb.get("archive_max_lines") or 150)
+        archive_slice = int(rb.get("archive_max_slice_lines") or min(120, max_slice))
+        if is_archive and n_lines > archive_max:
+            has_bounded = (
+                start_line is not None
+                and end_line is not None
+                and max(0, e_idx - s_idx + 1) <= archive_slice
+            )
+            if not has_bounded:
+                record_telemetry("read_blocked_archive", {"file": rel or p.name, "lines": n_lines})
+                sym_map = extract_symbol_map(lines, suf, max_entries=40)
+                msg = (
+                    f"DENY|ARCHIVE DOC `{rel or p.name}` ({n_lines}L > {archive_max}L) -> closed phase/archive; "
+                    f"pass explicit StartLine & EndLine (<= {archive_slice}L) only for targeted lookup."
+                )
+                if sym_map:
+                    msg += "\n[SYMBOL_MAP]\n" + "\n".join(sym_map)
+                _deny(msg, payload=payload, repo=repo, rule_sig="DENY:archive")
+                return
 
         is_log = (suf == ".log") or p.name.lower().endswith("_log.txt")
         if is_log and n_lines > max_full and not has_small_slice:

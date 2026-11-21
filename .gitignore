@@ -12,3 +12,4 @@ __pycache__/
 .last_good_backup/
 .bypass_gates
 .diagnostics/
+.agents/

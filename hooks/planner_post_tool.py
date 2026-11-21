@@ -85,15 +85,16 @@ def _matches_build_rule(cmd: str, profile: dict[str, Any]) -> bool:
         return True
     low_cmd = cmd.lower()
     for rule in profile.get("build_rules") or []:
-        r_cmd = str(rule.get("command") or "").strip().lower()
-        if not r_cmd:
-            continue
-        if r_cmd in low_cmd:
-            return True
-        # Match script basename (e.g. `check_android_cs.py`)
-        for tok in r_cmd.split():
-            if tok.endswith((".py", ".sh")) and Path(tok).name in low_cmd:
+        for key in ("command", "on_upstream_fail_command"):
+            r_cmd = str(rule.get(key) or "").strip().lower()
+            if not r_cmd:
+                continue
+            if r_cmd in low_cmd:
                 return True
+            # Match script basename (e.g. `check_android_cs.py`)
+            for tok in r_cmd.split():
+                if tok.endswith((".py", ".sh")) and Path(tok).name in low_cmd:
+                    return True
     return False
 
 

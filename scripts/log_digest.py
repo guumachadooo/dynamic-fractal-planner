@@ -16,7 +16,43 @@ ERROR_LINE_RE = re.compile(
     r"\b(?:Error|Exception|FATAL|FAIL(?:ED)?|SIGSEGV|SIGABRT|SIGSYS|Traceback)\b|\bexit(?:\s+code)?[\s:=]+[1-9]\d*\b|\b(?:CS|MSB)\d{4}\b",
     re.IGNORECASE,
 )
+DIAG_ERROR_RE = re.compile(
+    r"(?::\s*error\b|\berror\s+[A-Z]{2,}\d+:|\bfatal error:|\berror TS\d+:|^error(?:\[E\d+\])?:|\.go:\d+:\d+:|\b(?:SyntaxError|IndentationError|ImportError|NameError|TypeError|AssertionError)\b|\bFAILED\s+\S+|^e:\s+|\berror:\s+)",
+    re.IGNORECASE,
+)
+DIAG_PROJ_SUFFIX_RE = re.compile(r"\s*\[[^\]]+\.(?:csproj|vbproj|fsproj|vcxproj|targets)\]\s*$", re.IGNORECASE)
 LEADING_TS_RE = re.compile(r"^(?:\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\]|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?|\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s*")
+
+
+def normalize_diag_key(line: str) -> str:
+    """Normalize compiler/test error line for cross-layer global deduplication."""
+    cleaned = LEADING_TS_RE.sub("", line or "").strip()
+    cleaned = DIAG_PROJ_SUFFIX_RE.sub("", cleaned)
+    cleaned = cleaned.replace("\\", "/")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def extract_unique_diagnostics(
+    text: str,
+    global_seen: set[str] | None = None,
+) -> tuple[list[str], int]:
+    """Extract deduplicated diagnostic error lines, updating `global_seen` across layers."""
+    seen = global_seen if global_seen is not None else set()
+    unique: list[str] = []
+    dups = 0
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s or not DIAG_ERROR_RE.search(s):
+            continue
+        key = normalize_diag_key(s)
+        if not key:
+            continue
+        if key in seen:
+            dups += 1
+            continue
+        seen.add(key)
+        unique.append(s)
+    return unique, dups
 
 
 def _extract_latest_block(lines: list[str]) -> list[str]:
@@ -105,6 +141,7 @@ def main() -> None:
     parser.add_argument("path", help="Path to log file.")
     parser.add_argument("--context", type=int, default=5, help="Context lines before/after each match.")
     parser.add_argument("--max-lines", type=int, default=120, help="Max output lines.")
+    parser.add_argument("--errors-only", action="store_true", help="Output only globally deduplicated diagnostic errors.")
     args = parser.parse_args()
 
     p = Path(args.path).expanduser()
@@ -113,6 +150,12 @@ def main() -> None:
         raise SystemExit(1)
 
     text = p.read_text(encoding="utf-8", errors="ignore")
+    if args.errors_only:
+        uniq, dups = extract_unique_diagnostics(text)
+        print(f"[LOG_DIGEST_ERRORS|{p.name}|unique={len(uniq)}|deduped={dups}]")
+        for ln in uniq[: max(10, args.max_lines)]:
+            print(ln)
+        return
     print(digest_log_text(text, name=p.name, context=max(0, args.context), max_lines=max(10, args.max_lines)))
 
 

@@ -46,6 +46,29 @@ def _compact_domain_checklists(domains: list[str], profile: dict[str, Any], max_
     return out
 
 
+def _compact_domain_lenses(
+    domains: list[str],
+    profile: dict[str, Any],
+    max_lenses: int = 2,
+    max_chars: int = 220,
+) -> str:
+    custom_doms = profile.get("domains") if isinstance(profile.get("domains"), dict) else {}
+    parts: list[str] = []
+    for dom in domains or []:
+        spec = custom_doms.get(dom)
+        if not isinstance(spec, dict):
+            continue
+        lens = str(spec.get("lens") or "").strip().replace("\n", " ")
+        if lens:
+            parts.append(f"{dom}:{lens}")
+            if len(parts) >= max_lenses:
+                break
+    if not parts:
+        return ""
+    line = "LENS|" + " ; ".join(parts)
+    return (line[: max_chars - 3] + "...") if len(line) > max_chars else line
+
+
 def main() -> None:
     if (PLUGIN_ROOT / ".bypass_gates").exists():
         print("{}")
@@ -82,6 +105,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
         prepare_unseen_classification,
         prompt_hash,
         record_telemetry,
+        resolve_extra_requests_rel,
         resolve_planner_mode_info,
         resolve_repo_root,
         save_json,
@@ -128,6 +152,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
         prev_last_build_failed = bool(hook_state.get("last_build_failed"))
         prev_handoff_nudged = bool(hook_state.get("handoff_nudged"))
         prev_post_commit = bool(hook_state.get("post_commit_nudge"))
+        prev_recon = hook_state.get("recon") if isinstance(hook_state.get("recon"), dict) else None
         carried_ctx = build_carried_task_context(hook_state, load_json(plan_json), now)
         eco = is_eco_mode_prompt(last_input)
         triage = analyze_prompt(last_input, repo, context=carried_ctx, now=now)
@@ -179,6 +204,10 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "model_classify_prompted": "",
             "native_plan_turn_sig": "",
             "native_plan_active_ts": 0.0,
+            "recon": prev_recon,
+            "recon_injected": False,
+            "lens_injected": False,
+            "btw_injected": False,
         }
     else:
         triage = hook_state.get("triage") or {}
@@ -211,10 +240,38 @@ def _run_pre_invocation_inner(t0: float) -> None:
     doc_mcps = detect_doc_mcps(profile)
     doc_targets = list(triage.get("doc_lookup_targets") or [])
     doc_hint_line = format_doc_mcp_hint(doc_targets, doc_mcps)
+    bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1200)
+
+    def _append_within_budget(line: str) -> bool:
+        if not line:
+            return False
+        cur_chars = sum(len(x) + 1 for x in inject_lines)
+        if cur_chars + len(line) > bloat_limit:
+            return False
+        inject_lines.append(line)
+        return True
 
     if eco_mode and not hook_state.get("eco_injected"):
         hook_state["eco_injected"] = True
         inject_lines.append("[ECO_MODE|ON] Batch reads/greps in 1 turn && surgical edits only && terse <=8L reply && no optional docs.")
+
+    rec_state = hook_state.get("recon")
+    if isinstance(rec_state, dict) and rec_state.get("active") and not hook_state.get("recon_injected"):
+        r_scope = str(rec_state.get("scope") or "full")
+        if _append_within_budget(
+            f"[RECON|READ-ONLY|scope={r_scope}] Code edits blocked -> log [BUG] | [UNWIRED] | [STRUCTURAL] | [UPGRADE] @ path:line"
+        ):
+            hook_state["recon_injected"] = True
+
+    if triage.get("btw_queue_intent") and not hook_state.get("btw_injected"):
+        extra_rel = resolve_extra_requests_rel(profile)
+        btw_line = (
+            f"[BTW_QUEUE] Delegation/queue intent -> auto-append `- REQ|<scope> -> <goal>` "
+            f"(symbolic EN) to `{extra_rel}` (create if absent; !ask/!wait for explicit 'add to requests') "
+            f"&& reply ultra-terse (<=2L)."
+        )
+        if _append_within_budget(btw_line):
+            hook_state["btw_injected"] = True
 
     # Circuit Breaker: >=2 consecutive same cmd fails OR >=4 edits to same file without passing build
     same_fails = int(hook_state.get("same_cmd_fails") or 0)
@@ -289,6 +346,14 @@ def _run_pre_invocation_inner(t0: float) -> None:
         if doc_hint_line and not hook_state.get("doc_hint_injected"):
             hook_state["doc_hint_injected"] = True
             inject_lines.append(doc_hint_line)
+        if not eco_mode:
+            if tier == 2:
+                _append_within_budget("DISC|AUDIT_EXISTING: grep/inspect partial impls pre-create (!duplicate)")
+            elif tier >= 3:
+                _append_within_budget(
+                    "DISC|AUDIT_EXISTING: grep/inspect partial impls pre-create (!duplicate) ; "
+                    "CURATE_OSS: evaluate battle-tested OSS libs/standards pre-custom complex algos"
+                )
 
     # Runaway read guard (strict mode only)
     elif (
@@ -337,6 +402,12 @@ def _run_pre_invocation_inner(t0: float) -> None:
             f"T{tier} edited={total_ed} (code={len(hook_state.get('code_files_edited') or [])},plugin={len(hook_state.get('plugin_files_edited') or [])})",
             repo=repo,
         )
+
+    # Domain lenses (1-line active-domain critique, suppressed in ECO_MODE & within bloat budget)
+    if not eco_mode and not plan_ready and not hook_state.get("lens_injected") and tier >= 1:
+        lens_line = _compact_domain_lenses(list(triage.get("detected_domains") or []), profile)
+        if lens_line and _append_within_budget(lens_line):
+            hook_state["lens_injected"] = True
 
     # Direct doc-lookup routing for Tier 0/1 technical queries (once per turn, suppressed in ECO_MODE)
     if not eco_mode and doc_hint_line and not hook_state.get("doc_hint_injected"):
@@ -394,7 +465,6 @@ def _run_pre_invocation_inner(t0: float) -> None:
         return
 
     msg_text = "\n".join(inject_lines)
-    bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1200)
     if len(msg_text) > bloat_limit:
         from plugin_diagnostics import record_anomaly  # noqa: E402
 
