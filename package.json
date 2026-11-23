@@ -1,0 +1,16 @@
+{
+  "name": "dynamic-fractal-planner-preview",
+  "version": "2.10.0",
+  "private": true,
+  "description": "Zero-dependency AI Studio preview shim & 3-repo federation warmer for dynamic-fractal-planner (real stack: pure Python 3 stdlib plugin).",
+  "type": "module",
+  "scripts": {
+    "dev": "node .agents/preview/server.mjs",
+    "start": "node .agents/preview/server.mjs",
+    "build": "node --check .agents/preview/server.mjs",
+    "lint": "node --check .agents/preview/server.mjs && python3 -B tests/run_plugin_tests.py --fast",
+    "test": "python3 -B tests/run_plugin_tests.py --fast"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "mountRoot": "/tmp/cavern-federation",
+  "note": "Public 3-repo workspace federation manifest. NEVER store secrets here. Preview servers warm-hydrate sibling repos into mountRoot (outside /app/applet) at container boot with zero LLM quota.",
+  "repos": {
+    "cavern": {
+      "ownerRepo": "guumachadooo/Cavern",
+      "branch": "master",
+      "role": "Primary C#/.NET spatial DSP & Cavernize Android application",
+      "detectFiles": [
+        "Cavern/Cavern.csproj",
+        "CavernSamples/CavernizeAndroid/CavernizeAndroid.csproj"
+      ],
+      "termuxPath": "/root/.gemini/antigravity/scratch/Cavern",
+      "ciWorkflow": "BuildAndroid.yml"
+    },
+    "omniagent": {
+      "ownerRepo": "guumachadooo/OmniAgent",
+      "branch": "main",
+      "role": "One UI 9 Android companion APK, Cloudflare Hub v6 worker & Python/Termux bridge daemon",
+      "detectFiles": [
+        "OmniAgentAndroid/OmniAgentAndroid.csproj",
+        "worker/cloudflare_live_relay_worker.js"
+      ],
+      "termuxPath": "/root/.gemini/antigravity/scratch/OmniAgent",
+      "ciWorkflow": "BuildOmniAgent.yml"
+    },
+    "fractal": {
+      "ownerRepo": "guumachadooo/dynamic-fractal-planner",
+      "branch": "main",
+      "role": "Universal Dynamic Fractal Planner plugin (hooks, verify_universal, self-evolve, token-diet)",
+      "detectFiles": [
+        "plugin.json",
+        "scripts/verify_universal.py"
+      ],
+      "termuxPath": "/root/.gemini/antigravity/scratch/dynamic-fractal-planner",
+      "termuxGlobalPluginPath": "/root/.gemini/antigravity/plugins/dynamic-fractal-planner",
+      "ciWorkflow": ""
+    }
+  },
+  "mirrors": [
+    {
+      "name": "omniagent-python-and-worker",
+      "sourceRepo": "omniagent",
+      "targetRepo": "cavern",
+      "mappings": [
+        {
+          "src": "agent",
+          "dst": ".agents/agent",
+          "exclude": [
+            "__pycache__",
+            "*.pyc",
+            "*.pyo"
+          ]
+        },
+        {
+          "src": "worker/cloudflare_live_relay_worker.js",
+          "dst": ".agents/docs/cloudflare_live_relay_worker.js",
+          "exclude": []
+        }
+      ]
+    },
+    {
+      "name": "fractal-embedded-plugin",
+      "sourceRepo": "fractal",
+      "targetRepo": "cavern",
+      "mappings": [
+        {
+          "src": ".",
+          "dst": ".agents/plugins/dynamic-fractal-planner",
+          "exclude": [
+            ".git",
+            "package.json",
+            "AGENTS.md",
+            ".agents/preview",
+            ".agents/federation.json",
+            ".agents/bridge_profile.json",
+            ".agents/env_manifest.json",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            ".metrics.jsonl",
+            ".model_modes.json",
+            ".hook_state.json",
+            ".diagnostics"
+          ]
+        }
+      ]
+    }
+  ]
+}

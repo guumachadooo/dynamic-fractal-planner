@@ -1,0 +1,12 @@
+{
+  "schema": 5,
+  "relayUrl": "https://cavernize-diag-relay.gustavomponciano2.workers.dev",
+  "knockId": "b10baa8d4d41d4a3086c283be66e96c7e7e1006e004ddaf637dc31b301d0009c",
+  "defaultMode": "auto",
+  "preferredChannels": [
+    "android",
+    "termux",
+    "cavernize"
+  ],
+  "note": "PUBLIC non-secret connection profile only. NEVER store pairSecret, session tokens, or API keys here. knockId is a double-hashed one-way mailbox ID (sha256('knock-channel-v5:' + sha256('wake-channel-v2:' + pairSecret))) that only lets an unpaired AI ring the phone's biometric approval bell."
+}

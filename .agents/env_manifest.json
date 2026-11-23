@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "note": "Non-secret capability & expected environment variable manifest. NEVER store secret values or hashes here \u2014 only variable NAMES, purposes, and whether the user expects them present in AI Studio Secrets. If any variable with expectedInAiStudio=true disappears, the AI must notify the user and ask to restore it.",
+  "ownerRepo": "guumachadooo/dynamic-fractal-planner",
+  "defaultBranch": "main",
+  "variables": [
+    {
+      "name": "GITHUB_TOKEN",
+      "aliases": [
+        "GH_TOKEN"
+      ],
+      "expectedInAiStudio": true,
+      "capability": "githubDirectPushAndCi",
+      "purpose": "Direct atomic GitHub commits/push, Actions CI status/logs, and Releases directly from AI Studio without routing through phone",
+      "lastConfirmedUtc": "2026-11-23T13:01:00Z"
+    },
+    {
+      "name": "CLOUDFLARE_API_TOKEN",
+      "aliases": [],
+      "expectedInAiStudio": true,
+      "capability": "cloudflareDirectDeploy",
+      "purpose": "Direct Cloudflare Unified Hub Worker v6 deployment & SQLite Durable Object migration from AI Studio in ~1s",
+      "lastConfirmedUtc": "2026-11-23T13:01:00Z"
+    },
+    {
+      "name": "CAVERN_BRIDGE_PAIR_SECRET",
+      "aliases": [],
+      "expectedInAiStudio": true,
+      "capability": "omniAgentZeroKnockAuth",
+      "purpose": "Zero-knock instant E2E authentication with OmniAgent (S25 Ultra Termux + Android), Cavernize Live Bridge hot_exec, and 3-tier Flight Recorder",
+      "lastConfirmedUtc": "2026-11-23T13:01:00Z"
+    },
+    {
+      "name": "CAVERN_RELAY_URL",
+      "aliases": [],
+      "expectedInAiStudio": true,
+      "capability": "omniAgentZeroKnockAuth",
+      "purpose": "Cloudflare Unified Hub v6 relay endpoint for OmniAgent, Live Bridge, Swarm Bus, and 3-tier Flight Recorder",
+      "lastConfirmedUtc": "2026-11-23T13:01:00Z"
+    },
+    {
+      "name": "CAVERN_ADMIN_KEY",
+      "aliases": [],
+      "expectedInAiStudio": false,
+      "capability": "cloudflareAdmin",
+      "purpose": "Optional admin header for Cloudflare relay management",
+      "lastConfirmedUtc": ""
+    },
+    {
+      "name": "CLOUDFLARE_ACCOUNT_ID",
+      "aliases": [],
+      "expectedInAiStudio": false,
+      "capability": "cloudflareDirectDeploy",
+      "purpose": "Optional Cloudflare account ID (auto-discovered via /accounts if omitted)",
+      "lastConfirmedUtc": ""
+    },
+    {
+      "name": "CLOUDFLARE_WORKER_NAME",
+      "aliases": [],
+      "expectedInAiStudio": false,
+      "capability": "cloudflareDirectDeploy",
+      "purpose": "Optional Cloudflare Worker script name (auto-derived from CAVERN_RELAY_URL if omitted)",
+      "lastConfirmedUtc": ""
+    }
+  ]
+}
