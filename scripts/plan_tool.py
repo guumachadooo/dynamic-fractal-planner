@@ -971,6 +971,49 @@ def cmd_model_mode(args: argparse.Namespace, ws_root: Path) -> int:
     return 1
 
 
+def cmd_evolve(args: argparse.Namespace, ws_root: Path) -> int:
+    """Delegate to universal autonomous dual-scope self-evolution classifier & sync ledger."""
+    import self_evolve  # noqa: E402
+
+    sub_argv = ["--workspace", str(ws_root), args.evolve_cmd]
+    if args.evolve_cmd == "classify":
+        sub_argv.extend(["--desc", args.desc])
+        if args.files:
+            sub_argv.extend(["--files", *args.files])
+        if args.json:
+            sub_argv.append("--json")
+    elif args.evolve_cmd == "sync":
+        sub_argv.extend(["--scope", args.scope, "--title", args.title, "--summary", args.summary, "--commit", args.commit, "--agent", args.agent])
+        if args.files:
+            sub_argv.extend(["--files", *args.files])
+    elif args.evolve_cmd == "sync-plugin":
+        if args.apply:
+            sub_argv.append("--apply")
+        if args.global_dir:
+            sub_argv.extend(["--global-dir", args.global_dir])
+        if args.plugin_rel:
+            sub_argv.extend(["--plugin-rel", args.plugin_rel])
+        if args.json:
+            sub_argv.append("--json")
+    return self_evolve.main(sub_argv)
+
+
+def cmd_learn(args: argparse.Namespace, ws_root: Path) -> int:
+    """Delegate to universal dynamic timeless error learner."""
+    import error_learner  # noqa: E402
+
+    sub_argv = ["--workspace", str(ws_root), *(args.extra_args or [])]
+    return error_learner.main(sub_argv)
+
+
+def cmd_live_diag(args: argparse.Namespace, ws_root: Path) -> int:
+    """Delegate to universal uncached GitHub live diagnostics fetcher."""
+    import live_diagnostics  # noqa: E402
+
+    sub_argv = ["--workspace", str(ws_root), *(args.extra_args or [])]
+    return live_diagnostics.main(sub_argv)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Universal Dynamic Fractal Plan Engine & Project Bootstrapper.")
     parser.add_argument("--dir", default=None, help="Artifact directory override.")
@@ -1080,6 +1123,31 @@ def main() -> None:
     p_mm_clr.add_argument("model", nargs="?", default="")
     p_mm_clr.add_argument("--all", action="store_true")
 
+    p_evo = sub.add_parser("evolve", help="Classify improvements (project-only / plugin-universal / dual) or record dual sync ledger entries.")
+    evo_sub = p_evo.add_subparsers(dest="evolve_cmd", required=True)
+    p_evo_cls = evo_sub.add_parser("classify")
+    p_evo_cls.add_argument("--desc", required=True)
+    p_evo_cls.add_argument("--files", nargs="*", default=[])
+    p_evo_cls.add_argument("--json", action="store_true")
+    p_evo_sync = evo_sub.add_parser("sync")
+    p_evo_sync.add_argument("--scope", choices=["project", "plugin", "dual"], required=True)
+    p_evo_sync.add_argument("--title", required=True)
+    p_evo_sync.add_argument("--summary", required=True)
+    p_evo_sync.add_argument("--files", nargs="*", default=[])
+    p_evo_sync.add_argument("--commit", default="pending-push")
+    p_evo_sync.add_argument("--agent", default="AI")
+    p_evo_psync = evo_sub.add_parser("sync-plugin")
+    p_evo_psync.add_argument("--apply", action="store_true")
+    p_evo_psync.add_argument("--global-dir", default="")
+    p_evo_psync.add_argument("--plugin-rel", default=".agents/plugins/dynamic-fractal-planner")
+    p_evo_psync.add_argument("--json", action="store_true")
+
+    p_learn = sub.add_parser("learn", help="Run universal timeless build-error learner (forwards remaining args).")
+    p_learn.add_argument("extra_args", nargs=argparse.REMAINDER)
+
+    p_ldiag = sub.add_parser("live-diag", help="Fetch uncached live CI & runtime diagnostics from GitHub (forwards remaining args).")
+    p_ldiag.add_argument("extra_args", nargs=argparse.REMAINDER)
+
     args = parser.parse_args()
     ws_root = resolve_workspace_root(args.workspace)
     if args.cmd == "triage":
@@ -1107,6 +1175,12 @@ def main() -> None:
         raise SystemExit(cmd_diagnostics(args))
     if args.cmd == "model-mode":
         raise SystemExit(cmd_model_mode(args, ws_root))
+    if args.cmd == "evolve":
+        raise SystemExit(cmd_evolve(args, ws_root))
+    if args.cmd == "learn":
+        raise SystemExit(cmd_learn(args, ws_root))
+    if args.cmd == "live-diag":
+        raise SystemExit(cmd_live_diag(args, ws_root))
 
     art_dir = resolve_artifact_dir(args.dir)
     if args.cmd == "init":

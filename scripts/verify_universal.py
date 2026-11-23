@@ -64,9 +64,43 @@ def resolve_repo_root(cli_ws: str | None = None) -> Path:
     return cwd
 
 
-def get_changed_files(repo: Path) -> list[str]:
-    if not (repo / ".git").exists():
-        return []
+SKIP_DISCOVERY_DIRS = frozenset({
+    ".git", ".hg", ".svn", "node_modules", "bin", "obj", "dist", "build",
+    "__pycache__", ".venv", "venv", ".idea", ".vs", ".gradle", ".cache",
+})
+DISCOVERY_EXTS = (
+    ".cs", ".csproj", ".c", ".cpp", ".h", ".py", ".js", ".mjs", ".cjs",
+    ".ts", ".tsx", ".jsx", ".kt", ".kts", ".java", ".go", ".rs",
+    ".json", ".xml", ".yml", ".yaml", ".sh",
+)
+
+
+def discover_workspace_files(repo: Path, profile: dict[str, Any] | None = None) -> list[str]:
+    """Enumerate source/config files for `--all` or gitless container environments."""
+    prefixes: tuple[str, ...] = ()
+    if profile:
+        raw_p = profile.get("code_path_prefixes") or []
+        prefixes = tuple(str(p).replace("\\", "/").lstrip("./") for p in raw_p if str(p).strip())
+    found: list[str] = []
+    for root, dirs, filenames in os.walk(repo):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DISCOVERY_DIRS)
+        rel_root = Path(root).relative_to(repo).as_posix()
+        for fn in sorted(filenames):
+            rel = fn if rel_root == "." else f"{rel_root}/{fn}"
+            if rel.startswith(".aistudio/"):
+                continue
+            low = fn.lower()
+            if not low.endswith(DISCOVERY_EXTS) and fn != "BUILD_LESSONS.md":
+                continue
+            if prefixes and not rel.startswith(prefixes) and not rel.startswith(".agents/"):
+                continue
+            found.append(rel)
+    return found
+
+
+def get_changed_files(repo: Path, profile: dict[str, Any] | None = None, scan_all: bool = False) -> list[str]:
+    if scan_all or not (repo / ".git").exists():
+        return discover_workspace_files(repo, profile)
     res = subprocess.run(
         ["git", "-C", str(repo), "status", "--porcelain", "-uall"],
         capture_output=True,
@@ -168,6 +202,55 @@ def check_universal_syntax(repo: Path, files: list[str], fails: list[str]) -> No
             res = subprocess.run(["bash", "-n", str(full)], capture_output=True, text=True, timeout=5, check=False)
             if res.returncode != 0:
                 fails.append(f"{rel}: Shell syntax error: {res.stderr.strip()}")
+
+
+_CS_STMT_INDEX_ASSIGN_COMMA_RE = re.compile(
+    r'^\s*[A-Za-z_][A-Za-z0-9_.]*\[[^\]]+\]\s*=\s*(?:\$?"(?:\\.|[^"\\])*"|\'[^\']*\'|[^;{}()]+),\s*$'
+)
+
+
+def check_csharp_syntax_deep(repo: Path, files: list[str], fails: list[str], warns: list[str]) -> None:
+    """Fast Roslyn-free C# syntax heuristics catching high-frequency CI breaks (e.g. statement trailing comma CS1002)."""
+    for rel in files:
+        if not rel.lower().endswith(".cs"):
+            continue
+        full = repo / rel
+        if not full.is_file():
+            continue
+        lines = full.read_text(encoding="utf-8", errors="ignore").splitlines()
+        in_block_comment = False
+        in_raw_str = False
+        for idx, raw in enumerate(lines, start=1):
+            stripped = raw.strip()
+            if '"""' in stripped:
+                if stripped.count('"""') % 2 == 1:
+                    in_raw_str = not in_raw_str
+                continue
+            if in_raw_str:
+                continue
+            if in_block_comment:
+                if "*/" in raw:
+                    in_block_comment = False
+                continue
+            if "/*" in stripped and "*/" not in stripped:
+                in_block_comment = True
+                continue
+            code = strip_line_comment(raw).rstrip()
+            if not code.strip():
+                continue
+            # Catch dictionary/indexer assignment statements terminated with `,` instead of `;`
+            # (valid ONLY inside `new() { ["k"] = "v", }` where LHS has NO target identifier before `[`).
+            if _CS_STMT_INDEX_ASSIGN_COMMA_RE.match(code):
+                prev_code = ""
+                for back in range(idx - 2, max(-1, idx - 6), -1):
+                    pc = strip_line_comment(lines[back]).strip()
+                    if pc:
+                        prev_code = pc
+                        break
+                if prev_code.endswith((";", "{", "}")) and not prev_code.endswith(("=> new() {", "new {", "new() {")):
+                    fails.append(
+                        f"{rel}:{idx}: C# statement indexer assignment ends with `,` instead of `;` (likely CS1002/CS1513)."
+                    )
 
 
 def check_file_guards_state(repo: Path, profile: dict[str, Any], fails: list[str], warns: list[str]) -> None:
@@ -280,12 +363,15 @@ def check_key_parity_rules(repo: Path, files: list[str], profile: dict[str, Any]
         if not full.is_file():
             continue
         text = full.read_text(encoding="utf-8", errors="ignore")
+        target_rel = (r.get("target_path") or "").replace("\\", "/").lstrip("./") or rel
+        target_full = repo / target_rel
+        target_text = target_full.read_text(encoding="utf-8", errors="ignore") if target_full.is_file() else text
 
-        if rel in files:
+        if rel in files or target_rel in files:
             sec_pat = r.get("target_section_regex") or ""
-            m_sec = re.search(sec_pat, text, flags=re.MULTILINE | re.DOTALL)
+            m_sec = re.search(sec_pat, target_text, flags=re.MULTILINE | re.DOTALL) if target_text else None
             if not m_sec:
-                fails.append(f"{rel}: Could not locate target section for key parity rule.")
+                fails.append(f"{target_rel}: Could not locate target section for key parity rule.")
             else:
                 target_block = m_sec.group(1) if m_sec.groups() else m_sec.group(0)
                 key_pat = r.get("added_key_regex") or ""
@@ -323,9 +409,10 @@ def check_key_parity_rules(repo: Path, files: list[str], profile: dict[str, Any]
         ref_bucket = warns if ref_sev == "warn" else fails
         ref_msg_tpl = r.get("ref_message") or "Referenced key `{key}` missing from `{table}`."
         strip_comm = r.get("strip_line_comments", True)
+        skip_rels = {rel, target_rel}
 
         for f_rel in files:
-            if f_rel == rel or not (repo / f_rel).is_file():
+            if f_rel in skip_rels or not (repo / f_rel).is_file():
                 continue
             if ref_prefs and not any(f_rel.startswith(p) for p in ref_prefs):
                 continue
@@ -450,6 +537,14 @@ def run_build_rules(
     if ran_any and layer_statuses:
         l_parts = [f"{lbl}:{st}({cnt})" if cnt else f"{lbl}:{st}" for lbl, st, cnt in layer_statuses]
         print(f"BUILD_SUMMARY|layers={','.join(l_parts)}|unique_errors={len(global_seen)}|deduped={total_dups}")
+        if upstream_failed:
+            local_el = repo / ".agents" / "scripts" / "error_learner.py"
+            el_cmd = (
+                "python3 -B .agents/scripts/error_learner.py --from-log - --apply"
+                if local_el.is_file()
+                else f"python3 -B {SCRIPTS_DIR / 'error_learner.py'} --workspace {repo} --from-log - --apply"
+            )
+            print(f"LEARN_HINT|new recurring build error? pipe output -> `{el_cmd}`")
     return ran_any
 
 
@@ -1219,11 +1314,26 @@ def check_forward_wiring(repo: Path, files: list[str], profile: dict[str, Any], 
 
 
 def check_memory_weight(repo: Path, profile: dict[str, Any], warns: list[str]) -> None:
+    mw = profile.get("memory_weight_limits") if isinstance(profile.get("memory_weight_limits"), dict) else {}
+    hist_max_lines = int(mw.get("project_history_max_lines") or 150)
+    hist_max_kb = float(mw.get("project_history_max_kb") or 28.0)
+    sync_max_kb = float(mw.get("external_sync_max_kb") or 48.0)
+
     hist = repo / ".agents" / "docs" / "PROJECT_HISTORY.md"
     if hist.is_file():
-        n_lines = len(hist.read_text(encoding="utf-8", errors="ignore").splitlines())
-        if n_lines > 150:
-            warns.append(f"`.agents/docs/PROJECT_HISTORY.md` has {n_lines}L (>150L); archive older milestones to `.agents/docs/archive/`.")
+        hist_txt = hist.read_text(encoding="utf-8", errors="ignore")
+        n_lines = len(hist_txt.splitlines())
+        hist_kb = len(hist_txt.encode("utf-8")) / 1024.0
+        if n_lines > hist_max_lines:
+            warns.append(f"`.agents/docs/PROJECT_HISTORY.md` has {n_lines}L (>{hist_max_lines}L); archive older milestones to `.agents/docs/archive/`.")
+        elif hist_kb > hist_max_kb:
+            warns.append(f"`.agents/docs/PROJECT_HISTORY.md` is {hist_kb:.1f} KB (>{hist_max_kb:.0f} KB despite {n_lines}L); archive older milestones to `.agents/docs/archive/`.")
+
+    sync_doc = repo / ".agents" / "docs" / "EXTERNAL_AI_SYNC.md"
+    if sync_doc.is_file():
+        sync_kb = sync_doc.stat().st_size / 1024.0
+        if sync_kb > sync_max_kb:
+            warns.append(f"`.agents/docs/EXTERNAL_AI_SYNC.md` is {sync_kb:.1f} KB (>{sync_max_kb:.0f} KB); archive older sync entries to `.agents/docs/archive/`.")
 
     extra_rel = (profile.get("extra_requests_file") or DEFAULT_EXTRA_REQUESTS_FILE).strip()
     extra_p = repo / extra_rel
@@ -1244,17 +1354,158 @@ def check_memory_weight(repo: Path, profile: dict[str, Any], warns: list[str]) -
                 warns.append(f"`{extra_rel}` has {len(items)} completed items (>15); archive old entries to `.agents/docs/archive/`.")
 
 
+def check_code_weight(
+    repo: Path,
+    files: list[str],
+    profile: dict[str, Any],
+    warns: list[str],
+    *,
+    scan_all: bool = False,
+) -> None:
+    """Warn on oversized source files breaching profile `code_weight_limits` (anti-monolith guard)."""
+    cw = profile.get("code_weight_limits")
+    if not isinstance(cw, dict) or not cw.get("enabled", True):
+        return
+    limit = int(cw.get("warn_lines_all") or 2000) if scan_all else int(cw.get("warn_lines") or 1500)
+    if limit <= 0:
+        return
+    ignore_prefixes = tuple(
+        str(p).replace("\\", "/").lstrip("./")
+        for p in (cw.get("ignore_path_prefixes") or [".agents/", "Libraries/", "node_modules/"])
+        if str(p).strip()
+    )
+    allowed_exts = {
+        str(e).lower()
+        for e in (cw.get("extensions") or (".cs", ".py", ".ts", ".tsx", ".js", ".jsx", ".kt", ".java", ".rs", ".go", ".c", ".cpp", ".h", ".swift"))
+    }
+    for rel in files:
+        norm = rel.replace("\\", "/").lstrip("./")
+        if any(norm.startswith(pref) for pref in ignore_prefixes):
+            continue
+        if Path(norm).suffix.lower() not in allowed_exts:
+            continue
+        full = repo / norm
+        if not full.is_file():
+            continue
+        try:
+            n_lines = len(full.read_text(encoding="utf-8", errors="ignore").splitlines())
+        except Exception:
+            continue
+        if n_lines > limit:
+            warns.append(f"{norm}: {n_lines}L (>{limit}L) — consider splitting into modular/partial files (`code_weight_limits`).")
+
+
+def check_build_lessons_timelessness(repo: Path, files: list[str], fails: list[str]) -> None:
+    """Enforce timeless anti-obsolescence rules whenever any BUILD_LESSONS.md is modified."""
+    lesson_files = [f for f in files if Path(f).name == "BUILD_LESSONS.md" and (repo / f).is_file()]
+    if not lesson_files:
+        return
+    try:
+        import error_learner  # noqa: E402
+    except Exception:
+        return
+    for rel in lesson_files:
+        ok, errs = error_learner.audit_lessons_file(repo / rel)
+        if not ok:
+            for e in errs[:8]:
+                fails.append(f"{rel}: timelessness audit failed -> {e}")
+
+
+def check_plugin_sync_parity(
+    repo: Path,
+    files: list[str],
+    warns: list[str],
+    *,
+    scan_all: bool = False,
+) -> None:
+    """Warn if embedded plugin code changed without recording an entry in plugin EXTERNAL_AI_SYNC.md."""
+    plug_prefix = ".agents/plugins/dynamic-fractal-planner/"
+    code_touched = [
+        f for f in files
+        if f.startswith(plug_prefix)
+        and (f.endswith(".py") or f.endswith("plugin.json") or f.endswith("hooks.json"))
+    ]
+    if not code_touched:
+        return
+    plug_sync = f"{plug_prefix}.agents/docs/EXTERNAL_AI_SYNC.md"
+    sync_full = repo / plug_sync
+    if not sync_full.is_file():
+        return
+    if plug_sync in files:
+        return
+    if scan_all or not (repo / ".git").exists():
+        # In full-workspace / gitless scans, `files` includes all tracked plugin files regardless of edit state.
+        # Only warn if the current plugin.json version is missing from plugin EXTERNAL_AI_SYNC.md.
+        manifest_p = repo / f"{plug_prefix}plugin.json"
+        if manifest_p.is_file():
+            try:
+                cur_ver = str(json.loads(manifest_p.read_text(encoding="utf-8", errors="ignore")).get("version") or "").strip()
+            except Exception:
+                cur_ver = ""
+            if cur_ver and f"v{cur_ver}" in sync_full.read_text(encoding="utf-8", errors="ignore"):
+                return
+    warns.append(f"Plugin code edited ({len(code_touched)} file(s)) without updating `{plug_sync}`.")
+
+
+def check_file_budget(
+    repo: Path,
+    profile: dict[str, Any],
+    fails: list[str],
+    warns: list[str],
+) -> None:
+    """Guard total tracked/workspace file count against platform import limits (e.g. AI Studio 999-file cap)."""
+    fb = profile.get("file_budget_limits")
+    if not isinstance(fb, dict) or not fb.get("enabled", True):
+        return
+    warn_files = int(fb.get("warn_files") or 850)
+    fail_files = int(fb.get("fail_files") or 950)
+    cap_label = int(fb.get("hard_platform_cap") or 999)
+    extra_ignore = {str(d).strip() for d in (fb.get("ignore_dirs") or []) if str(d).strip()}
+    skip_dirs = set(SKIP_DISCOVERY_DIRS) | {".playwright-cli", ".aistudio"} | extra_ignore
+
+    total = 0
+    dir_counts: dict[str, int] = {}
+    for root, dirs, filenames in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        rel_root = Path(root).relative_to(repo).as_posix()
+        for fn in filenames:
+            if fn.endswith((".pyc", ".pyo")):
+                continue
+            rel = fn if rel_root == "." else f"{rel_root}/{fn}"
+            parts = rel.split("/")
+            bucket = "/".join(parts[:2]) if len(parts) > 2 else (parts[0] if len(parts) > 1 else "(root)")
+            dir_counts[bucket] = dir_counts.get(bucket, 0) + 1
+            total += 1
+
+    if total <= warn_files and total <= fail_files:
+        return
+
+    top_dirs = sorted(dir_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+    top_str = ", ".join(f"{k}={v}" for k, v in top_dirs)
+    msg = (
+        f"Workspace file budget: {total}/{cap_label} files "
+        f"(warn={warn_files}, fail={fail_files}; heaviest: {top_str}) — "
+        f"pack cold/legacy dirs into archive/*.tar.gz or split sub-repos."
+    )
+    if fail_files > 0 and total > fail_files:
+        fails.append(msg)
+    elif warn_files > 0 and total > warn_files:
+        warns.append(msg)
+
+
 def run_static_checks(
     repo: Path,
     profile: dict[str, Any],
     changed: list[str] | None = None,
+    scan_all: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     """Run all fast static guardrails (<0.5s; safe for Stop hook auto-verify)."""
-    files = list(changed) if changed is not None else get_changed_files(repo)
+    files = list(changed) if changed is not None else get_changed_files(repo, profile, scan_all=scan_all)
     fails: list[str] = []
     warns: list[str] = []
 
     check_universal_syntax(repo, files, fails)
+    check_csharp_syntax_deep(repo, files, fails, warns)
     check_file_guards_state(repo, profile, fails, warns)
     check_version_sync(repo, profile, warns)
     check_diff_rules(repo, files, profile, fails, warns)
@@ -1264,6 +1515,10 @@ def run_static_checks(
     check_orphan_calls(repo, files, warns)
     check_forward_wiring(repo, files, profile, fails, warns)
     check_memory_weight(repo, profile, warns)
+    check_code_weight(repo, files, profile, warns, scan_all=scan_all)
+    check_file_budget(repo, profile, fails, warns)
+    check_build_lessons_timelessness(repo, files, fails)
+    check_plugin_sync_parity(repo, files, warns, scan_all=scan_all)
 
     extra_rel, pending_extra = get_pending_extra_requests(repo, profile)
     if pending_extra:
@@ -1373,6 +1628,7 @@ def main() -> None:
     parser.add_argument("--fast", action="store_true", help="Use fast in-memory mode for plugin tests (default).")
     parser.add_argument("--full", action="store_true", help="Run full subprocess plugin tests instead of --fast.")
     parser.add_argument("--git-stat", action="store_true", help="On pass, append compact git status -s and git diff --stat (1-shot verify).")
+    parser.add_argument("--all", action="store_true", help="Audit all discovered workspace files (also used automatically in gitless containers).")
     parser.add_argument("--workspace", default=None)
     parser.add_argument("--files", nargs="*", default=None)
     args = parser.parse_args()
@@ -1380,9 +1636,9 @@ def main() -> None:
     plugin_root = resolve_plugin_root()
     repo = resolve_repo_root(args.workspace)
     profile, profile_warnings = load_project_profile_with_warnings(repo)
-    changed = [f.replace("\\", "/") for f in args.files] if args.files is not None else get_changed_files(repo)
+    changed = [f.replace("\\", "/") for f in args.files] if args.files is not None else get_changed_files(repo, profile, scan_all=bool(args.all))
 
-    changed, fails, warns = run_static_checks(repo, profile, changed=changed)
+    changed, fails, warns = run_static_checks(repo, profile, changed=changed, scan_all=bool(args.all))
     warns = list(profile_warnings) + warns
 
     built = False

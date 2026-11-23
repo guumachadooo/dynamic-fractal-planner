@@ -221,14 +221,15 @@ class TestSchemaMigrations(unittest.TestCase):
         migrated, ver, warnings = schema_migrations.migrate_profile(raw)
 
         self.assertEqual(raw, snapshot, "migrate_profile must never mutate input dict")
-        self.assertEqual(ver, 3)
-        self.assertEqual(migrated["schema_version"], 3)
+        self.assertEqual(ver, 4)
+        self.assertEqual(migrated["schema_version"], 4)
         self.assertEqual(warnings, [])
         self.assertEqual(migrated["custom_owner_note"], "preserve-me-losslessly")
         self.assertEqual(migrated["planner_mode"], "lean")
         self.assertEqual(migrated["read_budget"], {"max_full_read_lines": 300, "max_slice_lines": 250})
         self.assertEqual(migrated["secret_guard"], {"enabled": True})
         self.assertEqual(migrated["blast_radius"], {"simple_tier_max_files": 3})
+        self.assertEqual(migrated["code_weight_limits"], {"enabled": True, "warn_lines": 1500, "warn_lines_all": 2000})
 
         cmds = {r.get("label"): r for r in (migrated.get("build_rules") or [])}
         self.assertIn("verify_command", cmds)
@@ -242,7 +243,7 @@ class TestSchemaMigrations(unittest.TestCase):
         v1 = json.loads((FIXTURES_DIR / "profile_v1_cavern.json").read_text(encoding="utf-8"))
         self.assertNotIn("schema_version", v1)
         m1, ver1, w1 = schema_migrations.migrate_profile(v1)
-        self.assertEqual(ver1, 3)
+        self.assertEqual(ver1, 4)
         self.assertEqual(w1, [])
         self.assertEqual(m1["build_rules"], v1["build_rules"])
         self.assertEqual(m1["file_guards"], v1["file_guards"])
@@ -252,13 +253,23 @@ class TestSchemaMigrations(unittest.TestCase):
         v2 = json.loads((FIXTURES_DIR / "profile_v2_cavern.json").read_text(encoding="utf-8"))
         self.assertEqual(v2.get("schema_version"), 2)
         m2, ver2, w2 = schema_migrations.migrate_profile(v2)
-        self.assertEqual(ver2, 3)
+        self.assertEqual(ver2, 4)
         self.assertEqual(w2, [])
-        self.assertEqual(m2["schema_version"], 3)
+        self.assertEqual(m2["schema_version"], 4)
         self.assertEqual(m2["planner_mode"], "lean")
         self.assertEqual(m2["build_rules"], v2["build_rules"])
         self.assertEqual(m2["command_guards"], v2["command_guards"])
         self.assertEqual(m2["key_parity_rules"], v2["key_parity_rules"])
+
+        v3 = json.loads((FIXTURES_DIR / "profile_v3_cavern.json").read_text(encoding="utf-8"))
+        self.assertEqual(v3.get("schema_version"), 3)
+        m3, ver3, w3 = schema_migrations.migrate_profile(v3)
+        self.assertEqual(ver3, 4)
+        self.assertEqual(w3, [])
+        self.assertEqual(m3["schema_version"], 4)
+        self.assertEqual(m3["planner_mode"], "auto")
+        self.assertEqual(m3["diff_rules"], v3["diff_rules"])
+        self.assertTrue(m3["code_weight_limits"]["enabled"])
 
     def test_synthetic_chain_v1_to_v10(self) -> None:
         def make_hop(src_v: int):
@@ -304,14 +315,14 @@ class TestSchemaMigrations(unittest.TestCase):
             prof_file.write_text(v1_text, encoding="utf-8")
 
             loaded = planner_state.load_project_profile(repo)
-            self.assertEqual(loaded["schema_version"], 3)
+            self.assertEqual(loaded["schema_version"], 4)
             self.assertEqual(prof_file.read_text(encoding="utf-8"), v1_text)
 
             res = run_script("plan_tool.py", ["--workspace", str(repo), "migrate"])
             self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
             self.assertTrue((agents_dir / "planner_profile.json.bak").is_file())
             disk_after = json.loads(prof_file.read_text(encoding="utf-8"))
-            self.assertEqual(disk_after["schema_version"], 3)
+            self.assertEqual(disk_after["schema_version"], 4)
             self.assertEqual(disk_after["planner_mode"], "lean")
 
             res2 = run_script("plan_tool.py", ["--workspace", str(repo), "migrate"])
@@ -345,7 +356,7 @@ class TestAutoBootstrapAndHeadings(unittest.TestCase):
             (r / "tsconfig.json").write_text("{}", encoding="utf-8")
             planner_state.bootstrap_workspace(r)
             prof = json.loads((r / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
-            self.assertEqual(prof["schema_version"], 3)
+            self.assertEqual(prof["schema_version"], 4)
             self.assertEqual(prof["planner_mode"], "lean")
             cmds = [x["command"] for x in prof["build_rules"]]
             self.assertIn("npx tsc --noEmit", cmds)
@@ -388,7 +399,7 @@ class TestAutoBootstrapAndHeadings(unittest.TestCase):
             msg = parsed["injectSteps"][0]["systemMessage"]["systemMessage"]
             self.assertIn("Auto-initialized project docs/profile", msg)
             prof = json.loads((repo / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
-            self.assertEqual(prof["schema_version"], 3)
+            self.assertEqual(prof["schema_version"], 4)
 
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
             empty_dir = Path(td)
@@ -1367,7 +1378,7 @@ class TestCavernV1V2V3Parity(unittest.TestCase):
 
         if self.LIVE_CAVERN_PROFILE.is_file():
             live_cavern = json.loads(self.LIVE_CAVERN_PROFILE.read_text(encoding="utf-8"))
-            self.assertIn(live_cavern.get("schema_version"), (2, 3))
+            self.assertIn(live_cavern.get("schema_version"), (2, 3, 4))
             self._assert_parity_for_profile(f"live_v{live_cavern.get('schema_version')}_cavern", live_cavern)
 
 
@@ -2090,7 +2101,7 @@ class TestSymbolicTelegraphicStyle(unittest.TestCase):
             self.assertNotIn("DOCS_AUTO_MIGRATE", ss_msg)
 
             upgraded_prof = json.loads(prof_file.read_text(encoding="utf-8"))
-            self.assertEqual(upgraded_prof["schema_version"], 3)
+            self.assertEqual(upgraded_prof["schema_version"], 4)
             self.assertEqual(upgraded_prof["docs_format_version"], 1)
             self.assertEqual(upgraded_prof["custom_owner_note"], "preserve-me-losslessly")
 
@@ -2122,7 +2133,7 @@ class TestSymbolicTelegraphicStyle(unittest.TestCase):
             (docs_dir / "SAVED_IDEAS.md").write_text(pop_ideas, encoding="utf-8")
             (docs_dir / "EXTRA_REQUESTS.md").write_text(empty_extra, encoding="utf-8")
 
-            # 1. SessionStart upgrades profile v2->v3 & empty EXTRA_REQUESTS.md, preserves populated docs byte-for-byte
+            # 1. SessionStart upgrades profile v2->v4 & empty EXTRA_REQUESTS.md, preserves populated docs byte-for-byte
             rc, err, ss = run_hook("planner_session_start.py", {
                 "workspacePaths": [str(repo)],
                 "artifactDirectoryPath": art,
@@ -2135,7 +2146,7 @@ class TestSymbolicTelegraphicStyle(unittest.TestCase):
             self.assertNotIn("EXTRA_REQUESTS.md", ss_msg.split("DOCS_AUTO_MIGRATE", 1)[1].split("ACT:", 1)[0])
 
             prof_after_ss = json.loads(prof_file.read_text(encoding="utf-8"))
-            self.assertEqual(prof_after_ss["schema_version"], 3)
+            self.assertEqual(prof_after_ss["schema_version"], 4)
             self.assertEqual(prof_after_ss.get("docs_format_version", 0), 0)
             self.assertEqual((docs_dir / "PROJECT_HISTORY.md").read_text(encoding="utf-8"), pop_hist)
             self.assertEqual((docs_dir / "SAVED_IDEAS.md").read_text(encoding="utf-8"), pop_ideas)
@@ -3250,7 +3261,7 @@ class TestV25EvolutionMechanics(unittest.TestCase):
                         "lastUserInput": t2_prompt,
                         "invocationNum": 1,
                     },
-                    env_extra={"PLANNER_INJECTION_BLOAT_CHARS": "340"},
+                    env_extra={"PLANNER_INJECTION_BLOAT_CHARS": "260"},
                 )
                 msg_tight = pre_tight["injectSteps"][0]["systemMessage"]["systemMessage"]
                 self.assertIn("[Triage|", msg_tight)
@@ -3340,6 +3351,395 @@ class TestV25EvolutionMechanics(unittest.TestCase):
                 )
                 msg_norm = json.dumps(pre_norm)
                 self.assertNotIn("[BTW_QUEUE]", msg_norm)
+
+
+class TestV260UniversalEfficiencyAndSelfEvolution(unittest.TestCase):
+    def test_universal_error_learner_timeless_and_multistack(self) -> None:
+        import error_learner as el
+
+        self.assertEqual(el.extract_code_from_line("src/app.ts(10,3): error TS2322: Type 'number' is not assignable"), "TS2322")
+        self.assertEqual(el.extract_code_from_line("error[E0382]: borrow of moved value"), "E0382")
+        self.assertTrue(el.lint_timelessness("Always target Android 16 and actions/checkout@v4"))
+        self.assertEqual(el.lint_timelessness("Guard API-gated calls with runtime OS version checks"), [])
+
+        with tempfile.TemporaryDirectory() as td:
+            lp = Path(td) / "BUILD_LESSONS.md"
+            lp.write_text(
+                "# Lessons\n\n### `BL-001` | Starter\n"
+                "- `Category`: `build-process`\n- `Codes`: `CS0104`\n- `Keywords`: `ambiguous`\n"
+                "- `RootCause`: Ambiguous type reference.\n- `TimelessRule`: Qualify ambiguous types explicitly.\n"
+                "- `DynamicLookup`: Inspect symbol declarations in repo.\n- `AutoGuard`: `verify_universal.py`\n\n"
+                f"{el.AUTO_START_MARKER}\n{el.EMPTY_AUTO_PLACEHOLDER}\n{el.AUTO_END_MARKER}\n",
+                encoding="utf-8",
+            )
+            ok, errs = el.audit_lessons_file(lp)
+            self.assertTrue(ok, errs)
+            items = el.load_diagnostics_from_log_text("src/x.ts(1,1): error TS2322: Type 'string' is not assignable to 'number'")
+            res = el.analyze_diagnostics(items, el.parse_lessons(lp.read_text(encoding="utf-8")))
+            self.assertEqual(len(res.new_candidates), 1)
+            changed, _ = el.apply_new_lessons(lp, res.new_candidates)
+            self.assertTrue(changed)
+            ok2, errs2 = el.audit_lessons_file(lp)
+            self.assertTrue(ok2, errs2)
+
+    def test_live_bridge_client_hmac_and_encrypt_then_mac(self) -> None:
+        import live_bridge_client as lbc
+
+        raw_secret = "CAVPAIR-" + "a1b2c3d4" * 8
+        norm = lbc.normalize_pair_secret_hex(raw_secret)
+        self.assertEqual(len(norm), 64)
+        h1 = lbc.compute_wake_channel_hash(norm)
+        self.assertEqual(len(h1), 64)
+
+        sig = lbc.sign_wake_request(norm, "wake123", 1700000000, 2, 1800, "Inspect DSP")
+        self.assertEqual(len(sig), 64)
+
+        payload = {"sessionCode": "CAV-ABCD-EFGH-IJKL-MNOP-QRST-UVWX", "tier": 2, "ttlSeconds": 1800}
+        env = lbc.encrypt_approval_payload(norm, "wake123", payload)
+        self.assertNotIn("CAV-ABCD", json.dumps(env))
+        dec = lbc.decrypt_approval_payload(norm, "wake123", env)
+        self.assertEqual(dec, payload)
+
+        tampered = dict(env)
+        tampered["ct"] = "AA" + env["ct"][2:]
+        with self.assertRaises(ValueError):
+            lbc.decrypt_approval_payload(norm, "wake123", tampered)
+
+    def test_self_evolve_classifier_and_dual_sync_ledger(self) -> None:
+        import self_evolve as se
+
+        r_uni = se.classify_improvement("Universalize timeless error_learner and live diagnostics fetcher in planner hooks")
+        self.assertEqual(r_uni["scope"], "plugin-universal")
+
+        r_proj = se.classify_improvement("Tune HRIR room reflections and OneUI player volume slider in MainActivity.cs")
+        self.assertEqual(r_proj["scope"], "project-only")
+
+        r_dual = se.classify_improvement("Upgrade live bridge protocol client in plugin and add Android BiometricPrompt wake service in MainActivity.cs")
+        self.assertEqual(r_dual["scope"], "dual-project+plugin")
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            touched = se.record_sync_entry(
+                repo,
+                scope="dual",
+                title="Test Dual Sync",
+                summary="Added universal client + host integration",
+                files=["scripts/live_bridge_client.py", "Services/LiveBridge.cs"],
+            )
+            self.assertEqual(len(touched), 2)
+            host_txt = (repo / ".agents/docs/EXTERNAL_AI_SYNC.md").read_text(encoding="utf-8")
+            plug_txt = (repo / ".agents/plugins/dynamic-fractal-planner/.agents/docs/EXTERNAL_AI_SYNC.md").read_text(encoding="utf-8")
+            self.assertIn("Test Dual Sync", host_txt)
+            self.assertIn("## Plugin (`dynamic-fractal-planner`) Sync Entries", host_txt)
+            self.assertIn("Test Dual Sync", plug_txt)
+
+    def test_verify_universal_audits_build_lessons_timelessness(self) -> None:
+        import error_learner as el
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            bad = repo / ".agents" / "docs" / "BUILD_LESSONS.md"
+            bad.write_text(
+                "# Lessons\n\n### `BL-001` | Bad\n"
+                "- `Category`: `build`\n- `Codes`: `CS0001`\n- `Keywords`: `bad`\n"
+                "- `RootCause`: Fails on Android 16.\n- `TimelessRule`: Use actions/checkout@v4.\n"
+                "- `DynamicLookup`: Check docs.\n- `AutoGuard`: `manual`\n\n"
+                f"{el.AUTO_START_MARKER}\n{el.EMPTY_AUTO_PLACEHOLDER}\n{el.AUTO_END_MARKER}\n",
+                encoding="utf-8",
+            )
+            _, fails, _ = verify_universal.run_static_checks(repo, {}, changed=[".agents/docs/BUILD_LESSONS.md"])
+            self.assertTrue(any("timelessness audit failed" in f for f in fails), fails)
+
+    def test_verify_universal_csharp_syntax_deep_and_gitless_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)  # intentionally gitless container
+            (repo / "src").mkdir()
+            cs = repo / "src" / "Strings.cs"
+            cs.write_text(
+                'class Strings {\n'
+                '    static Dictionary<string, string> Create() => new() {\n'
+                '        ["ValidInit"] = "ok",\n'
+                '    };\n'
+                '    static void Apply(Dictionary<string, string> d) {\n'
+                '        d["OkStmt"] = "ok";\n'
+                '        d["BrokenStmt"] = "oops",\n'
+                '    }\n'
+                '}\n',
+                encoding="utf-8",
+            )
+            discovered, fails, _ = verify_universal.run_static_checks(repo, {})
+            self.assertIn("src/Strings.cs", discovered)
+            self.assertTrue(any("src/Strings.cs:7:" in f and "ends with `,`" in f for f in fails), fails)
+            self.assertFalse(any("src/Strings.cs:3:" in f for f in fails), fails)
+
+    def test_v280_sota_preflight_lens_budget_and_memory_byte_guard(self) -> None:
+        # 1) Tier 3 recommended_modules includes MOD-SOTA-PREFLIGHT right after MOD-DISCOVERY
+        mods_t3 = complexity_triage.build_recommended_modules(3, ["backend"], "deep")
+        mod_ids_t3 = [m["id"] for m in mods_t3]
+        self.assertIn("MOD-SOTA-PREFLIGHT", mod_ids_t3)
+        self.assertEqual(mod_ids_t3.index("MOD-SOTA-PREFLIGHT"), mod_ids_t3.index("MOD-DISCOVERY") + 1)
+        mods_t2 = complexity_triage.build_recommended_modules(2, ["backend"], "medium")
+        self.assertNotIn("MOD-SOTA-PREFLIGHT", [m["id"] for m in mods_t2])
+
+        # 2) PreInvocation injects SOTA_PREFLIGHT| on T3, suppresses on ECO/tight bloat, and preserves >220-char lens
+        long_lens = (
+            "Principal DSP Architect: challenge prior seed via Tabu recon, run Physics-vs-AI tournament, "
+            "split RT CPU vs NPU planes, validate offline golden bench before production code, enforce zero-GC audio thread."
+        )
+        self.assertGreater(len(long_lens), 200)
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "planner_mode": "lean",
+                        "domains": {
+                            "audio-dsp": {
+                                "module_id": "MOD-DSP",
+                                "module_title": "Audio DSP",
+                                "keywords": ["dsp", "kalman", "audio"],
+                                "lens": long_lens,
+                                "checklist": ["Enforce zero-GC RT path."],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            t3_prompt = (
+                "Architect and refactor audio dsp kalman filter, api endpoints, database schema, "
+                "authentication pipeline, ui controls and benchmark suite across 6 modules"
+            )
+            with tempfile.TemporaryDirectory() as art3:
+                _, _, pre3 = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art3,
+                        "lastUserInput": t3_prompt,
+                        "invocationNum": 1,
+                    },
+                )
+                msg3 = pre3["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("SOTA_PREFLIGHT|", msg3)
+                self.assertIn("zero-GC audio thread.", msg3)
+
+            with tempfile.TemporaryDirectory() as art_eco:
+                _, _, pre_eco = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art_eco,
+                        "lastUserInput": "low quota: " + t3_prompt,
+                        "invocationNum": 1,
+                    },
+                )
+                msg_eco = pre_eco["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertNotIn("SOTA_PREFLIGHT|", msg_eco)
+
+            # 3) check_memory_weight warns on byte bloat even when line count <= 150
+            (repo / ".agents" / "docs" / "PROJECT_HISTORY.md").write_text(
+                "# History\n" + ("- " + ("x" * 1000) + "\n") * 32,
+                encoding="utf-8",
+            )
+            (repo / ".agents" / "docs" / "EXTERNAL_AI_SYNC.md").write_text(
+                "# Sync\n" + ("- " + ("y" * 2000) + "\n") * 26,
+                encoding="utf-8",
+            )
+            warns: list[str] = []
+            verify_universal.check_memory_weight(repo, {}, warns)
+            self.assertTrue(any("PROJECT_HISTORY.md" in w and "KB" in w for w in warns), warns)
+            self.assertTrue(any("EXTERNAL_AI_SYNC.md" in w and "KB" in w for w in warns), warns)
+
+    def test_v290_retroactive_upgrade_higher_version_sync_and_code_weight_guard(self) -> None:
+        import self_evolve
+
+        # 1) Retroactive auto_upgrade_workspace stamps v4 + plugin_version and blocks downgrades
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / "package.json").write_text('{"name":"retro"}\n', encoding="utf-8")
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            prof_p = repo / ".agents" / "planner_profile.json"
+            prof_p.write_text(
+                json.dumps({"schema_version": 3, "docs_format_version": 1, "plugin_version": "2.5.1"}),
+                encoding="utf-8",
+            )
+            up = planner_state.auto_upgrade_workspace(repo)
+            self.assertEqual(up["profile_migrated"], (3, 4))
+            self.assertEqual(up["plugin_upgraded"][0], "2.5.1")
+            self.assertEqual(up["plugin_upgraded"][1], planner_state.read_plugin_version())
+            disk = json.loads(prof_p.read_text(encoding="utf-8"))
+            self.assertEqual(disk["schema_version"], 4)
+            self.assertEqual(disk["plugin_version"], planner_state.read_plugin_version())
+
+            # Higher workspace plugin_version must NEVER downgrade
+            disk["plugin_version"] = "9.9.9"
+            prof_p.write_text(json.dumps(disk), encoding="utf-8")
+            up2 = planner_state.auto_upgrade_workspace(repo)
+            self.assertIsNone(up2["plugin_upgraded"])
+            self.assertEqual(up2["plugin_downgrade_blocked"], ("9.9.9", planner_state.read_plugin_version()))
+
+        # 2) Bidirectional higher-version plugin sync (embedded > global -> backup + runtime preserved; global > embedded -> upgrades repo)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            emb = repo / ".agents" / "plugins" / "dynamic-fractal-planner"
+            glob = root / "global_plugin"
+            emb.mkdir(parents=True)
+            glob.mkdir(parents=True)
+
+            (emb / "plugin.json").write_text(json.dumps({"name": "dynamic-fractal-planner", "version": "2.9.0"}), encoding="utf-8")
+            (emb / "marker.txt").write_text("from-2.9.0", encoding="utf-8")
+            (glob / "plugin.json").write_text(json.dumps({"name": "dynamic-fractal-planner", "version": "2.5.1"}), encoding="utf-8")
+            (glob / ".metrics.jsonl").write_text('{"ev":"keep"}\n', encoding="utf-8")
+
+            chk = self_evolve.sync_plugin_versions(repo, global_dir=glob, apply=False)
+            self.assertEqual(chk["direction"], "embedded->global")
+            self.assertFalse(chk["applied"])
+
+            applied = self_evolve.sync_plugin_versions(repo, global_dir=glob, apply=True)
+            self.assertTrue(applied["applied"])
+            self.assertEqual(json.loads((glob / "plugin.json").read_text(encoding="utf-8"))["version"], "2.9.0")
+            self.assertEqual((glob / "marker.txt").read_text(encoding="utf-8"), "from-2.9.0")
+            self.assertEqual((glob / ".metrics.jsonl").read_text(encoding="utf-8"), '{"ev":"keep"}\n')
+            self.assertTrue((glob / ".last_good_backup" / "plugin.json").is_file())
+
+            # Equal versions -> in-sync no-op
+            eq = self_evolve.sync_plugin_versions(repo, global_dir=glob, apply=True)
+            self.assertEqual(eq["direction"], "in-sync")
+            self.assertFalse(eq["applied"])
+
+            # Global newer than embedded -> propagates global->embedded
+            (glob / "plugin.json").write_text(json.dumps({"name": "dynamic-fractal-planner", "version": "3.0.0"}), encoding="utf-8")
+            (glob / "marker.txt").write_text("from-3.0.0", encoding="utf-8")
+            rev = self_evolve.sync_plugin_versions(repo, global_dir=glob, apply=True)
+            self.assertEqual(rev["direction"], "global->embedded")
+            self.assertTrue(rev["applied"])
+            self.assertEqual(json.loads((emb / "plugin.json").read_text(encoding="utf-8"))["version"], "3.0.0")
+            self.assertEqual((emb / "marker.txt").read_text(encoding="utf-8"), "from-3.0.0")
+
+        # 3) code_weight_limits monolith guard + cross-file key_parity_rules.target_path + gitless --all plugin-sync parity
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / "src").mkdir()
+            (repo / "src" / "Huge.cs").write_text("// line\n" * 60, encoding="utf-8")
+            cw_warns: list[str] = []
+            verify_universal.check_code_weight(
+                repo,
+                ["src/Huge.cs"],
+                {"code_weight_limits": {"enabled": True, "warn_lines": 50, "warn_lines_all": 100}},
+                cw_warns,
+                scan_all=False,
+            )
+            self.assertTrue(any("src/Huge.cs: 60L (>50L)" in w for w in cw_warns), cw_warns)
+
+            cw_all_warns: list[str] = []
+            verify_universal.check_code_weight(
+                repo,
+                ["src/Huge.cs"],
+                {"code_weight_limits": {"enabled": True, "warn_lines": 50, "warn_lines_all": 100}},
+                cw_all_warns,
+                scan_all=True,
+            )
+            self.assertEqual(cw_all_warns, [])
+
+            # Cross-file key_parity_rules.target_path
+            (repo / "src" / "Strings.cs").write_text(
+                'static Dictionary<string, string> CreateEnglish() => new() {\n'
+                '    ["Hello"] = "Hello",\n'
+                '    ["MissingKey"] = "Missing",\n'
+                '};\n',
+                encoding="utf-8",
+            )
+            (repo / "src" / "Strings.PtBr.cs").write_text(
+                'static void ApplyPortuguese(Dictionary<string, string> d) {\n'
+                '    d["Hello"] = "Olá";\n'
+                '}\n',
+                encoding="utf-8",
+            )
+            kp_fails: list[str] = []
+            kp_warns: list[str] = []
+            verify_universal.check_key_parity_rules(
+                repo,
+                ["src/Strings.cs"],
+                {
+                    "key_parity_rules": [
+                        {
+                            "path": "src/Strings.cs",
+                            "target_path": "src/Strings.PtBr.cs",
+                            "added_key_regex": r'^\s*\["([^"]+)"\]\s*=',
+                            "target_section_regex": r"static\s+void\s+ApplyPortuguese\b(.*)",
+                            "target_key_template": 'd["{key}"]',
+                            "severity": "fail",
+                        }
+                    ]
+                },
+                kp_fails,
+                kp_warns,
+            )
+            self.assertTrue(any("MissingKey" in f for f in kp_fails), kp_fails)
+            self.assertFalse(any("Hello" in f for f in kp_fails), kp_fails)
+
+            # Gitless --all plugin-sync parity emits 0 false warnings when EXTERNAL_AI_SYNC.md mentions plugin.json version
+            plug = repo / ".agents" / "plugins" / "dynamic-fractal-planner"
+            (plug / ".agents" / "docs").mkdir(parents=True)
+            (plug / "plugin.json").write_text(json.dumps({"version": "2.9.0"}), encoding="utf-8")
+            (plug / ".agents" / "docs" / "EXTERNAL_AI_SYNC.md").write_text("### 2026-11-23 | Plugin v2.9.0\n", encoding="utf-8")
+            ps_warns: list[str] = []
+            verify_universal.check_plugin_sync_parity(
+                repo,
+                [".agents/plugins/dynamic-fractal-planner/plugin.json"],
+                ps_warns,
+                scan_all=True,
+            )
+            self.assertEqual(ps_warns, [])
+
+    def test_v210_file_budget_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / "src" / "sub").mkdir(parents=True)
+            for i in range(6):
+                (repo / "src" / "sub" / f"f{i}.cs").write_text("// ok\n", encoding="utf-8")
+
+            # Below warn -> 0 warnings, 0 failures
+            f1: list[str] = []
+            w1: list[str] = []
+            verify_universal.check_file_budget(
+                repo,
+                {"file_budget_limits": {"enabled": True, "warn_files": 8, "fail_files": 10, "hard_platform_cap": 999}},
+                f1,
+                w1,
+            )
+            self.assertEqual((f1, w1), ([], []))
+
+            # Above warn, below fail -> 1 warning with heaviest dir diagnostic
+            f2: list[str] = []
+            w2: list[str] = []
+            verify_universal.check_file_budget(
+                repo,
+                {"file_budget_limits": {"enabled": True, "warn_files": 4, "fail_files": 10, "hard_platform_cap": 999}},
+                f2,
+                w2,
+            )
+            self.assertEqual(f2, [])
+            self.assertTrue(any("6/999" in w and "src/sub=6" in w for w in w2), w2)
+
+            # Above fail -> 1 failure
+            f3: list[str] = []
+            w3: list[str] = []
+            verify_universal.check_file_budget(
+                repo,
+                {"file_budget_limits": {"enabled": True, "warn_files": 3, "fail_files": 5, "hard_platform_cap": 999}},
+                f3,
+                w3,
+            )
+            self.assertTrue(any("6/999" in f for f in f3), f3)
+            self.assertEqual(w3, [])
 
 
 def _stamp_plugin_tests_passed() -> None:

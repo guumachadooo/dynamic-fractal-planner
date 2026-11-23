@@ -7,10 +7,11 @@ TARGET_DIR="${GEMINI_HOME:-$HOME/.gemini}/config/plugins/dynamic-fractal-planner
 MODE="copy"
 RUN_TESTS=1
 DO_ROLLBACK=0
+FORCE_DOWNGRADE=0
 
 usage() {
   cat <<'EOF'
-Usage: ./install.sh [--target <dir>] [--symlink] [--skip-tests] [--rollback] [-h|--help]
+Usage: ./install.sh [--target <dir>] [--symlink] [--skip-tests] [--force] [--rollback] [-h|--help]
 EOF
 }
 
@@ -26,6 +27,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-tests)
       RUN_TESTS=0
+      shift
+      ;;
+    --force)
+      FORCE_DOWNGRADE=1
       shift
       ;;
     --rollback)
@@ -101,6 +106,21 @@ if sys.version_info < (3, 9):
 PY
 
 if [[ "$SCRIPT_DIR" != "$TARGET_REAL" ]]; then
+  if [[ "$FORCE_DOWNGRADE" -eq 0 && -f "$TARGET_REAL/plugin.json" && -f "$SCRIPT_DIR/plugin.json" ]]; then
+    python3 - "$SCRIPT_DIR/plugin.json" "$TARGET_REAL/plugin.json" <<'PY'
+import json, sys
+from pathlib import Path
+def parse(v):
+    core = str(v or "").strip().lstrip("vV").split("-", 1)[0].split("+", 1)[0]
+    nums = [int("".join(c for c in p if c.isdigit()) or "0") for p in core.split(".")[:3]]
+    while len(nums) < 3: nums.append(0)
+    return tuple(nums)
+src_v = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("version", "0.0.0")
+dst_v = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")).get("version", "0.0.0")
+if parse(src_v) < parse(dst_v):
+    raise SystemExit(f"Error: refusing to downgrade installed plugin v{dst_v} -> v{src_v} (pass --force to override).")
+PY
+  fi
   if [[ "$MODE" == "symlink" ]]; then
     rm -rf "$TARGET_REAL"
     ln -s "$SCRIPT_DIR" "$TARGET_REAL"

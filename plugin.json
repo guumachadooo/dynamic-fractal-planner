@@ -1,8 +1,8 @@
 {
   "name": "dynamic-fractal-planner",
   "displayName": "Dynamic Fractal Planner",
-  "version": "2.5.1",
-  "description": "v3 quota-efficient lean/strict adaptive planning, 4-layer triage, forward wiring-gate, read-only recon sweep, wave handoff & archive guard, multi-layer build cascade/dedup, JIT domain lenses & cross-project memory.",
+  "version": "2.10.0",
+  "description": "v4 quota-efficient lean/strict adaptive planning, 4-layer triage, universal MOD-SOTA-PREFLIGHT, retroactive v1..v4 workspace auto-upgrade + higher-version bidirectional plugin sync, forward wiring-gate, read-only recon sweep, code+memory+file-budget guards, cross-file key parity, multi-layer build cascade, gitless C# verifier, timeless error-learner, live diagnostics, bridge v3 client & dual-scope self-evolution.",
   "author": {
     "name": "guumachadooo"
   },
@@ -13,6 +13,10 @@
     "guardrails",
     "verification",
     "telemetry",
+    "error-learner",
+    "live-diagnostics",
+    "live-bridge",
+    "self-evolution",
     "mcp",
     "context7",
     "google-developer-knowledge"

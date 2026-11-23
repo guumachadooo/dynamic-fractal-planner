@@ -625,6 +625,14 @@ def build_recommended_modules(
             "purpose": "Locate exact files, line ranges, and constraints BEFORE deep code reads or edits.",
         })
 
+    if tier == 3:
+        modules.append({
+            "id": "MOD-SOTA-PREFLIGHT",
+            "title": "First-Principles SOTA, Omniscient Fusion, Plane Split & Golden Bench",
+            "domain": "sota-preflight",
+            "purpose": "Verify live SOTA (web/MCP), fuse owned upstream signals/hw (joint solver > blind serial chain), split offline/RT/control planes, justify AI vs deterministic math, and define fast offline golden tests BEFORE architecture lock.",
+        })
+
     if tier == 3 or depth_level == "high":
         modules.append({
             "id": "MOD-CONTRACT",

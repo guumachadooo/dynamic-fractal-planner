@@ -1,0 +1,764 @@
+{
+  "schema_version": 3,
+  "project_name": "Cavern / CavernizeAndroid",
+  "planner_mode": "auto",
+  "read_budget": {
+    "max_full_read_lines": 300,
+    "max_slice_lines": 250
+  },
+  "secret_guard": {
+    "enabled": true
+  },
+  "blast_radius": {
+    "simple_tier_max_files": 3
+  },
+  "code_path_prefixes": [
+    "Cavern/",
+    "Cavern.Format/",
+    "CavernSamples/",
+    ".github/workflows/"
+  ],
+  "code_extensions": [
+    ".cs",
+    ".csproj",
+    ".xml",
+    ".resx",
+    ".axml",
+    ".yml",
+    ".yaml",
+    ".c",
+    ".cpp",
+    ".h"
+  ],
+  "build_extensions": [
+    ".cs",
+    ".csproj",
+    ".c",
+    ".cpp",
+    ".h"
+  ],
+  "extra_requests_file": ".agents/docs/EXTRA_REQUESTS.md",
+  "archive_docs": [
+    ".agents/docs/archive/SPATIAL_ROADMAP.md",
+    ".agents/docs/archive/PROJECT_HISTORY_ARCHIVE.md"
+  ],
+  "wiring_gate": {
+    "enabled": true,
+    "severity": "warn",
+    "library_prefixes": [
+      "Cavern/",
+      "Cavern.Format/",
+      "CavernSamples/Reusable/Cavernize.Logic/"
+    ],
+    "settings_files": [
+      "CavernSamples/CavernizeAndroid/Services/AppSettingsStore.cs"
+    ],
+    "check_identical_branches": true
+  },
+  "session": {
+    "version_files": [
+      {
+        "label": "csproj",
+        "path": "CavernSamples/CavernizeAndroid/CavernizeAndroid.csproj",
+        "regex": "<ApplicationDisplayVersion>([^<]+)</ApplicationDisplayVersion>",
+        "sync_prefix": true
+      },
+      {
+        "label": "CI",
+        "path": ".github/workflows/BuildAndroid.yml",
+        "regex": "-p:ApplicationDisplayVersion=([^\\n\\\\]+)",
+        "sync_prefix": true
+      }
+    ],
+    "env_notes": [
+      {
+        "conditions": {
+          "exists_path": "/root/.dotnet/dotnet"
+        },
+        "text": "Termux ARM64 PRoot env: `/root/.dotnet/dotnet` requires `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_GCHeapHardLimit=20000000 DOTNET_EnableDiagnostics=0 ... -m:1 /p:UseSharedCompilation=false`; run `python3 .agents/scripts/check_android_cs.py` for local Roslyn type-checking of `CavernizeAndroid`; final signed APK builds via `.github/workflows/BuildAndroid.yml`."
+      }
+    ],
+    "watch_paths": [
+      {
+        "label": "Latest APK in Downloads",
+        "path": "/sdcard/Download/Cavernize-Android.apk",
+        "show_size_mb": true
+      },
+      {
+        "label": "Shared device log available at",
+        "path": "/sdcard/Download/Cavernize/Logs/cavernize_log.txt"
+      }
+    ],
+    "extra_docs": [
+      ".agents/docs/BUILD_LESSONS.md",
+      ".agents/docs/ONEUI9_REFERENCE.md",
+      ".agents/docs/PHASE3_VOCAL_CORTEX_ROADMAP.md"
+    ]
+  },
+  "memory_feedback": {
+    "enabled": true,
+    "min_code_files": 2,
+    "docs": [
+      ".agents/docs/PROJECT_HISTORY.md",
+      ".agents/docs/BUILD_LESSONS.md",
+      ".agents/docs/ONEUI9_REFERENCE.md",
+      "AGENTS.md",
+      "CavernSamples/CavernizeAndroid/AGENTS.md"
+    ],
+    "message": "Memory Feedback Reminder: multiple code files are modified in this commit without a recent update to `.agents/docs/PROJECT_HISTORY.md` or `.agents/docs/BUILD_LESSONS.md`. If this cycle fixed a non-obvious bug/build error, prepend a 1–4 line summary in `PROJECT_HISTORY.md` && run `python3 -B .agents/scripts/error_learner.py` to capture any new timeless build lesson (version-agnostic + dynamic lookup) before committing — or retry `git commit` if N/A."
+  },
+  "file_guards": [
+    {
+      "path_suffix": "CavernSamples/CavernizeAndroid/Properties/AndroidManifest.xml",
+      "check_when_touching_regex": "targetSdkVersion",
+      "must_contain_regex": "android:targetSdkVersion\\s*=\\s*\"(?:35|36)\"",
+      "decision": "force_ask",
+      "verify_severity": "fail",
+      "reason": "PROJECT SAFETY GUARD: AndroidManifest.xml must keep android:targetSdkVersion=\"35\" (35 or 36) for Modern Android W^X NativeLibraryDir, Scoped Storage, Edge-to-Edge, and Predictive Back compliance."
+    }
+  ],
+  "command_guards": [
+    {
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet",
+        "not_exists_glob": "/root/.dotnet/packs/Microsoft.Android*"
+      },
+      "match_regex": "^(?:/root/\\.dotnet/)?dotnet\\s+(?:build|publish|test|pack|restore|run)\\b",
+      "forbid_args_regex": "(?:CavernizeAndroid\\.csproj|net11\\.0-android|InstallAndroidDependencies)",
+      "reason": "Local Termux ARM64 PRoot lacks the Android SDK / `net11.0-android` workload. Validate shared logic locally by building `CavernSamples/Reusable/Cavernize.Logic/Cavernize.Logic.csproj` (or `Cavern`/`Cavern.Format`), type-check `CavernizeAndroid` via `python3 .agents/scripts/check_android_cs.py`, and build the signed APK via `.github/workflows/BuildAndroid.yml`."
+    },
+    {
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet"
+      },
+      "match_regex": "^(?:/root/\\.dotnet/)?dotnet\\s+(?:build|publish|test|pack|restore|run)\\b",
+      "require_env_vars": [
+        "DOTNET_GCHeapHardLimit",
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"
+      ],
+      "reason": "CoreCLR fails in Termux ARM64 PRoot without required env vars ({missing}). Run with:\nDOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_GCHeapHardLimit=20000000 DOTNET_EnableDiagnostics=0 /root/.dotnet/dotnet <subcommand> -m:1 /p:UseSharedCompilation=false"
+    }
+  ],
+  "diff_rules": [
+    {
+      "path_prefixes": [
+        "Cavern/",
+        "Cavern.Format/"
+      ],
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\bis\\s+not\\b",
+      "severity": "fail",
+      "message": "C# 9+ `is not` is forbidden in `Cavern/` and `Cavern.Format/` (target netstandard2.1 / C# 8.0)."
+    },
+    {
+      "path_prefixes": [
+        "Cavern/",
+        "Cavern.Format/"
+      ],
+      "path_regex": "\\.cs$",
+      "forbid_regex": "^\\s*namespace\\s+[A-Za-z0-9_.]+\\s*;\\s*$",
+      "severity": "fail",
+      "message": "File-scoped namespace is C# 10+ and forbidden in `Cavern/` and `Cavern.Format/` (C# 8.0)."
+    },
+    {
+      "path_prefixes": [
+        "Cavern/",
+        "Cavern.Format/"
+      ],
+      "path_regex": "\\.cs$",
+      "forbid_regex": "(?:=|=>|return|\\?|:|,|\\()\\s*new\\s*\\(\\s*\\)\\s*(?:[;,\\)\\}]|\\{)",
+      "severity": "fail",
+      "message": "Target-typed `new()` is C# 9+ and forbidden in `Cavern/` and `Cavern.Format/` (netstandard2.1 / C# 8.0)."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\bAlertDialog\\b",
+      "severity": "fail",
+      "message": "Legacy `AlertDialog` detected; use `OneUiModalDialog` instead."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\bnew\\s+(?:Android\\.Widget\\.)?Spinner\\s*\\(",
+      "severity": "fail",
+      "message": "Stock `Spinner` detected; use `OneUiInlineSelector` instead."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "trigger_regex": "Orientation\\.Horizontal",
+      "require_if_any_regex": "(?:Button|Pill|AddView|SetSingleLine|Ellipsize)",
+      "must_match_window_regex": "BaselineAligned\\s*=\\s*false",
+      "window_before": 5,
+      "window_after": 13,
+      "severity": "warn",
+      "message": "Horizontal LinearLayout near buttons/pills without visible `BaselineAligned = false` in local window."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "(?:FilesDir|filesDir|binDir)[^\\n;]*(?:Process\\.Start|FileName\\s*=|NativeLibrary\\.Load)|(?:Process\\.Start|NativeLibrary\\.Load)\\s*\\([^\\n;]*(?:FilesDir|filesDir|binDir|/files/bin)",
+      "severity": "fail",
+      "message": "W^X violation: executing or dlopen-ing binaries from FilesDir/bin is forbidden; resolve bundled .so from ApplicationInfo.NativeLibraryDir."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\b(?:SetStatusBarColor|SetNavigationBarColor|SystemUiVisibility)\\b",
+      "severity": "fail",
+      "message": "Deprecated SystemUI/Window bar color API detected; use WindowInsets / WindowInsetsController Edge-to-Edge APIs."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/Properties/",
+      "path_regex": "AndroidManifest\\.xml$",
+      "forbid_regex": "requestLegacyExternalStorage",
+      "severity": "fail",
+      "message": "requestLegacyExternalStorage is forbidden on targetSdkVersion >= 35; use MediaStore/SAF Scoped Storage."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\bBuild\\.VERSION\\.SdkInt\\s*(?:>=|<=|>|<|==|!=)",
+      "severity": "warn",
+      "message": "Prefer `OperatingSystem.IsAndroidVersionAtLeast(N)` over `Build.VERSION.SdkInt` comparisons so Roslyn CA1416/CA1422 platform analyzers recognize the OS guard (and repeat the guard inside lambdas/callbacks)."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\bAndroidStrings\\.Current\\b",
+      "severity": "fail",
+      "message": "`AndroidStrings.Current` does not exist; use `AndroidStrings.Active` (BL-006)."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "(?<![A-Za-z0-9_.])\\bProcess\\.Start\\s*\\(",
+      "severity": "warn",
+      "message": "Qualify `System.Diagnostics.Process.Start(...)` in Android files to prevent CS0104 ambiguity when `Android.OS` is imported (BL-004)."
+    },
+    {
+      "path_prefixes": [
+        "Cavern/",
+        "Cavern.Format/",
+        "CavernSamples/"
+      ],
+      "path_regex": "\\.cs$",
+      "strip_strings": false,
+      "forbid_regex": "\\{[^}\\n]*:0\\.[1-9]\\b",
+      "severity": "warn",
+      "message": "Custom numeric format `:0.1`/`:0.2` emits literal digits in C#; use `:0.0`/`:0.00` or `:F1`/`:F2` (BL-009)."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\bAllCaps\\s*=",
+      "severity": "fail",
+      "message": "`.NET Android` `TextView`/`Button` exposes `SetAllCaps(bool)` method, not an `AllCaps` property (BL-005)."
+    },
+    {
+      "path_prefixes": [
+        "Cavern/",
+        "Cavern.Format/",
+        "CavernSamples/"
+      ],
+      "path_regex": "\\.cs$",
+      "strip_strings": false,
+      "forbid_regex": "^\\s*///.*&(?!(?:amp|lt|gt|quot|apos|#\\d+|#x[0-9a-fA-F]+);)",
+      "severity": "warn",
+      "message": "Unescaped `&` in XML documentation comment triggers CS1570; escape as `&amp;` (BL-008)."
+    },
+    {
+      "path_prefix": "CavernSamples/CavernizeAndroid/Native/cavernize_proaudio/",
+      "path_regex": "\\.(?:c|cpp)$",
+      "forbid_regex": "\\b(?:malloc|calloc|realloc)\\s*\\(",
+      "severity": "warn",
+      "message": "RT-audio guard: heap allocation (`malloc`/`calloc`/`realloc`) detected in `Native/cavernize_proaudio/`; pre-allocate buffers at init and keep RT AAudio/USB callbacks 0-alloc & lock-free."
+    },
+    {
+      "path_prefix": "Cavern/VocalChain/",
+      "path_regex": "\\.cs$",
+      "forbid_regex": "\\b(?:AppLogger\\.|Console\\.Write)",
+      "severity": "warn",
+      "message": "RT-audio guard: logging/console I/O detected in `Cavern/VocalChain/`; keep real-time vocal DSP strictly zero-GC, lock-free, and telemetry-via-snapshot only."
+    }
+  ],
+  "key_parity_rules": [
+    {
+      "path": "CavernSamples/CavernizeAndroid/Language/AndroidStrings.cs",
+      "added_key_regex": "^\\s*\\[\"([^\"]+)\"\\]\\s*=",
+      "target_section_regex": "static\\s+void\\s+ApplyPortuguese\\b(.*?)(?=^\\s*static\\s+void\\s+Apply|\\Z)",
+      "target_key_template": "d[\"{key}\"]",
+      "severity": "fail",
+      "message": "Added English key `[\"{key}\"]` is missing in `ApplyPortuguese`.",
+      "source_section_regex": "static\\s+Dictionary<string,\\s*string>\\s+CreateEnglish\\(\\)\\s*=>\\s*new\\(\\)\\s*\\{(.*?)(?=^\\s*\\};)",
+      "ref_regex": "(?:\\bAndroidStrings\\.Active|\\bS)\\[\"([^\"]+)\"\\]",
+      "ref_path_prefixes": [
+        "CavernSamples/CavernizeAndroid/"
+      ],
+      "ref_severity": "fail",
+      "ref_message": "Referenced UI string key `{key}` missing from `{table}`."
+    }
+  ],
+  "build_rules": [
+    {
+      "label": "Cavern.Format/Cavern.Format.csproj",
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet"
+      },
+      "trigger_path_prefixes": [
+        "Cavern.Format/"
+      ],
+      "trigger_extensions": [
+        ".cs",
+        ".csproj"
+      ],
+      "run_on_force": false,
+      "continue_on_error": true,
+      "command": "/root/.dotnet/dotnet build Cavern.Format/Cavern.Format.csproj -c Release -m:1 /p:UseSharedCompilation=false",
+      "env": {
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",
+        "DOTNET_GCHeapHardLimit": "20000000",
+        "DOTNET_EnableDiagnostics": "0"
+      }
+    },
+    {
+      "label": "Cavern/Cavern.csproj",
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet"
+      },
+      "trigger_path_prefixes": [
+        "Cavern/"
+      ],
+      "trigger_extensions": [
+        ".cs",
+        ".csproj"
+      ],
+      "run_on_force": false,
+      "continue_on_error": true,
+      "command": "/root/.dotnet/dotnet build Cavern/Cavern.csproj -c Release -m:1 /p:UseSharedCompilation=false",
+      "env": {
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",
+        "DOTNET_GCHeapHardLimit": "20000000",
+        "DOTNET_EnableDiagnostics": "0"
+      }
+    },
+    {
+      "label": "CavernSamples/Reusable/Cavernize.Logic/Cavernize.Logic.csproj",
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet"
+      },
+      "trigger_path_prefixes": [
+        "Cavern/",
+        "Cavern.Format/",
+        "CavernSamples/"
+      ],
+      "trigger_extensions": [
+        ".cs",
+        ".csproj"
+      ],
+      "run_on_force": true,
+      "continue_on_error": true,
+      "command": "/root/.dotnet/dotnet build CavernSamples/Reusable/Cavernize.Logic/Cavernize.Logic.csproj -c Release -m:1 /p:UseSharedCompilation=false",
+      "env": {
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",
+        "DOTNET_GCHeapHardLimit": "20000000",
+        "DOTNET_EnableDiagnostics": "0"
+      }
+    },
+    {
+      "label": "CavernizeAndroid C# Roslyn Type-Check",
+      "conditions": {
+        "exists_path": "/root/.dotnet/dotnet"
+      },
+      "trigger_path_prefixes": [
+        "CavernSamples/CavernizeAndroid/"
+      ],
+      "trigger_extensions": [
+        ".cs"
+      ],
+      "run_on_force": true,
+      "on_upstream_fail_command": "python3 .agents/scripts/check_android_cs.py --ci-parity --strict-warnings",
+      "trigger_on_upstream_fail": true,
+      "command": "python3 .agents/scripts/check_android_cs.py --ci-parity --strict-warnings"
+    },
+    {
+      "label": "Cavern 7-Layer Local CI-Parity Check (Portable SDK + Android Ref + OmniAgent + Analyzers)",
+      "conditions": {
+        "not_exists_path": "/root/.dotnet/dotnet"
+      },
+      "trigger_path_prefixes": [
+        "Cavern/",
+        "Cavern.Format/",
+        "CavernSamples/"
+      ],
+      "trigger_extensions": [
+        ".cs",
+        ".csproj",
+        ".c",
+        ".h",
+        ".xml"
+      ],
+      "run_on_force": true,
+      "command": "python3 -B .agents/scripts/check_android_cs.py --ci-parity --strict-warnings"
+    },
+    {
+      "label": "Native cavernize_proaudio C11 unit tests",
+      "trigger_path_prefixes": [
+        "CavernSamples/CavernizeAndroid/Native/"
+      ],
+      "trigger_extensions": [
+        ".c",
+        ".cpp",
+        ".h"
+      ],
+      "run_on_force": false,
+      "command": "if command -v gcc >/dev/null 2>&1; then gcc -std=c11 -O2 -Wall -Wextra -Werror -ICavernSamples/CavernizeAndroid/Native/cavernize_proaudio CavernSamples/CavernizeAndroid/Native/cavernize_proaudio/cavernize_uac2_core.c CavernSamples/CavernizeAndroid/Native/cavernize_proaudio/test_proaudio_native.c -lm -o /tmp/test_proaudio_native && /tmp/test_proaudio_native && rm -f /tmp/test_proaudio_native; fi"
+    }
+  ],
+  "domains": {
+    "ui-oneui9": {
+      "module_id": "MOD-UI-ONEUI9",
+      "module_title": "One UI 9 Interface, Canvas & Localization",
+      "lens": "Principal Mobile Product Designer + IA + Samsung One UI 9 Interaction Designer (Progressive Disclosure, single primary CTA, zero jargon)",
+      "keywords": [
+        "one ui",
+        "oneui",
+        "ui",
+        "layout",
+        "botão",
+        "botoes",
+        "botões",
+        "button*",
+        "aba",
+        "abas",
+        "tab",
+        "tabs",
+        "tela",
+        "screen*",
+        "now playing",
+        "seekbar",
+        "slider*",
+        "switch*",
+        "modal",
+        "dialog*",
+        "ícone*",
+        "icone*",
+        "icon*",
+        "fonte*",
+        "font*",
+        "lyrics",
+        "letra*",
+        "animaç*",
+        "animac*",
+        "animat*",
+        "canvas",
+        "3d room",
+        "roomsimulator*",
+        "tema",
+        "temas",
+        "theme*",
+        "cor",
+        "cores",
+        "color*",
+        "traduç*",
+        "traduc*",
+        "pt-br",
+        "androidstrings*",
+        "clipping",
+        "hud",
+        "mini-player",
+        "miniplayer",
+        "waveform",
+        "mainactivity*",
+        "card",
+        "pill*",
+        "bento",
+        "settings",
+        "configura*",
+        "studio",
+        "stems",
+        "l10n",
+        "rebrand*",
+        "insets",
+        "edge-to-edge",
+        "predictive back"
+      ],
+      "checklist": [
+        "Consult `.agents/docs/ONEUI9_REFERENCE.md` for native One UI 9 / Apple Music / Samsung Video measurements.",
+        "Every horizontal button/pill row MUST set `BaselineAligned = false`, `GravityFlags.CenterVertical`, `SetSingleLine(true)`, `Ellipsize`.",
+        "Use `OneUiModalDialog`, `OneUiInlineSelector`, `OneUiVectorIcons` (no stock `AlertDialog`/`Spinner` or loose emojis).",
+        "Update `AndroidStrings.cs` in BOTH `CreateEnglish()` and `ApplyPortuguese()` (preserving `ApplyHungarian`/`ApplyChinese`)."
+      ]
+    },
+    "dsp-format": {
+      "module_id": "MOD-DSP-FORMAT",
+      "module_title": "Cavern Core / Format, Spatial DSP & Omniscient Vocal Cortex",
+      "lens": "Acoustic Physicist + RT Spatial DSP Architect + MOD-SOTA-PREFLIGHT + MOD-AUDIO-ENG-DIRECTOR: challenge [SEED-v3] via Tabu Recon + Physics-vs-AI Tournament, split 3 S25U planes, offline Golden Bench before C#/C++, AcousticConstraintGovernor + Zero Fake DSP, strict C# 8.0, 0-GC RT audio",
+      "keywords": [
+        "cavern.format",
+        "dsp",
+        "spatial",
+        "espacial",
+        "atmos",
+        "truehd",
+        "damf",
+        "mlp",
+        "flac",
+        "mkv",
+        "matroska",
+        "mp4",
+        "wav",
+        "riff",
+        "codec*",
+        "decoder*",
+        "encoder*",
+        "render*",
+        "upmix*",
+        "matrix",
+        "hrtf",
+        "hrir",
+        "quickeq",
+        "stem",
+        "stems",
+        "channel*",
+        "canal",
+        "canais",
+        "objeto*",
+        "object*",
+        "stream",
+        "streams",
+        "streaming",
+        "seek*",
+        "merge",
+        "juntar",
+        "demux*",
+        "remux*",
+        "realtimeplayerengine*",
+        "cavernize.logic",
+        "onnx",
+        "mvsep",
+        "karaoke",
+        "lgsr",
+        "autoeq",
+        "hptf",
+        "magls",
+        "sofa",
+        "iamf",
+        "hoa",
+        "adm",
+        "bwf",
+        "iso 226",
+        "bs.1770",
+        "bs1770",
+        "dialog",
+        "limiter",
+        "vocal*",
+        "voiceprint",
+        "dna",
+        "ism",
+        "itd",
+        "em-mwf",
+        "stft",
+        "virtualizer",
+        "6dof",
+        "x-ray",
+        "cortex",
+        "black-box",
+        "caixa-preta",
+        "cvfx",
+        "autotune",
+        "hard-tune",
+        "soothe*",
+        "exciter",
+        "formant*",
+        "cepstr*",
+        "farina",
+        "multitone",
+        "adaa*"
+      ],
+      "checklist": [
+        "`Cavern/` & `Cavern.Format/` target `netstandard2.1` (strict C# 8.0 ONLY: avoid `is not`, file-scoped namespaces, target-typed `new()`).",
+        "Zero Fake DSP: NO invented EQ curves/reverb/boosts; pure physics & ISO/ITU/EBU standards only; validate audio/DSP changes against `.agents/docs/AUDIO_GROUND_TRUTH_PROTOCOL.md`.",
+        "MOD-SOTA-PREFLIGHT & MOD-SEED-FALSIFY: treat Phase 3 specs as `[SEED-v3]` mutable floor hypotheses ONLY; pre-wave challenge via `MOD-TABU-RECON` + Physics-vs-AI Tournament + 3-plane S25U split + offline Golden Bench BEFORE coding.",
+        "MOD-AUDIO-ENG-DIRECTOR: enforce `Slot 2D-SHIELD`, `AcousticConstraintGovernor`, Scarlett pre-ADC snapshot, `OmniscientVocalStateBus` & 0-GC RT audio (`.agents/docs/PHASE3_VOCAL_CORTEX_ROADMAP.md`).",
+        "Preserve `Seek(0)` stream invariants, `MatroskaTree` endPosition guards, `FlacAudioConverter` fallback, and original features."
+      ]
+    },
+    "media-native": {
+      "module_id": "MOD-MEDIA-NATIVE",
+      "module_title": "Native Decoders, Pro-Audio, Services & Android Platform",
+      "lens": "Android NDK/Audio Systems Engineer (W^X NativeLibraryDir pre/post W23, 16KB ELF, API 35/36 compliance, lock-free AAudio/libusb)",
+      "keywords": [
+        "ffmpeg",
+        "truehdd",
+        "selinux",
+        "targetsdk*",
+        "filesdir",
+        "ndk",
+        "binário*",
+        "binario*",
+        "binary",
+        "permiss*",
+        "notificaç*",
+        "notificac*",
+        "notification*",
+        "mediasession",
+        "foreground",
+        "applogger",
+        "crash*",
+        "bitmap*",
+        "recycle*",
+        "dispose*",
+        "safepipe*",
+        "thread*",
+        "deadlock*",
+        "race condition*",
+        "audiooutput*",
+        "audiotrack*",
+        "androidmanifest*",
+        "scarlett*",
+        "libusb",
+        "aaudio",
+        "proaudio",
+        "pro-audio",
+        "uac2",
+        "api 35",
+        "api 36",
+        "w^x",
+        "wx",
+        "nativelibrarydir",
+        "16 kb",
+        "16kb",
+        "elf",
+        "onnxruntime",
+        "head-track*",
+        "headtrack*",
+        "galaxy buds",
+        "ble",
+        "osc",
+        "imu",
+        "ahrs",
+        "scoped storage",
+        "saf",
+        "windowinsets",
+        "onbackinvoked",
+        "receiver*",
+        "pendingintent"
+      ],
+      "checklist": [
+        "Enforce `android:targetSdkVersion` >= 35 (35/36), `extractNativeLibs=\"true\"`, `enableOnBackInvokedCallback=\"true\"`, W^X `NativeLibraryDir` execution (zero `FilesDir/bin/` exec), 16 KB ELF alignment, and API 33+ runtime/FGS compliance.",
+        "Check `SafePipeHandle` / stream disposal, lock-free audio/USB lifecycles, bitmap `.Recycle()` safety, and `AppLogger` error diagnostics.",
+        "Zero-Warning Live Check: inspect `fetch_live_diagnostics.py --ci` & current official Android/.NET docs before touching OS-versioned APIs; use `OperatingSystem.IsAndroidVersionAtLeast(N)` in the exact scope (incl. inside lambdas) or `[SupportedOSPlatform]` (see `PROJECT_HISTORY.md` Sec 2)."
+      ]
+    },
+    "player-library": {
+      "module_id": "MOD-PLAYER-LIB",
+      "module_title": "Media Library, Tags & Online Scrapers",
+      "lens": "Media Library & Metadata Architect (Smart Clean v2 evidence-based tags, twin matching, async caching, zero UI stalls)",
+      "keywords": [
+        "biblioteca",
+        "library",
+        "álbum",
+        "album",
+        "álbuns",
+        "artista*",
+        "artist*",
+        "faixa*",
+        "track*",
+        "tag",
+        "tags",
+        "audiotag*",
+        "metadata",
+        "capa*",
+        "cover*",
+        "itunes",
+        "lrclib",
+        "opensubtitles",
+        "podnapisi",
+        "legenda*",
+        "subtitle*",
+        "explorer",
+        "pasta*",
+        "folder*",
+        "saf",
+        "mediastore",
+        "fila",
+        "queue",
+        "variante*",
+        "variant*",
+        "lyricsservice*",
+        "onlinemetadata*",
+        "cache*",
+        "smart clean",
+        "twin",
+        "lossless twin",
+        "neural track",
+        "vocal dna",
+        "mediametadata"
+      ],
+      "checklist": [
+        "Keep `MediaStore` + local folder scanning, evidence-based tags, filter-accurate counts, and non-blocking background caching safe."
+      ]
+    },
+    "build-deliver": {
+      "module_id": "MOD-SHIP",
+      "module_title": "Version Sync, Commit, CI & APK Delivery",
+      "lens": "Release & CI Reliability Engineer (synced versions, zero-regression 4-layer gate, clean EXTRA_REQUESTS.md, reproducible signed APK)",
+      "is_ship": true,
+      "keywords": [
+        "build",
+        "builds",
+        "compil*",
+        "apk",
+        "release*",
+        "github actions",
+        "buildandroid*",
+        "ota",
+        "appupdate*",
+        "versão",
+        "versao",
+        "version*",
+        "commit",
+        "push",
+        "deliver*",
+        "entreg*",
+        "sdcard/download",
+        "rebrand*",
+        "w28",
+        "w29",
+        "signing",
+        "keystore",
+        "ci",
+        "workflow"
+      ],
+      "checklist": [
+        "Read `.agents/docs/EXTRA_REQUESTS.md` FIRST; stop & implement if any pending items exist.",
+        "Review `.agents/docs/BUILD_LESSONS.md` pre-commit; after any new structural CI/build failure run `python3 -B .agents/scripts/error_learner.py --fetch-live-ci --apply` (version-agnostic + dynamic lookup only).",
+        "Keep `ApplicationDisplayVersion` synchronized (`CavernizeAndroid.csproj` & `BuildAndroid.yml`) and preserve all `vX.Y.Z` GitHub releases.",
+        "Prepend milestone to `.agents/docs/PROJECT_HISTORY.md` (and update `README.md` if user-facing).",
+        "Monitor GitHub Actions to success and deliver signed APK to workspace & `/sdcard/Download/Cavernize-Android.apk`."
+      ]
+    }
+  },
+  "error_learning": {
+    "repo": "guumachadooo/Cavern",
+    "branch": "diagnostics",
+    "ci_json_path": "ci/latest-build-diagnostics.json",
+    "lessons_file": ".agents/docs/BUILD_LESSONS.md"
+  },
+  "diagnostics": {
+    "repo": "guumachadooo/Cavern",
+    "branch": "diagnostics",
+    "log_txt": "device-logs/cavernize_log.txt",
+    "fallback_log_branch": "master",
+    "fallback_log_path": ".agents/device_logs/cavernize_log.txt"
+  },
+  "plugin_evolution": {
+    "enabled": true,
+    "plugin_path": ".agents/plugins/dynamic-fractal-planner",
+    "plugin_sync_doc": ".agents/plugins/dynamic-fractal-planner/.agents/docs/EXTERNAL_AI_SYNC.md",
+    "host_sync_doc": ".agents/docs/EXTERNAL_AI_SYNC.md"
+  },
+  "docs_format_version": 1
+}

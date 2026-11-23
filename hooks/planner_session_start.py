@@ -194,12 +194,21 @@ def main() -> None:
         for rel in (
             ".agents/docs/PROJECT_HISTORY.md",
             ".agents/docs/SAVED_IDEAS.md",
+            ".agents/docs/BUILD_LESSONS.md",
+            ".agents/docs/EXTERNAL_AI_SYNC.md",
             *(session_cfg.get("extra_docs") or []),
         ):
             if rel not in mem_candidates and (repo / rel).is_file():
                 mem_candidates.append(rel)
         if mem_candidates:
             lines.append("DOCS|" + ",".join(f"`{m}`" for m in mem_candidates))
+
+        evo_cfg = profile.get("plugin_evolution") or {}
+        if isinstance(evo_cfg, dict) and evo_cfg.get("enabled"):
+            plug_sync_rel = str(evo_cfg.get("plugin_sync_doc") or ".agents/plugins/dynamic-fractal-planner/.agents/docs/EXTERNAL_AI_SYNC.md")
+            lines.append(
+                f"EVOLVE|AUTO_DUAL_SCOPE: reusable workflow/tooling/diag ideas -> universalize in plugin (`scripts/`+`{plug_sync_rel}`) && app-only -> host project"
+            )
 
         hist_p = repo / ".agents" / "docs" / "PROJECT_HISTORY.md"
         if hist_p.is_file():
@@ -230,10 +239,42 @@ def main() -> None:
         if upgrade_info.get("profile_migrated"):
             old_v, new_v = upgrade_info["profile_migrated"]
             up_parts.append(f"profile=v{old_v}->v{new_v}")
+        if upgrade_info.get("plugin_upgraded"):
+            old_pv, new_pv = upgrade_info["plugin_upgraded"]
+            up_parts.append(f"plugin=v{old_pv}->v{new_pv}")
         if upgrade_info.get("boilerplate_upgraded"):
             up_parts.append("templates=" + ",".join(upgrade_info["boilerplate_upgraded"]))
         if up_parts:
             lines.append("AUTO_UPGRADED|" + "|".join(up_parts))
+        if upgrade_info.get("plugin_downgrade_blocked"):
+            stored_pv, cur_pv = upgrade_info["plugin_downgrade_blocked"]
+            lines.append(f"PLUGIN_DOWNGRADE_GUARD|workspace=v{stored_pv}>installed=v{cur_pv}|keeping workspace profile intact")
+
+        if is_real_project_root(repo) and isinstance(evo_cfg, dict) and evo_cfg.get("enabled"):
+            plug_rel = str(evo_cfg.get("plugin_path") or ".agents/plugins/dynamic-fractal-planner").strip()
+            if (repo / plug_rel / "plugin.json").is_file():
+                try:
+                    import self_evolve  # noqa: E402
+
+                    auto_sync = bool(evo_cfg.get("auto_sync_higher_version", True))
+                    chk = self_evolve.sync_plugin_versions(repo, plugin_rel=plug_rel, apply=False)
+                    if chk.get("direction") == "embedded->global":
+                        if auto_sync:
+                            done = self_evolve.sync_plugin_versions(repo, plugin_rel=plug_rel, apply=True)
+                            lines.append(
+                                f"PLUGIN_SYNCED|embedded->global|v{chk.get('global_version') or '0.0.0'}->v{done.get('embedded_version')}"
+                            )
+                        else:
+                            lines.append(
+                                f"PLUGIN_VERSION_SKEW|embedded=v{chk.get('embedded_version')}>global=v{chk.get('global_version')}|ACT:run `plan_tool.py evolve sync-plugin --apply`"
+                            )
+                    elif chk.get("direction") == "global->embedded":
+                        lines.append(
+                            f"PLUGIN_UPGRADE_AVAILABLE|global=v{chk.get('global_version')}>embedded=v{chk.get('embedded_version')}|ACT:run `plan_tool.py evolve sync-plugin --apply`"
+                        )
+                except Exception:
+                    pass
+
         pending_doc_mig = upgrade_info.get("docs_needing_ai_conversion") or []
         if pending_doc_mig:
             plan_cli_mig = PLUGIN_ROOT / "scripts" / "plan_tool.py"

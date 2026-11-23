@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from typing import Any, Callable
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 CURRENT_DOCS_FORMAT_VERSION = 1
 
 DEFAULT_MEMORY_DOCS = [
@@ -28,7 +28,45 @@ DEFAULT_BLAST_RADIUS = {
     "simple_tier_max_files": 3,
 }
 
+DEFAULT_CODE_WEIGHT_LIMITS = {
+    "enabled": True,
+    "warn_lines": 1500,
+    "warn_lines_all": 2000,
+}
+
+DEFAULT_MEMORY_WEIGHT_LIMITS = {
+    "project_history_max_lines": 150,
+    "project_history_max_kb": 28,
+    "external_sync_max_kb": 48,
+}
+
 MigratorFn = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+def parse_semver(raw: Any) -> tuple[int, int, int]:
+    """Parse a semantic version string like '2.9.0' or 'v2.9.0-r1' into (major, minor, patch)."""
+    text = str(raw or "").strip().lstrip("vV")
+    if not text:
+        return (0, 0, 0)
+    core = text.split("-", 1)[0].split("+", 1)[0]
+    parts = core.split(".")
+    nums: list[int] = []
+    for part in parts[:3]:
+        digits = "".join(ch for ch in part if ch.isdigit())
+        nums.append(int(digits) if digits else 0)
+    while len(nums) < 3:
+        nums.append(0)
+    return (nums[0], nums[1], nums[2])
+
+
+def compare_semver(a: Any, b: Any) -> int:
+    """Compare two semver strings: return -1 if a < b, 0 if equal, 1 if a > b."""
+    pa, pb = parse_semver(a), parse_semver(b)
+    if pa < pb:
+        return -1
+    if pa > pb:
+        return 1
+    return 0
 
 
 def migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
@@ -103,9 +141,32 @@ def migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def migrate_v3_to_v4(data: dict[str, Any]) -> dict[str, Any]:
+    """Losslessly migrate a v3 profile to schema v4 (universal code/memory bloat limits)."""
+    out = copy.deepcopy(data)
+    out["schema_version"] = 4
+
+    raw_cw = out.get("code_weight_limits")
+    cw = copy.deepcopy(raw_cw) if isinstance(raw_cw, dict) else {}
+    cw.setdefault("enabled", DEFAULT_CODE_WEIGHT_LIMITS["enabled"])
+    cw.setdefault("warn_lines", DEFAULT_CODE_WEIGHT_LIMITS["warn_lines"])
+    cw.setdefault("warn_lines_all", DEFAULT_CODE_WEIGHT_LIMITS["warn_lines_all"])
+    out["code_weight_limits"] = cw
+
+    raw_mw = out.get("memory_weight_limits")
+    mw = copy.deepcopy(raw_mw) if isinstance(raw_mw, dict) else {}
+    mw.setdefault("project_history_max_lines", DEFAULT_MEMORY_WEIGHT_LIMITS["project_history_max_lines"])
+    mw.setdefault("project_history_max_kb", DEFAULT_MEMORY_WEIGHT_LIMITS["project_history_max_kb"])
+    mw.setdefault("external_sync_max_kb", DEFAULT_MEMORY_WEIGHT_LIMITS["external_sync_max_kb"])
+    out["memory_weight_limits"] = mw
+
+    return out
+
+
 MIGRATORS: dict[int, MigratorFn] = {
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
+    3: migrate_v3_to_v4,
 }
 
 

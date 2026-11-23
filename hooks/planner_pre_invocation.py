@@ -50,7 +50,7 @@ def _compact_domain_lenses(
     domains: list[str],
     profile: dict[str, Any],
     max_lenses: int = 2,
-    max_chars: int = 220,
+    max_chars: int = 420,
 ) -> str:
     custom_doms = profile.get("domains") if isinstance(profile.get("domains"), dict) else {}
     parts: list[str] = []
@@ -355,6 +355,10 @@ def _run_pre_invocation_inner(t0: float) -> None:
                 _append_within_budget(
                     "DISC|AUDIT_EXISTING: grep/inspect partial impls pre-create (!duplicate) ; "
                     "CURATE_OSS: evaluate battle-tested OSS libs/standards pre-custom complex algos"
+                )
+                _append_within_budget(
+                    "SOTA_PREFLIGHT|LIVE_SOTA(web/MCP !stale defaults) -> OMNISCIENT_FUSION(reuse owned signals/hw; joint solver > serial chain) "
+                    "-> PLANE_SPLIT(offline | RT hot-path 0-alloc | async control) -> AI_VS_DETERMINISTIC -> GOLDEN_BENCH(offline math test pre-prod)"
                 )
 
     # Runaway read guard (strict mode only)

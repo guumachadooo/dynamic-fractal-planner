@@ -1,0 +1,37 @@
+{
+  "schema_version": 3,
+  "docs_format_version": 1,
+  "project_name": "dynamic-fractal-planner",
+  "planner_mode": "lean",
+  "read_budget": {
+    "max_full_read_lines": 300,
+    "max_slice_lines": 250
+  },
+  "secret_guard": {
+    "enabled": true
+  },
+  "blast_radius": {
+    "simple_tier_max_files": 3
+  },
+  "extra_requests_file": ".agents/docs/EXTRA_REQUESTS.md",
+  "memory_feedback": {
+    "enabled": true,
+    "min_code_files": 2,
+    "docs": [
+      ".agents/docs/PROJECT_HISTORY.md",
+      ".agents/docs/SAVED_IDEAS.md",
+      "AGENTS.md"
+    ]
+  },
+  "build_rules": [
+    {
+      "label": "pytest",
+      "command": "pytest -q",
+      "trigger_extensions": [
+        ".py"
+      ],
+      "run_on_force": true
+    }
+  ],
+  "domains": {}
+}
