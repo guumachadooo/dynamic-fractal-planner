@@ -4651,7 +4651,7 @@ class TestV215PaceAndZeroQuotaSync(unittest.TestCase):
                 )
                 msg_t = pre_t["injectSteps"][0]["systemMessage"]["systemMessage"]
                 self.assertIn("DELEGATE|pace=turbo|", msg_t)
-                self.assertIn("parallel 1-shot subagent cubicles", msg_t)
+                self.assertIn("parallel 1-shot cubicles", msg_t)
                 self.assertLessEqual(len(msg_t), 1500)
 
             with tempfile.TemporaryDirectory() as art2:
@@ -4885,6 +4885,149 @@ class TestV216SubSubagentTiering(unittest.TestCase):
                 self.assertEqual(len(del_lines2), 1, msg2)
                 self.assertNotIn("sub-sub:", del_lines2[0])
                 self.assertLessEqual(len(del_lines2[0]), 200, del_lines2[0])
+
+
+class TestAntiPollingGuard(unittest.TestCase):
+    """Tests for v2.17.0 anti-polling PreToolUse guards, --fast auto-rewrite, and DELEGATE| cues."""
+
+    def test_v217_schedule_and_manage_task_polling_guard(self) -> None:
+        hooks_cfg = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))
+        pre_hooks = hooks_cfg["dynamic-fractal-planner"]["PreToolUse"]
+        self.assertTrue(
+            any(
+                h.get("matcher") == "schedule|manage_task"
+                and any("planner_guard_polling.py" in sub.get("command", "") for sub in h.get("hooks", []))
+                for h in pre_hooks
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            (repo / ".agents").mkdir(parents=True)
+
+            def poll_guard(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+                rc, err, parsed = run_hook(
+                    "planner_guard_polling.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art,
+                        "toolCall": {"name": tool_name, "args": args},
+                    },
+                )
+                self.assertEqual(rc, 0, err)
+                return parsed
+
+            # schedule: polling prompts or short unconditional timers denied w/ reactive/watch guidance
+            deny_prompt = poll_guard("schedule", {"DurationSeconds": 120, "Prompt": "check build status"})
+            self.assertEqual(deny_prompt["decision"], "deny")
+            self.assertIn("DENY|anti_poll", deny_prompt["reason"])
+            self.assertIn("NotificationTimeoutSeconds", deny_prompt["reason"])
+            self.assertIn("gh run watch --exit-status", deny_prompt["reason"])
+
+            deny_short = poll_guard("schedule", {"DurationSeconds": 15, "Prompt": "ping me", "TimerCondition": "never"})
+            self.assertEqual(deny_short["decision"], "deny")
+            self.assertIn("DENY|anti_poll", deny_short["reason"])
+
+            deny_short_none = poll_guard("schedule", {"DurationSeconds": 30, "Prompt": "resume"})
+            self.assertEqual(deny_short_none["decision"], "deny")
+
+            # schedule: daemon, cron, and genuine >30s non-polling reminders allowed
+            self.assertEqual(
+                poll_guard("schedule", {"CronExpression": "*/15 * * * *", "Prompt": "check inbox", "IsDaemon": True})["decision"],
+                "allow",
+            )
+            self.assertEqual(
+                poll_guard("schedule", {"CronExpression": "0 9 * * 1", "Prompt": "weekly summary"})["decision"],
+                "allow",
+            )
+            self.assertEqual(
+                poll_guard("schedule", {"DurationSeconds": 120, "Prompt": "Remind user about lunch break"})["decision"],
+                "allow",
+            )
+
+            # manage_task: 1st status/list allowed, 2nd within 90s denied; kill & send_input allowed
+            self.assertEqual(poll_guard("manage_task", {"Action": "status", "TaskId": "t-1"})["decision"], "allow")
+            deny_status = poll_guard("manage_task", {"Action": "status", "TaskId": "t-1"})
+            self.assertEqual(deny_status["decision"], "deny")
+            self.assertIn("DENY|anti_poll", deny_status["reason"])
+
+            self.assertEqual(poll_guard("manage_task", {"Action": "list"})["decision"], "allow")
+            deny_list = poll_guard("manage_task", {"Action": "list"})
+            self.assertEqual(deny_list["decision"], "deny")
+            self.assertIn("DENY|anti_poll", deny_list["reason"])
+
+            self.assertEqual(poll_guard("manage_task", {"Action": "kill", "TaskId": "t-1"})["decision"], "allow")
+            self.assertEqual(poll_guard("manage_task", {"Action": "send_input", "TaskId": "t-1", "Input": "y\n"})["decision"], "allow")
+
+    def test_v217_command_polling_guards_and_fast_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            (repo / ".agents").mkdir(parents=True)
+
+            def cmd_guard(cmd: str) -> dict[str, Any]:
+                rc, err, parsed = run_hook(
+                    "planner_guard_command.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art,
+                        "toolCall": {"name": "run_command", "args": {"CommandLine": cmd}},
+                    },
+                )
+                self.assertEqual(rc, 0, err)
+                return parsed
+
+            # ps aux | grep repeat poll within 120s denied
+            self.assertEqual(cmd_guard("ps aux | grep dotnet")["decision"], "allow")
+            deny_ps = cmd_guard("ps aux | grep dotnet")
+            self.assertEqual(deny_ps["decision"], "deny")
+            self.assertIn("DENY|anti_poll", deny_ps["reason"])
+
+            # shell while/for + sleep polling gh run list/view denied
+            for loop_cmd in (
+                "while true; do gh run list --limit 1; sleep 10; done",
+                "for i in 1 2 3; do gh run view 12345; sleep 5; done",
+            ):
+                deny_gh = cmd_guard(loop_cmd)
+                self.assertEqual(deny_gh["decision"], "deny", loop_cmd)
+                self.assertIn("DENY|anti_poll", deny_gh["reason"])
+                self.assertIn("gh run watch --exit-status --compact", deny_gh["reason"])
+
+            # run_plugin_tests.py auto-rewrites to --fast when bare
+            rw_bare = cmd_guard("python3 -B tests/run_plugin_tests.py")
+            self.assertEqual(rw_bare["decision"], "allow")
+            self.assertIn("run_plugin_tests.py --fast", rw_bare.get("overwrite", {}).get("CommandLine", ""))
+
+            for keep_cmd in (
+                "python3 -B tests/run_plugin_tests.py --fast",
+                "python3 -B tests/run_plugin_tests.py --full",
+                "python3 -B tests/run_plugin_tests.py -h",
+                "python3 -B tests/run_plugin_tests.py TestAntiPollingGuard",
+            ):
+                rw_keep = cmd_guard(keep_cmd)
+                self.assertEqual(rw_keep["decision"], "allow")
+                self.assertNotIn("--fast --fast", rw_keep.get("overwrite", {}).get("CommandLine", ""))
+                self.assertNotIn(" --fast", rw_keep.get("overwrite", {}).get("CommandLine", "").replace(keep_cmd, ""))
+
+    def test_v217_delegate_cue_contains_anti_poll_and_single_verify_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean"}),
+                encoding="utf-8",
+            )
+            prompt = "1. Refactor state machine\n2. Add unit tests\n3. Update docs"
+            _, _, pre = run_hook(
+                "planner_pre_invocation.py",
+                {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": prompt, "invocationNum": 1},
+            )
+            msg = pre["injectSteps"][0]["systemMessage"]["systemMessage"]
+            del_lines = [ln for ln in msg.splitlines() if ln.startswith("DELEGATE|")]
+            self.assertEqual(len(del_lines), 1, msg)
+            self.assertIn("!poll(!schedule/!manage_task-loop)", del_lines[0])
+            self.assertIn("1-verify-owner", del_lines[0])
+            self.assertLessEqual(len(del_lines[0]), 200, del_lines[0])
 
 
 def _stamp_plugin_tests_passed() -> None:

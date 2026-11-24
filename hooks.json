@@ -64,6 +64,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "schedule|manage_task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ./hooks/planner_guard_polling.py",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PostToolUse": [

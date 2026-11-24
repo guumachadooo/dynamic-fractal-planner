@@ -153,6 +153,24 @@ def _run_pre_invocation_inner(t0: float) -> None:
         prev_handoff_nudged = bool(hook_state.get("handoff_nudged"))
         prev_post_commit = bool(hook_state.get("post_commit_nudge"))
         prev_recon = hook_state.get("recon") if isinstance(hook_state.get("recon"), dict) else None
+        prev_task_polls = (
+            {
+                str(k): float(v)
+                for k, v in (hook_state.get("task_status_polls") or {}).items()
+                if isinstance(v, (int, float)) and (now - float(v)) < 120.0
+            }
+            if isinstance(hook_state.get("task_status_polls"), dict)
+            else {}
+        )
+        prev_ps_polls = (
+            {
+                str(k): float(v)
+                for k, v in (hook_state.get("ps_polls") or {}).items()
+                if isinstance(v, (int, float)) and (now - float(v)) < 180.0
+            }
+            if isinstance(hook_state.get("ps_polls"), dict)
+            else {}
+        )
         carried_ctx = build_carried_task_context(hook_state, load_json(plan_json), now)
         eco = is_eco_mode_prompt(last_input)
         triage = analyze_prompt(last_input, repo, context=carried_ctx, now=now)
@@ -210,6 +228,8 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "blueprint_injected": False,
             "plugin_sync_injected": False,
             "btw_injected": False,
+            "task_status_polls": prev_task_polls,
+            "ps_polls": prev_ps_polls,
         }
     else:
         triage = hook_state.get("triage") or {}
@@ -370,7 +390,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             allow_med = bool(sub_cfg.get("allow_medium_tier", True))
             sub_cue = (f"|sub-sub:{sub_def}+swarm-med/low" if allow_med else f"|sub-sub:{sub_def}") if allow_nesting else ""
             del_line = (
-                f"DELEGATE|pace={triage.get('pace_mode') or 'turbo'}|thin-coord(!bulk)->parallel 1-shot subagent cubicles(!cmd-echo,!fork,seq PRoot)|"
+                f"DELEGATE|pace={triage.get('pace_mode') or 'turbo'}|parallel 1-shot cubicles(!cmd-echo,1-verify-owner,!poll(!schedule/!manage_task-loop))|"
                 f"Google-only(L0:flash_lite|L1-2:flash|L3:pro){sub_cue}|reply<={max_lines}L"
             )
             _append_within_budget(del_line)

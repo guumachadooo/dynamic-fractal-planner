@@ -6,7 +6,7 @@ description: >-
   turn snapshots (`undo-turn`), and 1-turn audit sign-off (`finish`).
 ---
 
-# Dynamic Fractal Planner (`dynamic-planner` v3 / Plugin v2.16.0)
+# Dynamic Fractal Planner (`dynamic-planner` v3 / Plugin v2.17.0)
 
 Scripts (`~/.gemini/config/plugins/dynamic-fractal-planner/scripts/`): `plan_tool.py` | `blueprint_engine.py` | `verify_universal.py` | `log_digest.py` | `repo_map.py`
 
@@ -33,6 +33,7 @@ Scripts (`~/.gemini/config/plugins/dynamic-fractal-planner/scripts/`): `plan_too
 - **Adaptive Cubicle Pace (`pace=turbo|eco|normal`):** Default `turbo` fans out parallel isolated subagent cubicles across independent slices; `eco` still uses parallel cubicles whenever net-token-saving (isolated leaf ctx < parent replay bloat); `normal` uses standard adaptive routing.
 - **Zero-Quota Bidirectional Sync & Auto-History:** `SessionStart` runs zero-quota bidirectional `global<->embedded` higher-version plugin auto-sync (never downgrades); host `PROJECT_HISTORY.md` updates/syncs automatically alongside version/handoff ledgers.
 - **Thin Coordinator (T2/T3 & `/goal`):** Main chat orchestrates ONLY — keep context small; delegate bulk reads, multi-module edits, log digests, & sequential PRoot builds/tests to max safe parallel `invoke_subagent` / `run_workflow` / `swarm` (`<=20L` symbolic EN replies).
+- **Single Verify Owner (`1-verify-owner`) & Anti-Polling (`!poll`):** Assign ONE verify owner per wave for builds/tests; docs/`flash_lite` subagents are FORBIDDEN from running heavy build/test suites. NEVER poll via `schedule`, repeat `manage_task(status|list)` (<90s), repeat `ps aux | grep` (<120s), or `while/for+sleep` `gh run list|view` loops (`planner_guard_polling.py` + `planner_guard_command.py` block them; bare `run_plugin_tests.py` auto-rewrites to `--fast`) — use reactive wakeup (`NotificationTimeoutSeconds` + empty reply) or blocking `gh run watch --exit-status --compact`.
 - **Subagent Context & Output Diet:** Subagents start fresh (0 parent ctx; `!swarm fork`). Prefer fresh 1-shot subagents per slice (`!reuse` after heavy logs or unrelated tasks; `send_message` ONLY for tiny stateful follow-ups `<=2` turns) && `!cmd-echo` (pass concise symbolic goal + target path/CLI verb ONLY — never paste long bash pipelines for subagent to echo back).
 - **Nested Sub-Subagents (`delegation.sub_subagent`):** When `allow_nesting:true` (default), subagents may spawn nested `invoke_subagent flash_lite`/`flash` || `swarm` `gemini-*-medium` (`gemini-4-hydrogen-medium` w/ `allow_medium_tier:true`) / `gemini-*-low` on non-complex parallel/bulk slices whenever isolating work saves net tokens (`default_model:"flash_lite"`, `swarm_medium_model:"gemini-4-hydrogen-medium"`).
 - **Complexity-Tiered Google-Only Models (`!Claude/!OpenAI/!ChatGPT/!o1-o4`, guarded by `hooks/planner_guard_delegation.py`):**

@@ -647,10 +647,74 @@ def _inject_pytest_quiet(cmd: str) -> str:
     )
 
 
+def _inject_plugin_tests_fast(cmd: str) -> str:
+    """Append `--fast` to bare `run_plugin_tests.py` segments lacking mode/help/Test filter."""
+    def _rewrite_seg(match: re.Match[str]) -> str:
+        seg = match.group(0)
+        tail = match.group(1) or ""
+        if re.search(r"(?<!\S)(?:--fast\b|--full\b|-h\b|--help\b|Test[A-Za-z0-9_.]*)", tail):
+            return seg
+        m_redir = re.search(r"\s+(?:\d*>>?|\&>)\s*\S+(?:\s+2>&1)?\s*$", seg)
+        if m_redir:
+            pos = m_redir.start()
+            return seg[:pos] + " --fast" + seg[pos:]
+        return seg + " --fast"
+
+    return re.sub(
+        r"(?:[^\n;|&]*?)(?<![A-Za-z0-9_])run_plugin_tests\.py([^\n;|&]*)",
+        _rewrite_seg,
+        cmd,
+    )
+
+
+def check_polling_command(cmd: str, hook_file: Path, hook_state: dict[str, Any]) -> str | None:
+    """Block shell gh-run sleep-poll loops and repeated `ps` process polling within 120s."""
+    if (
+        re.search(r"(?:^|[;\n&|]\s*)(?:while|for|until)\b", cmd)
+        and re.search(r"(?:^|[;\n&|\s])sleep\s+\d+", cmd)
+        and re.search(r"\bgh\s+run\s+(?:list|view)\b", cmd)
+    ):
+        return (
+            "DENY|anti_poll: shell loop polling `gh run list|view` with `sleep` blocked "
+            "-> use `gh run watch --exit-status --compact` (or reactive `NotificationTimeoutSeconds`)."
+        )
+
+    ps_pipe = re.search(r"\bps\b[^;\n]*\|\s*(?:e?grep|rg)\b([^;\n]*)", cmd, re.IGNORECASE)
+    if ps_pipe:
+        targets = re.findall(r"\b(dotnet|msbuild|python(?:\d+(?:\.\d+)?)?|pytest)\b", ps_pipe.group(1), re.IGNORECASE)
+        if targets:
+            from planner_state import save_json  # noqa: E402
+
+            key = "|".join(sorted({t.lower() for t in targets}))
+            now = time.time()
+            raw_polls = hook_state.get("ps_polls")
+            polls: dict[str, float] = (
+                {
+                    str(k): float(v)
+                    for k, v in raw_polls.items()
+                    if isinstance(v, (int, float)) and (now - float(v)) < 3600.0
+                }
+                if isinstance(raw_polls, dict)
+                else {}
+            )
+            prev = polls.get(key)
+            if prev is not None and (now - prev) < 120.0:
+                elapsed = int(max(0.0, now - prev))
+                return (
+                    f"DENY|anti_poll: repeated `ps` poll (`{key}`) within 120s ({elapsed}s ago). "
+                    "Wait for reactive command completion (`NotificationTimeoutSeconds`) instead of polling `ps`."
+                )
+            polls[key] = now
+            hook_state["ps_polls"] = polls
+            save_json(hook_file, hook_state)
+
+    return None
+
+
 def maybe_rewrite_command(cmd: str, repo: Path, payload: dict[str, Any]) -> str | None:
     from planner_state import prompt_hash, resolve_artifact_dir  # noqa: E402
 
-    updated = _inject_pytest_quiet(_inject_dotnet_minimal(cmd))
+    updated = _inject_plugin_tests_fast(_inject_pytest_quiet(_inject_dotnet_minimal(cmd)))
 
     if ".agents/scripts/plan_tool.py" in updated and not (repo / ".agents/scripts/plan_tool.py").exists():
         updated = updated.replace(".agents/scripts/plan_tool.py", str(PLUGIN_ROOT / "scripts/plan_tool.py"))
@@ -720,6 +784,11 @@ def main() -> None:
 
         _, _, _, hook_file = get_paths(payload)
         hook_state = load_json(hook_file)
+
+        poll_msg = check_polling_command(cmd, hook_file, hook_state)
+        if poll_msg:
+            deny(poll_msg, payload=payload, repo=repo)
+            return
 
         mem_msg = check_commit_memory_feedback(segments, payload, repo, profile, hook_state)
         if mem_msg:
