@@ -255,7 +255,9 @@ def _run_pre_invocation_inner(t0: float) -> None:
 
     if eco_mode and not hook_state.get("eco_injected"):
         hook_state["eco_injected"] = True
-        inject_lines.append("[ECO_MODE|ON] Batch reads/greps in 1 turn && surgical edits only && terse <=8L reply && no optional docs.")
+        inject_lines.append(
+            "[ECO_MODE|ON] Direct reasoning, 1-turn batched cmds, <=8L reply, 0 optional docs; STILL spawn parallel flash_lite/flash subagent cubicles whenever isolating bulk reads/edits saves more main-ctx tokens than inline reads."
+        )
 
     if triage.get("plugin_sync_intent") and not hook_state.get("plugin_sync_injected"):
         hook_state["plugin_sync_injected"] = True
@@ -362,9 +364,16 @@ def _run_pre_invocation_inner(t0: float) -> None:
         min_del_tier = int(del_cfg.get("thin_coordinator_min_tier") or 2)
         if del_cfg.get("enabled", True) and tier >= min_del_tier:
             max_lines = int(del_cfg.get("max_subagent_reply_lines") or 20)
-            _append_within_budget(
-                f"DELEGATE|thin-coord(!bulk main) -> fresh 1-shot subagents/run_workflow(!cmd-echo,!fork,seq PRoot) | Google-only(L0:flash_lite|L1-2:flash|L3:pro) | reply<={max_lines}L"
+            sub_cfg = del_cfg.get("sub_subagent") if isinstance(del_cfg.get("sub_subagent"), dict) else {}
+            allow_nesting = bool(sub_cfg.get("allow_nesting", True))
+            sub_def = str(sub_cfg.get("default_model") or "flash_lite").strip() or "flash_lite"
+            allow_med = bool(sub_cfg.get("allow_medium_tier", True))
+            sub_cue = (f"|sub-sub:{sub_def}+swarm-med/low" if allow_med else f"|sub-sub:{sub_def}") if allow_nesting else ""
+            del_line = (
+                f"DELEGATE|pace={triage.get('pace_mode') or 'turbo'}|thin-coord(!bulk)->parallel 1-shot subagent cubicles(!cmd-echo,!fork,seq PRoot)|"
+                f"Google-only(L0:flash_lite|L1-2:flash|L3:pro){sub_cue}|reply<={max_lines}L"
             )
+            _append_within_budget(del_line)
         if not eco_mode:
             if tier == 2:
                 _append_within_budget("DISC|AUDIT_EXISTING: grep/inspect partial impls pre-create (!duplicate)")

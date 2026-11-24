@@ -13,10 +13,18 @@ from pathlib import Path
 from typing import Any
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+_HOOKS_DIR = _SCRIPTS_DIR.parent / "hooks"
+for _p in (str(_SCRIPTS_DIR), str(_HOOKS_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from schema_migrations import migrate_profile  # noqa: E402
+
+try:
+    from planner_state import detect_pace_mode  # noqa: E402
+except Exception:
+    def detect_pace_mode(text: str, profile: dict[str, Any] | None = None) -> str:  # type: ignore[misc]
+        return "turbo"
 
 ACTION_VERBS = (
     "adicion*", "acrescent*", "cria*", "implement*", "corrig*", "arrum*", "consert*",
@@ -354,6 +362,12 @@ _BLUEPRINT_META_EDIT_RE = re.compile(
     r"\b(?:blueprint_engine\.py|complexity_triage\.py|planner_pre_invocation\.py|run_plugin_tests\.py|detect_blueprint_intent)\b",
     re.IGNORECASE,
 )
+_BLUEPRINT_NEGATION_RE = re.compile(
+    r"\b(?:n[ãa]o|sem|don't|do\s+not|never|skip|stop|par[ae]\s+de|deixa\s+(?:de|para))\b"
+    r"[^\n.;!?]{0,30}\b(?:faz\w*|cri\w*|ger\w*|mont\w*|escrev\w*|creat\w*|writ\w*|draft\w*|generat\w*|build\w*)?"
+    r"[^\n.;!?]{0,25}\b(?:sota\s+blueprint|blueprint|design\s*doc|rfc\b|technical\s+spec)\b",
+    re.IGNORECASE,
+)
 
 _PLUGIN_SYNC_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
@@ -393,7 +407,7 @@ def detect_blueprint_intent(text: str) -> bool:
     scoring = _strip_long_quotes(text or "").strip()
     if not scoring or len(scoring) < 12:
         return False
-    if _BLUEPRINT_META_EDIT_RE.search(scoring):
+    if _BLUEPRINT_META_EDIT_RE.search(scoring) or _BLUEPRINT_NEGATION_RE.search(scoring):
         return False
     lower = scoring.lower()
     if lower.startswith(QUESTION_ONLY_PREFIXES) and not any(
@@ -817,6 +831,7 @@ def analyze_prompt(
     scoring_lower = scoring_text.lower()
 
     profile = load_project_profile(workspace_root)
+    pace_mode = detect_pace_mode(text, profile)
     domain_specs = _merged_domain_specs(profile)
 
     file_refs = _extract_file_refs(text)
@@ -847,6 +862,7 @@ def analyze_prompt(
             "btw_queue_intent": False,
             "blueprint_intent": False,
             "plugin_sync_intent": True,
+            "pace_mode": pace_mode,
         }
     btw_intent = detect_btw_queue_intent(text)
     bp_intent = detect_blueprint_intent(text)
@@ -912,6 +928,7 @@ def analyze_prompt(
             "btw_queue_intent": btw_intent,
             "blueprint_intent": False,
             "plugin_sync_intent": False,
+            "pace_mode": pace_mode,
         }
 
     if not can_inherit and is_pure_q:
@@ -932,6 +949,7 @@ def analyze_prompt(
             "btw_queue_intent": btw_intent,
             "blueprint_intent": bp_intent,
             "plugin_sync_intent": False,
+            "pace_mode": pace_mode,
         }
 
     if is_tiny_fix:
@@ -952,6 +970,7 @@ def analyze_prompt(
             "btw_queue_intent": btw_intent,
             "blueprint_intent": False,
             "plugin_sync_intent": False,
+            "pace_mode": pace_mode,
         }
 
     breadth_est = raw_breadth
@@ -1012,6 +1031,7 @@ def analyze_prompt(
         "btw_queue_intent": btw_intent,
         "blueprint_intent": bp_intent,
         "plugin_sync_intent": False,
+        "pace_mode": pace_mode,
     }
     if inherited_turn is not None:
         result["inherited_from_turn"] = inherited_turn

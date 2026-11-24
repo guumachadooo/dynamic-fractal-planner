@@ -7,12 +7,13 @@ description: >-
   and deterministic 0-100 Popperian rubric verification (>=85/100).
 ---
 
-# Universal SOTA Blueprint Playbook (`sota-blueprint`)
+# Universal SOTA Blueprint Playbook (`sota-blueprint` / Plugin v2.15.0)
 
 > STYLE|lossless symbolic telegraphic EN ONLY (`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`).
 > CLI|`python3 -B ~/.gemini/config/plugins/dynamic-fractal-planner/scripts/plan_tool.py blueprint <cmd>`
 
 ## Recursive Google-Only Subagent Rules
+- **Adaptive Cubicle Pace (`pace=turbo|eco|normal`):** Default `turbo` runs parallel isolated subagent cubicles; `eco` still uses parallel cubicles whenever net-token-saving; `normal` uses standard adaptive routing. `SessionStart` performs zero-quota bidirectional `global<->embedded` auto-sync, and host `PROJECT_HISTORY.md` updates/syncs automatically on completion/handoff.
 - Keep main chat as **Thin Coordinator** (`<=20L` symbolic EN replies from subagents; `!fork`, `!cmd-echo`).
 - Enforce Google-only complexity routing: `L0:flash_lite` (grep/lookup) | `L1-2:flash` (STORM scouts, OSS curation, file discovery) | `L3:pro` (`[L3]`, blind morphogenesis solvers & cold-ctx Red-Team).
 - Leaf scouts MAY spawn bounded nested `flash_lite`/`flash` leaf lookups (`max depth=2`), returning distilled findings + `url`/`path:line` only.

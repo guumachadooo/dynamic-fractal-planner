@@ -34,6 +34,7 @@ COMPLEX_MARKERS = (
     "deep audit",
 )
 INHERIT_MARKERS = ("[l3]", "[inherit]")
+NESTING_MARKERS = ("sub-subagent", "sub_subagent", "nested subagent", "nested cubicle")
 WORKFLOW_MODEL_RE = re.compile(r"""model\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 
 
@@ -82,6 +83,14 @@ def _find_blocked_vendor(model: str, blocked_patterns: list[str]) -> str:
     return ""
 
 
+def _is_google_medium_model(model: str, sub_cfg: dict[str, Any]) -> bool:
+    ml = (model or "").strip().lower()
+    if not ml:
+        return False
+    swarm_med = str(sub_cfg.get("swarm_medium_model") or "gemini-4-hydrogen-medium").strip().lower()
+    return ml == swarm_med or (ml.startswith("gemini-") and ml.endswith("-medium"))
+
+
 def _check_invoke_subagent(args: dict[str, Any], cfg: dict[str, Any]) -> tuple[str, str] | None:
     type_name = str(args.get("TypeName") or args.get("typeName") or "").strip()
     exempt = {str(x).strip().lower() for x in (cfg.get("exempt_subagent_types") or []) if str(x).strip()}
@@ -106,6 +115,22 @@ def _check_invoke_subagent(args: dict[str, Any], cfg: dict[str, Any]) -> tuple[s
 
     ml = model.lower()
     prompt_role = f"{args.get('Role') or args.get('role') or ''} {args.get('Prompt') or args.get('prompt') or ''}".lower()
+    sub_cfg = cfg.get("sub_subagent") if isinstance(cfg.get("sub_subagent"), dict) else {}
+    allow_nesting = bool(sub_cfg.get("allow_nesting", True))
+    allow_medium_tier = bool(sub_cfg.get("allow_medium_tier", True))
+
+    if not allow_nesting and any(m in prompt_role for m in NESTING_MARKERS):
+        return (
+            "DENY|sub_subagent: nested sub-subagent disabled (`delegation.sub_subagent.allow_nesting=false`).",
+            "DENY:sub_subagent_disabled",
+        )
+
+    if not allow_medium_tier and cfg.get("prefer_cheap_models", True) and _is_google_medium_model(model, sub_cfg):
+        if not any(m in prompt_role for m in COMPLEX_MARKERS):
+            return (
+                f"DENY|sub_subagent: medium tier model `{model}` disabled (`allow_medium_tier=false`) on non-complex slice -> use `flash_lite`|`flash`|`gemini-*-low`.",
+                "DENY:sub_medium_disabled",
+            )
 
     if cfg.get("prefer_cheap_models", True) and ml == "inherit":
         if not any(m in prompt_role for m in INHERIT_MARKERS):
@@ -141,9 +166,27 @@ def _check_swarm(args: dict[str, Any], cfg: dict[str, Any]) -> tuple[str, str] |
 
     if action == "add" and cfg.get("require_explicit_model", True) and not model:
         return (
-            "DENY|explicit_model: `swarm add` missing `model`. Pass explicit cheap Google/Gemini model (`flash_lite`, `flash`, or `gemini-*-flash`).",
+            "DENY|explicit_model: `swarm add` missing `model`. Pass explicit cheap Google/Gemini model (`flash_lite`, `flash`, `gemini-4-hydrogen-medium`, or `gemini-*-low`).",
             "DENY:swarm_explicit_model",
         )
+
+    sub_cfg = cfg.get("sub_subagent") if isinstance(cfg.get("sub_subagent"), dict) else {}
+    allow_nesting = bool(sub_cfg.get("allow_nesting", True))
+    allow_medium_tier = bool(sub_cfg.get("allow_medium_tier", True))
+    brief_txt = f"{args.get('name') or args.get('Name') or ''} {args.get('brief') or args.get('Brief') or ''}".lower()
+
+    if not allow_nesting and any(m in brief_txt for m in NESTING_MARKERS):
+        return (
+            "DENY|sub_subagent: nested swarm worker disabled (`delegation.sub_subagent.allow_nesting=false`).",
+            "DENY:swarm_sub_disabled",
+        )
+
+    if not allow_medium_tier and cfg.get("prefer_cheap_models", True) and _is_google_medium_model(model, sub_cfg):
+        if not any(m in brief_txt for m in COMPLEX_MARKERS):
+            return (
+                f"DENY|sub_subagent: swarm medium tier `{model}` disabled (`allow_medium_tier=false`) on non-complex slice -> use `flash_lite`|`flash`|`gemini-*-low`.",
+                "DENY:swarm_medium_disabled",
+            )
 
     return None
 

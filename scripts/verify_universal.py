@@ -1419,7 +1419,7 @@ def check_plugin_sync_parity(
     *,
     scan_all: bool = False,
 ) -> None:
-    """Warn if embedded plugin code changed without recording an entry in plugin EXTERNAL_AI_SYNC.md."""
+    """Warn if embedded plugin code changed without recording an entry in plugin EXTERNAL_AI_SYNC.md or PROJECT_HISTORY.md."""
     plug_prefix = ".agents/plugins/dynamic-fractal-planner/"
     code_touched = [
         f for f in files
@@ -1428,24 +1428,30 @@ def check_plugin_sync_parity(
     ]
     if not code_touched:
         return
-    plug_sync = f"{plug_prefix}.agents/docs/EXTERNAL_AI_SYNC.md"
-    sync_full = repo / plug_sync
-    if not sync_full.is_file():
-        return
-    if plug_sync in files:
-        return
-    if scan_all or not (repo / ".git").exists():
+    gitless_or_all = scan_all or not (repo / ".git").exists()
+    cur_ver = ""
+    if gitless_or_all:
         # In full-workspace / gitless scans, `files` includes all tracked plugin files regardless of edit state.
-        # Only warn if the current plugin.json version is missing from plugin EXTERNAL_AI_SYNC.md.
+        # Only warn if the current plugin.json version is missing from the ledger.
         manifest_p = repo / f"{plug_prefix}plugin.json"
         if manifest_p.is_file():
             try:
                 cur_ver = str(json.loads(manifest_p.read_text(encoding="utf-8", errors="ignore")).get("version") or "").strip()
             except Exception:
                 cur_ver = ""
-            if cur_ver and f"v{cur_ver}" in sync_full.read_text(encoding="utf-8", errors="ignore"):
-                return
-    warns.append(f"Plugin code edited ({len(code_touched)} file(s)) without updating `{plug_sync}`.")
+
+    for doc_rel in (
+        f"{plug_prefix}.agents/docs/EXTERNAL_AI_SYNC.md",
+        f"{plug_prefix}.agents/docs/PROJECT_HISTORY.md",
+    ):
+        doc_full = repo / doc_rel
+        if not doc_full.is_file():
+            continue
+        if doc_rel in files:
+            continue
+        if gitless_or_all and cur_ver and f"v{cur_ver}" in doc_full.read_text(encoding="utf-8", errors="ignore"):
+            continue
+        warns.append(f"Plugin code edited ({len(code_touched)} file(s)) without updating `{doc_rel}`.")
 
 
 def check_file_budget(

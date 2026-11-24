@@ -207,13 +207,35 @@ def get_planner_mode(
 
 
 _ECO_MODE_RE = re.compile(
-    r"cota\s+acabando|quota\s+acabando|vai\s+r[aá]pido|modo\s+econ[oô]mico|economiza\s+cota|low\s+quota|save\s+quota",
+    r"cota\s+(?:t[aá]\s+)?acabando|quota\s+(?:is\s+)?(?:running\s+out|acabando|low)|pouca\s+(?:cota|quota)|economiza(?:r)?\s+(?:mais\s+)?(?:cota|quota)|economizador\s+de\s+(?:cota|quota)|modo\s+econ[oô]mico|economia\s+m[aá]xima|low\s+quota|save\s+quota",
+    re.IGNORECASE,
+)
+_NORMAL_PACE_RE = re.compile(
+    r"\b(?:modo\s+normal|normal\s+mode|sem\s+pressa|no\s+rush|passo\s+a\s+passo|step\s+by\s+step|calmamente)\b",
+    re.IGNORECASE,
+)
+_TURBO_PACE_RE = re.compile(
+    r"\b(?:modo\s+turbo|turbo\s+mode|vai\s+r[aá]pido|mais\s+veloz|m[aá]xima\s+velocidade|as\s+fast\s+as\s+possible)\b",
     re.IGNORECASE,
 )
 
 
 def is_eco_mode_prompt(text: str) -> bool:
     return bool(_ECO_MODE_RE.search(text or ""))
+
+
+def detect_pace_mode(text: str, profile: dict[str, Any] | None = None) -> str:
+    """Detect user pace mode (`eco` | `normal` | `turbo`) from prompt or `profile.delegation.default_pace_mode`."""
+    raw = text or ""
+    if _ECO_MODE_RE.search(raw):
+        return "eco"
+    if _NORMAL_PACE_RE.search(raw):
+        return "normal"
+    if _TURBO_PACE_RE.search(raw):
+        return "turbo"
+    del_cfg = profile.get("delegation") if isinstance(profile, dict) else None
+    default_pace = str(del_cfg.get("default_pace_mode") or "").strip().lower() if isinstance(del_cfg, dict) else ""
+    return default_pace if default_pace in ("eco", "normal", "turbo") else "turbo"
 
 
 def record_telemetry(event: str, meta: dict[str, Any] | None = None) -> None:

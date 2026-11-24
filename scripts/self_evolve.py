@@ -131,6 +131,7 @@ def classify_improvement(
             f"{plugin_rel_prefix}/.agents/docs/EXTERNAL_AI_SYNC.md",
             f"{plugin_rel_prefix}/CHANGELOG.md",
             ".agents/docs/EXTERNAL_AI_SYNC.md (Plugin section)",
+            ".agents/docs/PROJECT_HISTORY.md",
         ]
     else:
         scope = "project-only"
@@ -202,6 +203,7 @@ def record_sync_entry(
 
     touched: list[str] = []
     host_sync = repo_root / ".agents" / "docs" / "EXTERNAL_AI_SYNC.md"
+    host_hist = repo_root / ".agents" / "docs" / "PROJECT_HISTORY.md"
     plugin_sync = repo_root / plugin_rel / ".agents" / "docs" / "EXTERNAL_AI_SYNC.md"
 
     if scope in ("project-only", "project", "dual-project+plugin", "dual"):
@@ -212,6 +214,10 @@ def record_sync_entry(
             "## Project Sync Entries (Newest First)",
         )
         touched.append(str(host_sync.relative_to(repo_root)))
+        if host_hist.is_file() and not _is_standalone_plugin_root(repo_root):
+            hist_line = f"- {date_str}|`{title}`|{summary} ({files_str})"
+            if _prepend_under_version_history(host_hist, hist_line):
+                touched.append(str(host_hist.relative_to(repo_root)))
 
     if scope in ("plugin-universal", "plugin", "dual-project+plugin", "dual"):
         _prepend_under_heading(
@@ -412,6 +418,8 @@ def sync_plugin_versions(
     }
 
     if same_dir:
+        if apply and emb_ver and (repo_root / ".agents" / "docs" / "PROJECT_HISTORY.md").is_file() and not _is_standalone_plugin_root(repo_root):
+            _sync_host_plugin_history(repo_root, emb_ver, plugin_dir=embedded_dir, apply=True)
         result["message"] = f"Embedded and global plugin point to the same directory (v{emb_ver or '?'})."
         return result
 
@@ -434,6 +442,8 @@ def sync_plugin_versions(
             emb_fp, emb_mt = _tree_fingerprint(embedded_dir)
             glob_fp, glob_mt = _tree_fingerprint(glob_dir)
             if emb_fp == glob_fp:
+                if apply and emb_ver and (repo_root / ".agents" / "docs" / "PROJECT_HISTORY.md").is_file() and not _is_standalone_plugin_root(repo_root):
+                    _sync_host_plugin_history(repo_root, emb_ver, plugin_dir=embedded_dir, apply=True)
                 result["direction"] = "in-sync"
                 result["message"] = f"Embedded and global plugin are in sync at v{emb_ver}."
                 return result
@@ -466,8 +476,14 @@ def sync_plugin_versions(
         result["copied"] = copied
         if result["direction"] == "embedded->global":
             result["global_version"] = emb_ver
+            synced_ver = emb_ver
         elif result["direction"] == "global->embedded":
             result["embedded_version"] = glob_ver
+            synced_ver = glob_ver
+        else:
+            synced_ver = emb_ver or glob_ver
+        if synced_ver and (repo_root / ".agents" / "docs" / "PROJECT_HISTORY.md").is_file() and not _is_standalone_plugin_root(repo_root):
+            _sync_host_plugin_history(repo_root, synced_ver, plugin_dir=src, apply=True)
         result["message"] = f"Synced {result['direction']} cleanly ({len(copied)} canonical files)."
     return result
 
@@ -660,7 +676,65 @@ def _refresh_plugin_handoff_release(handoff_path: Path, target_ver: str) -> bool
     return False
 
 
-def _update_host_metadata(repo_dir: Path, target_ver: str, *, apply: bool) -> list[str]:
+def _prepend_under_version_history(hist_path: Path, entry_line: str) -> bool:
+    text = hist_path.read_text(encoding="utf-8", errors="ignore")
+    heading_re = re.compile(
+        r"^##\s+3\.\s+Version History[^\n]*\n(?:[ \t]*<!--[^\n]*-->[ \t]*\n)*",
+        re.MULTILINE,
+    )
+    m = heading_re.search(text)
+    if m:
+        prefix = text[:m.end()]
+        rest = text[m.end():].lstrip("\n")
+        updated = f"{prefix}\n{entry_line.strip()}\n\n{rest}" if rest else f"{prefix}\n{entry_line.strip()}\n"
+    else:
+        updated = text.rstrip() + f"\n\n## 3. Version History (Newest First)\n\n{entry_line.strip()}\n"
+    if updated == text:
+        return False
+    hist_path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _sync_host_plugin_history(
+    repo_dir: Path,
+    target_ver: str,
+    plugin_dir: Path | None = None,
+    *,
+    apply: bool = True,
+) -> list[str]:
+    hist_path = repo_dir / ".agents" / "docs" / "PROJECT_HISTORY.md"
+    if not target_ver or not hist_path.is_file() or _is_standalone_plugin_root(repo_dir):
+        return []
+    hist_text = hist_path.read_text(encoding="utf-8", errors="ignore")
+    if f"v{target_ver}" in hist_text:
+        return []
+
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    summary = f"Synced dynamic-fractal-planner v{target_ver} into host repository."
+    plug_dir = plugin_dir or (repo_dir / ".agents" / "plugins" / "dynamic-fractal-planner")
+    changelog = plug_dir / "CHANGELOG.md"
+    if changelog.is_file():
+        pat = re.compile(rf"^-\s+(\d{{4}}-\d{{2}}-\d{{2}})\|v{re.escape(target_ver)}\|(.+)$")
+        for raw_line in changelog.read_text(encoding="utf-8", errors="ignore").splitlines():
+            m = pat.match(raw_line.strip())
+            if m:
+                date_str = m.group(1)
+                summary = m.group(2).strip()
+                break
+
+    entry_line = f"- `Plugin v{target_ver} [x]` ({date_str}): {summary}"
+    if apply:
+        _prepend_under_version_history(hist_path, entry_line)
+    return [".agents/docs/PROJECT_HISTORY.md"]
+
+
+def _update_host_metadata(
+    repo_dir: Path,
+    target_ver: str,
+    *,
+    apply: bool,
+    plugin_dir: Path | None = None,
+) -> list[str]:
     touched: list[str] = []
     if not target_ver:
         return touched
@@ -694,6 +768,7 @@ def _update_host_metadata(repo_dir: Path, target_ver: str, *, apply: bool) -> li
             if apply:
                 agents_path.write_text(updated, encoding="utf-8")
 
+    touched.extend(_sync_host_plugin_history(repo_dir, target_ver, plugin_dir=plugin_dir, apply=apply))
     return touched
 
 
@@ -801,7 +876,7 @@ def _push_git_repo(
                     stage_set.add(p)
         if ".agents/planner_profile.json" in dirty_now:
             stage_set.add(".agents/planner_profile.json")
-        for opt_path in ("AGENTS.md", ".agents/docs/EXTERNAL_AI_SYNC.md"):
+        for opt_path in ("AGENTS.md", ".agents/docs/EXTERNAL_AI_SYNC.md", ".agents/docs/PROJECT_HISTORY.md"):
             if opt_path in touched_host_files and opt_path not in pre_dirty and opt_path in dirty_now:
                 stage_set.add(opt_path)
         to_stage = sorted(stage_set)
@@ -920,7 +995,7 @@ def sync_plugin_fleet(
         if is_auth:
             meta_updated.extend(auth_meta_updated)
             if t["kind"] == "embedded" and t_repo:
-                meta_updated.extend(_update_host_metadata(t_repo, auth_ver, apply=apply))
+                meta_updated.extend(_update_host_metadata(t_repo, auth_ver, apply=apply, plugin_dir=auth_dir))
                 if apply and meta_updated:
                     touched_by_repo.setdefault(t_repo, set()).update(meta_updated)
             status = "authoritative"
@@ -936,7 +1011,7 @@ def sync_plugin_fleet(
                 ver_after = t["version"] or None
 
             if t["kind"] == "embedded" and t_repo:
-                meta_updated.extend(_update_host_metadata(t_repo, auth_ver, apply=apply))
+                meta_updated.extend(_update_host_metadata(t_repo, auth_ver, apply=apply, plugin_dir=auth_dir))
                 if apply and meta_updated:
                     touched_by_repo.setdefault(t_repo, set()).update(meta_updated)
 

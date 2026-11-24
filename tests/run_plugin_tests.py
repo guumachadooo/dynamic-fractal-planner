@@ -4175,6 +4175,8 @@ class TestSotaBlueprintEngine(unittest.TestCase):
             "Architect audio dsp filter, api schema, auth pipeline, ui tabs and tests across 5 modules",
             "Fix null reference crash in MainActivity.cs when exporting IAMF",
             "O que é um blueprint?",
+            "Ô, não faz o blueprint não, só salva as ideias",
+            "Don't create a blueprint yet, just explain",
             "Update blueprint_engine.py to fix typo",
             "obrigado",
         )
@@ -4613,6 +4615,276 @@ class TestFleetSyncAndFastPath(unittest.TestCase):
 
             reg = json.loads(ws_file.read_text(encoding="utf-8"))
             self.assertIn(str(repo.resolve()), reg["workspaces"])
+
+
+class TestV215PaceAndZeroQuotaSync(unittest.TestCase):
+    """Tests for v2.15.0 turbo/eco/normal parallel cubicle pace, zero-quota global->embedded SessionStart sync & PROJECT_HISTORY parity."""
+
+    def test_v215_pace_modes_zero_quota_global_to_embedded_and_history_sync(self) -> None:
+        import self_evolve  # noqa: E402
+
+        # 1) Pace detection: turbo default, eco on quota-low cues, normal on explicit normal/step-by-step
+        self.assertEqual(planner_state.detect_pace_mode("Implement feature across 4 modules"), "turbo")
+        self.assertEqual(planner_state.detect_pace_mode("vai rápido e implementa isso"), "turbo")
+        self.assertEqual(planner_state.detect_pace_mode("cota tá acabando, economiza cota"), "eco")
+        self.assertEqual(planner_state.detect_pace_mode("low quota: fix auth"), "eco")
+        self.assertEqual(planner_state.detect_pace_mode("modo normal, passo a passo sem pressa"), "normal")
+        self.assertEqual(
+            planner_state.detect_pace_mode("do this task", {"delegation": {"default_pace_mode": "normal"}}),
+            "normal",
+        )
+
+        # 2) PreInvocation: DELEGATE|pace=... & [ECO_MODE|ON] parallel cubicle permission
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean"}),
+                encoding="utf-8",
+            )
+            t2_prompt = "Implement audio spatial filter, API contract, auth pipeline, and tests across 4 files"
+            with tempfile.TemporaryDirectory() as art1:
+                _, _, pre_t = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art1, "lastUserInput": t2_prompt, "invocationNum": 1},
+                )
+                msg_t = pre_t["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("DELEGATE|pace=turbo|", msg_t)
+                self.assertIn("parallel 1-shot subagent cubicles", msg_t)
+                self.assertLessEqual(len(msg_t), 1500)
+
+            with tempfile.TemporaryDirectory() as art2:
+                _, _, pre_e = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art2, "lastUserInput": "cota tá acabando: " + t2_prompt, "invocationNum": 1},
+                )
+                msg_e = pre_e["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[ECO_MODE|ON]", msg_e)
+                self.assertIn("parallel flash_lite/flash subagent cubicles", msg_e)
+                self.assertIn("DELEGATE|pace=eco|", msg_e)
+
+            with tempfile.TemporaryDirectory() as art3:
+                _, _, pre_n = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art3, "lastUserInput": "modo normal, passo a passo: " + t2_prompt, "invocationNum": 1},
+                )
+                msg_n = pre_n["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("DELEGATE|pace=normal|", msg_n)
+
+        # 3) SessionStart zero-quota global->embedded auto-sync + automatic host PROJECT_HISTORY.md entry
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "host_app"
+            emb = repo / ".agents" / "plugins" / "dynamic-fractal-planner"
+            glob = root / ".gemini" / "config" / "plugins" / "dynamic-fractal-planner"
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (emb / ".agents" / "docs").mkdir(parents=True)
+            glob.mkdir(parents=True)
+
+            (repo / "package.json").write_text('{"name":"host-app"}\n', encoding="utf-8")
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "auto", "plugin_version": "2.12.0", "plugin_evolution": {"enabled": True, "auto_sync_higher_version": True}}),
+                encoding="utf-8",
+            )
+            (repo / ".agents" / "docs" / "PROJECT_HISTORY.md").write_text(
+                "# Project History (`PROJECT_HISTORY.md`)\n\n## 3. Version History (Newest First)\n- `v1.0` initial\n",
+                encoding="utf-8",
+            )
+            (emb / "plugin.json").write_text(json.dumps({"name": "dynamic-fractal-planner", "version": "2.12.0"}), encoding="utf-8")
+            (glob / "plugin.json").write_text(json.dumps({"name": "dynamic-fractal-planner", "version": "2.15.0"}), encoding="utf-8")
+            (glob / "CHANGELOG.md").write_text(
+                "# Plugin History\n\n- 2026-11-24|v2.15.0|turbo/eco/normal parallel cubicles & zero-quota sync\n",
+                encoding="utf-8",
+            )
+            (glob / "marker.txt").write_text("from-2.15.0\n", encoding="utf-8")
+
+            with tempfile.TemporaryDirectory() as art:
+                # Test direct sync_plugin_versions global->embedded + host PROJECT_HISTORY auto-entry
+                res = self_evolve.sync_plugin_versions(repo, global_dir=glob, apply=True)
+                self.assertEqual(res["direction"], "global->embedded")
+                self.assertTrue(res["applied"])
+                self.assertEqual(json.loads((emb / "plugin.json").read_text(encoding="utf-8"))["version"], "2.15.0")
+                self.assertEqual((emb / "marker.txt").read_text(encoding="utf-8"), "from-2.15.0\n")
+                hist_txt = (repo / ".agents" / "docs" / "PROJECT_HISTORY.md").read_text(encoding="utf-8")
+                self.assertIn("Plugin v2.15.0 [x]", hist_txt)
+                self.assertIn("turbo/eco/normal", hist_txt)
+
+                # Reset embedded to 2.12.0 and test SessionStart zero-quota auto-sync via GEMINI_HOME
+                (emb / "plugin.json").write_text(json.dumps({"name": "dynamic-fractal-planner", "version": "2.12.0"}), encoding="utf-8")
+                (emb / "marker.txt").unlink()
+                _, _, ss = run_hook(
+                    "planner_session_start.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art},
+                    env_extra={"GEMINI_HOME": str(root / ".gemini")},
+                )
+                ss_msg = ss["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("PLUGIN_SYNCED|global->embedded|v2.12.0->v2.15.0", ss_msg)
+                self.assertEqual(json.loads((emb / "plugin.json").read_text(encoding="utf-8"))["version"], "2.15.0")
+
+        # 4) check_plugin_sync_parity flags missing plugin PROJECT_HISTORY.md entry independently of EXTERNAL_AI_SYNC.md
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            plug = repo / ".agents" / "plugins" / "dynamic-fractal-planner"
+            (plug / ".agents" / "docs").mkdir(parents=True)
+            (plug / "plugin.json").write_text(json.dumps({"version": "2.15.0"}), encoding="utf-8")
+            (plug / ".agents" / "docs" / "EXTERNAL_AI_SYNC.md").write_text("### 2026-11-24 | Plugin v2.15.0\n", encoding="utf-8")
+            (plug / ".agents" / "docs" / "PROJECT_HISTORY.md").write_text("## 3. Version History\n- 2026-11-23|v2.11.0|old\n", encoding="utf-8")
+            w_miss: list[str] = []
+            verify_universal.check_plugin_sync_parity(
+                repo,
+                [".agents/plugins/dynamic-fractal-planner/plugin.json", ".agents/plugins/dynamic-fractal-planner/.agents/docs/EXTERNAL_AI_SYNC.md"],
+                w_miss,
+                scan_all=False,
+            )
+            self.assertTrue(any("PROJECT_HISTORY.md" in w for w in w_miss), w_miss)
+            (plug / ".agents" / "docs" / "PROJECT_HISTORY.md").write_text("## 3. Version History\n- 2026-11-24|v2.15.0|new\n", encoding="utf-8")
+            w_ok: list[str] = []
+            verify_universal.check_plugin_sync_parity(
+                repo,
+                [".agents/plugins/dynamic-fractal-planner/plugin.json", ".agents/plugins/dynamic-fractal-planner/.agents/docs/EXTERNAL_AI_SYNC.md", ".agents/plugins/dynamic-fractal-planner/.agents/docs/PROJECT_HISTORY.md"],
+                w_ok,
+                scan_all=False,
+            )
+            self.assertEqual(w_ok, [])
+
+
+class TestV216SubSubagentTiering(unittest.TestCase):
+    """Tests for v2.16.0 configurable delegation.sub_subagent & Google medium/low tiering."""
+
+    def test_v216_schema_sub_subagent_compat_and_normalization(self) -> None:
+        v4 = json.loads((FIXTURES_DIR / "profile_v4_cavern.json").read_text(encoding="utf-8"))
+        m4, ver4, w4 = schema_migrations.migrate_profile(v4)
+        self.assertEqual(ver4, 5)
+        self.assertEqual(w4, [])
+        expected_sub = {
+            "allow_nesting": True,
+            "default_model": "flash_lite",
+            "swarm_medium_model": "gemini-4-hydrogen-medium",
+            "allow_medium_tier": True,
+        }
+        self.assertEqual(m4["delegation"]["sub_subagent"], expected_sub)
+
+        v5_partial = {
+            "schema_version": 5,
+            "planner_mode": "lean",
+            "delegation": {"sub_subagent": {"allow_medium_tier": False}},
+        }
+        resolved = schema_migrations.resolve_delegation_config(v5_partial)
+        self.assertTrue(resolved["sub_subagent"]["allow_nesting"])
+        self.assertEqual(resolved["sub_subagent"]["default_model"], "flash_lite")
+        self.assertEqual(resolved["sub_subagent"]["swarm_medium_model"], "gemini-4-hydrogen-medium")
+        self.assertFalse(resolved["sub_subagent"]["allow_medium_tier"])
+
+    def test_v216_guard_nested_sub_subagent_and_swarm_medium_low(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            (repo / ".agents").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean"}),
+                encoding="utf-8",
+            )
+
+            def guard(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+                rc, err, parsed = run_hook(
+                    "planner_guard_delegation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art,
+                        "toolCall": {"name": tool_name, "args": args},
+                    },
+                )
+                self.assertEqual(rc, 0, err)
+                return parsed
+
+            # Nested sub-subagent flash_lite & flash allowed
+            for model in ("flash_lite", "flash"):
+                res = guard(
+                    "invoke_subagent",
+                    {"TypeName": "self", "Role": "Nested Sub-Subagent Worker", "Prompt": "spawn nested sub-subagent slice", "Model": model},
+                )
+                self.assertEqual(res["decision"], "allow", f"{model}: {res}")
+
+            # Swarm Google-only medium/low tier allowed for non-complex slices when allow_medium_tier=true
+            for sw_m in ("gemini-4-hydrogen-medium", "gemini-2.5-flash-medium", "gemini-4-hydrogen-low"):
+                res_add = guard("swarm", {"action": "add", "name": "leaf1", "model": sw_m, "brief": "non-complex bulk grep slice"})
+                self.assertEqual(res_add["decision"], "allow", f"{sw_m}: {res_add}")
+                res_mod = guard("swarm", {"action": "model", "name": "leaf1", "model": sw_m})
+                self.assertEqual(res_mod["decision"], "allow", f"{sw_m}: {res_mod}")
+
+            # Strict block on non-Google models remains enforced
+            for bad in ("claude-3-7-sonnet", "anthropic/haiku", "gpt-4o", "openai/o3-mini", "chatgpt-4o-latest", "o4"):
+                self.assertEqual(
+                    guard("invoke_subagent", {"TypeName": "self", "Role": "Sub-Subagent", "Prompt": "check", "Model": bad})["decision"],
+                    "deny",
+                    bad,
+                )
+                self.assertEqual(
+                    guard("swarm", {"action": "add", "name": "w1", "model": bad, "brief": "slice"})["decision"],
+                    "deny",
+                    bad,
+                )
+
+            # allow_medium_tier=false blocks medium on non-complex swarm slices while allowing low/flash_lite
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean", "delegation": {"sub_subagent": {"allow_medium_tier": False}}}),
+                encoding="utf-8",
+            )
+            deny_med = guard("swarm", {"action": "add", "name": "w1", "model": "gemini-4-hydrogen-medium", "brief": "simple file scan"})
+            self.assertEqual(deny_med["decision"], "deny")
+            self.assertIn("allow_medium_tier=false", deny_med["reason"])
+            self.assertEqual(
+                guard("swarm", {"action": "add", "name": "w1", "model": "gemini-4-hydrogen-low", "brief": "simple file scan"})["decision"],
+                "allow",
+            )
+
+            # allow_nesting=false blocks nested sub-subagent marker
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean", "delegation": {"sub_subagent": {"allow_nesting": False}}}),
+                encoding="utf-8",
+            )
+            deny_nest = guard(
+                "invoke_subagent",
+                {"TypeName": "self", "Role": "Nested Sub-Subagent", "Prompt": "run nested subagent", "Model": "flash_lite"},
+            )
+            self.assertEqual(deny_nest["decision"], "deny")
+            self.assertIn("allow_nesting=false", deny_nest["reason"])
+
+    def test_v216_pre_invocation_delegate_nesting_cue_and_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean"}),
+                encoding="utf-8",
+            )
+            prompt = "modo normal: 1. Refactor state machine\n2. Add unit tests\n3. Update docs"
+            with tempfile.TemporaryDirectory() as art1:
+                _, _, pre1 = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art1, "lastUserInput": prompt, "invocationNum": 1},
+                )
+                msg1 = pre1["injectSteps"][0]["systemMessage"]["systemMessage"]
+                del_lines = [ln for ln in msg1.splitlines() if ln.startswith("DELEGATE|")]
+                self.assertEqual(len(del_lines), 1, msg1)
+                self.assertIn("sub-sub:flash_lite+swarm-med/low", del_lines[0])
+                self.assertLessEqual(len(del_lines[0]), 200, del_lines[0])
+
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean", "delegation": {"sub_subagent": {"allow_nesting": False}}}),
+                encoding="utf-8",
+            )
+            with tempfile.TemporaryDirectory() as art2:
+                _, _, pre2 = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art2, "lastUserInput": prompt, "invocationNum": 1},
+                )
+                msg2 = pre2["injectSteps"][0]["systemMessage"]["systemMessage"]
+                del_lines2 = [ln for ln in msg2.splitlines() if ln.startswith("DELEGATE|")]
+                self.assertEqual(len(del_lines2), 1, msg2)
+                self.assertNotIn("sub-sub:", del_lines2[0])
+                self.assertLessEqual(len(del_lines2[0]), 200, del_lines2[0])
 
 
 def _stamp_plugin_tests_passed() -> None:

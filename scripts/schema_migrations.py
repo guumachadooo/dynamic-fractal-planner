@@ -60,6 +60,12 @@ DEFAULT_DELEGATION_CONFIG: dict[str, Any] = {
         "o1-", "o3-", "o4-", "codex",
     ],
     "sequential_proot_ops": ["dotnet_build", "heavy_tests", "git_push"],
+    "sub_subagent": {
+        "allow_nesting": True,
+        "default_model": "flash_lite",
+        "swarm_medium_model": "gemini-4-hydrogen-medium",
+        "allow_medium_tier": True,
+    },
 }
 
 DEFAULT_BLUEPRINT_CONFIG: dict[str, Any] = {
@@ -82,8 +88,10 @@ def resolve_delegation_config(profile: dict[str, Any] | None = None) -> dict[str
         if val is None:
             continue
         if isinstance(merged.get(key), dict) and isinstance(val, dict):
-            sub = dict(merged[key])
-            sub.update(val)
+            sub = copy.deepcopy(merged[key])
+            for sub_k, sub_v in val.items():
+                if sub_v is not None:
+                    sub[sub_k] = copy.deepcopy(sub_v)
             merged[key] = sub
         else:
             merged[key] = copy.deepcopy(val)

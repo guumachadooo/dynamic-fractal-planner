@@ -283,9 +283,16 @@ def main() -> None:
                                 f"PLUGIN_VERSION_SKEW|embedded=v{chk.get('embedded_version')}>global=v{chk.get('global_version')}|ACT:run `plan_tool.py evolve sync-plugin --apply`"
                             )
                     elif chk.get("direction") == "global->embedded":
-                        lines.append(
-                            f"PLUGIN_UPGRADE_AVAILABLE|global=v{chk.get('global_version')}>embedded=v{chk.get('embedded_version')}|ACT:run `plan_tool.py evolve sync-plugin --apply`"
-                        )
+                        if auto_sync:
+                            done = self_evolve.sync_plugin_versions(repo, plugin_rel=plug_rel, apply=True)
+                            auto_upgrade_workspace(repo)
+                            lines.append(
+                                f"PLUGIN_SYNCED|global->embedded|v{chk.get('embedded_version') or '0.0.0'}->v{done.get('embedded_version')}"
+                            )
+                        else:
+                            lines.append(
+                                f"PLUGIN_UPGRADE_AVAILABLE|global=v{chk.get('global_version')}>embedded=v{chk.get('embedded_version')}|ACT:run `plan_tool.py evolve sync-plugin --apply`"
+                            )
                 except Exception:
                     pass
 
