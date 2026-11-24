@@ -37,6 +37,7 @@ for p in (str(SCRIPTS_DIR), str(HOOKS_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+import blueprint_engine  # noqa: E402
 import complexity_triage  # noqa: E402
 import log_digest  # noqa: E402
 import model_mode_cache  # noqa: E402
@@ -221,8 +222,8 @@ class TestSchemaMigrations(unittest.TestCase):
         migrated, ver, warnings = schema_migrations.migrate_profile(raw)
 
         self.assertEqual(raw, snapshot, "migrate_profile must never mutate input dict")
-        self.assertEqual(ver, 4)
-        self.assertEqual(migrated["schema_version"], 4)
+        self.assertEqual(ver, 5)
+        self.assertEqual(migrated["schema_version"], 5)
         self.assertEqual(warnings, [])
         self.assertEqual(migrated["custom_owner_note"], "preserve-me-losslessly")
         self.assertEqual(migrated["planner_mode"], "lean")
@@ -230,6 +231,9 @@ class TestSchemaMigrations(unittest.TestCase):
         self.assertEqual(migrated["secret_guard"], {"enabled": True})
         self.assertEqual(migrated["blast_radius"], {"simple_tier_max_files": 3})
         self.assertEqual(migrated["code_weight_limits"], {"enabled": True, "warn_lines": 1500, "warn_lines_all": 2000})
+        self.assertTrue(migrated["delegation"]["enabled"])
+        self.assertTrue(migrated["delegation"]["enforce_google_only"])
+        self.assertEqual(migrated["delegation"]["model_tiers"], {"trivial": "flash_lite", "routine": "flash", "complex": "pro"})
 
         cmds = {r.get("label"): r for r in (migrated.get("build_rules") or [])}
         self.assertIn("verify_command", cmds)
@@ -243,7 +247,7 @@ class TestSchemaMigrations(unittest.TestCase):
         v1 = json.loads((FIXTURES_DIR / "profile_v1_cavern.json").read_text(encoding="utf-8"))
         self.assertNotIn("schema_version", v1)
         m1, ver1, w1 = schema_migrations.migrate_profile(v1)
-        self.assertEqual(ver1, 4)
+        self.assertEqual(ver1, 5)
         self.assertEqual(w1, [])
         self.assertEqual(m1["build_rules"], v1["build_rules"])
         self.assertEqual(m1["file_guards"], v1["file_guards"])
@@ -253,9 +257,9 @@ class TestSchemaMigrations(unittest.TestCase):
         v2 = json.loads((FIXTURES_DIR / "profile_v2_cavern.json").read_text(encoding="utf-8"))
         self.assertEqual(v2.get("schema_version"), 2)
         m2, ver2, w2 = schema_migrations.migrate_profile(v2)
-        self.assertEqual(ver2, 4)
+        self.assertEqual(ver2, 5)
         self.assertEqual(w2, [])
-        self.assertEqual(m2["schema_version"], 4)
+        self.assertEqual(m2["schema_version"], 5)
         self.assertEqual(m2["planner_mode"], "lean")
         self.assertEqual(m2["build_rules"], v2["build_rules"])
         self.assertEqual(m2["command_guards"], v2["command_guards"])
@@ -264,12 +268,23 @@ class TestSchemaMigrations(unittest.TestCase):
         v3 = json.loads((FIXTURES_DIR / "profile_v3_cavern.json").read_text(encoding="utf-8"))
         self.assertEqual(v3.get("schema_version"), 3)
         m3, ver3, w3 = schema_migrations.migrate_profile(v3)
-        self.assertEqual(ver3, 4)
+        self.assertEqual(ver3, 5)
         self.assertEqual(w3, [])
-        self.assertEqual(m3["schema_version"], 4)
+        self.assertEqual(m3["schema_version"], 5)
         self.assertEqual(m3["planner_mode"], "auto")
         self.assertEqual(m3["diff_rules"], v3["diff_rules"])
         self.assertTrue(m3["code_weight_limits"]["enabled"])
+
+        v4 = json.loads((FIXTURES_DIR / "profile_v4_cavern.json").read_text(encoding="utf-8"))
+        self.assertEqual(v4.get("schema_version"), 4)
+        m4, ver4, w4 = schema_migrations.migrate_profile(v4)
+        self.assertEqual(ver4, 5)
+        self.assertEqual(w4, [])
+        self.assertEqual(m4["schema_version"], 5)
+        self.assertEqual(m4["code_weight_limits"], v4["code_weight_limits"])
+        self.assertEqual(m4["file_budget_limits"], v4["file_budget_limits"])
+        self.assertTrue(m4["delegation"]["enabled"])
+        self.assertTrue(m4["delegation"]["enforce_google_only"])
 
     def test_synthetic_chain_v1_to_v10(self) -> None:
         def make_hop(src_v: int):
@@ -315,14 +330,14 @@ class TestSchemaMigrations(unittest.TestCase):
             prof_file.write_text(v1_text, encoding="utf-8")
 
             loaded = planner_state.load_project_profile(repo)
-            self.assertEqual(loaded["schema_version"], 4)
+            self.assertEqual(loaded["schema_version"], 5)
             self.assertEqual(prof_file.read_text(encoding="utf-8"), v1_text)
 
             res = run_script("plan_tool.py", ["--workspace", str(repo), "migrate"])
             self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
             self.assertTrue((agents_dir / "planner_profile.json.bak").is_file())
             disk_after = json.loads(prof_file.read_text(encoding="utf-8"))
-            self.assertEqual(disk_after["schema_version"], 4)
+            self.assertEqual(disk_after["schema_version"], 5)
             self.assertEqual(disk_after["planner_mode"], "lean")
 
             res2 = run_script("plan_tool.py", ["--workspace", str(repo), "migrate"])
@@ -356,8 +371,9 @@ class TestAutoBootstrapAndHeadings(unittest.TestCase):
             (r / "tsconfig.json").write_text("{}", encoding="utf-8")
             planner_state.bootstrap_workspace(r)
             prof = json.loads((r / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
-            self.assertEqual(prof["schema_version"], 4)
+            self.assertEqual(prof["schema_version"], 5)
             self.assertEqual(prof["planner_mode"], "lean")
+            self.assertTrue(prof["delegation"]["enabled"])
             cmds = [x["command"] for x in prof["build_rules"]]
             self.assertIn("npx tsc --noEmit", cmds)
             self.assertIn("npm run lint", cmds)
@@ -399,7 +415,7 @@ class TestAutoBootstrapAndHeadings(unittest.TestCase):
             msg = parsed["injectSteps"][0]["systemMessage"]["systemMessage"]
             self.assertIn("Auto-initialized project docs/profile", msg)
             prof = json.loads((repo / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
-            self.assertEqual(prof["schema_version"], 4)
+            self.assertEqual(prof["schema_version"], 5)
 
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
             empty_dir = Path(td)
@@ -1257,8 +1273,9 @@ class TestCavernV1V2V3Parity(unittest.TestCase):
             "run: dotnet publish -p:ApplicationDisplayVersion=2.8.${{ github.run_number }}\n",
             encoding="utf-8",
         )
+        expected_sdk = "35" if any("35" in (g.get("must_contain_regex") or "") for g in (profile_data.get("file_guards") or [])) else "28"
         (repo / "CavernSamples" / "CavernizeAndroid" / "Properties" / "AndroidManifest.xml").write_text(
-            '<manifest><uses-sdk android:targetSdkVersion="28" /></manifest>\n',
+            f'<manifest><uses-sdk android:targetSdkVersion="{expected_sdk}" /></manifest>\n',
             encoding="utf-8",
         )
         (repo / "CavernSamples" / "CavernizeAndroid" / "Language" / "AndroidStrings.cs").write_text(
@@ -1322,11 +1339,12 @@ class TestCavernV1V2V3Parity(unittest.TestCase):
                 self.assertEqual(fg_gate.get("decision"), "deny", label)
                 self.assertIn("PLAN GATE", fg_gate.get("reason", ""))
 
-            # 5. File guard: targetSdkVersion="28"
+            # 5. File guard: targetSdkVersion mismatch
+            expected_sdk = "35" if any("35" in (g.get("must_contain_regex") or "") for g in (profile_data.get("file_guards") or [])) else "28"
             manifest = str(repo / "CavernSamples" / "CavernizeAndroid" / "Properties" / "AndroidManifest.xml")
             _, _, fg_bad = run_hook("planner_guard_files.py", {
                 "workspacePaths": [str(repo)], "artifactDirectoryPath": art,
-                "toolCall": {"name": "edit_file", "args": {"Path": manifest, "Target": 'android:targetSdkVersion="28"', "Replacement": 'android:targetSdkVersion="34"'}},
+                "toolCall": {"name": "edit_file", "args": {"Path": manifest, "Target": f'android:targetSdkVersion="{expected_sdk}"', "Replacement": 'android:targetSdkVersion="34"'}},
             })
             self.assertEqual(fg_bad.get("decision"), "force_ask", label)
 
@@ -1368,9 +1386,11 @@ class TestCavernV1V2V3Parity(unittest.TestCase):
             self.assertIn("UNIVERSAL VERIFY PASS", v_pass.stdout)
 
     def test_cavern_v1_v2_and_live_parity(self) -> None:
-        if not FAST_MODE:  # v1->v3 migration parity already covered by TestSchemaMigrations fixtures
+        if not FAST_MODE:  # v1->v5 migration parity already covered by TestSchemaMigrations fixtures
             v1_cavern = json.loads((FIXTURES_DIR / "profile_v1_cavern.json").read_text(encoding="utf-8"))
             self._assert_parity_for_profile("v1_cavern_fixture", v1_cavern)
+            v4_cavern = json.loads((FIXTURES_DIR / "profile_v4_cavern.json").read_text(encoding="utf-8"))
+            self._assert_parity_for_profile("v4_cavern_fixture", v4_cavern)
 
         v2_cavern = json.loads((FIXTURES_DIR / "profile_v2_cavern.json").read_text(encoding="utf-8"))
         self.assertEqual(v2_cavern.get("schema_version"), 2)
@@ -1378,7 +1398,7 @@ class TestCavernV1V2V3Parity(unittest.TestCase):
 
         if self.LIVE_CAVERN_PROFILE.is_file():
             live_cavern = json.loads(self.LIVE_CAVERN_PROFILE.read_text(encoding="utf-8"))
-            self.assertIn(live_cavern.get("schema_version"), (2, 3, 4))
+            self.assertIn(live_cavern.get("schema_version"), (2, 3, 4, 5))
             self._assert_parity_for_profile(f"live_v{live_cavern.get('schema_version')}_cavern", live_cavern)
 
 
@@ -2101,7 +2121,7 @@ class TestSymbolicTelegraphicStyle(unittest.TestCase):
             self.assertNotIn("DOCS_AUTO_MIGRATE", ss_msg)
 
             upgraded_prof = json.loads(prof_file.read_text(encoding="utf-8"))
-            self.assertEqual(upgraded_prof["schema_version"], 4)
+            self.assertEqual(upgraded_prof["schema_version"], 5)
             self.assertEqual(upgraded_prof["docs_format_version"], 1)
             self.assertEqual(upgraded_prof["custom_owner_note"], "preserve-me-losslessly")
 
@@ -2146,7 +2166,7 @@ class TestSymbolicTelegraphicStyle(unittest.TestCase):
             self.assertNotIn("EXTRA_REQUESTS.md", ss_msg.split("DOCS_AUTO_MIGRATE", 1)[1].split("ACT:", 1)[0])
 
             prof_after_ss = json.loads(prof_file.read_text(encoding="utf-8"))
-            self.assertEqual(prof_after_ss["schema_version"], 4)
+            self.assertEqual(prof_after_ss["schema_version"], 5)
             self.assertEqual(prof_after_ss.get("docs_format_version", 0), 0)
             self.assertEqual((docs_dir / "PROJECT_HISTORY.md").read_text(encoding="utf-8"), pop_hist)
             self.assertEqual((docs_dir / "SAVED_IDEAS.md").read_text(encoding="utf-8"), pop_ideas)
@@ -2573,7 +2593,7 @@ class TestAdaptiveTriageAndContinuity(unittest.TestCase):
             repo = Path(td)
             init_git_repo(repo)
             (repo / "src").mkdir()
-            env_diag = {"PLANNER_DIAGNOSTICS_DIR": diag_dir}
+            env_diag = {"PLANNER_DIAGNOSTICS_DIR": diag_dir, "PLANNER_SLOW_HOOK_MS": "10000"}
             hook_file = Path(art) / "scratch" / ".hook_state.json"
 
             # Turn 1: Large Tier 3 proposal (0 edits)
@@ -3570,11 +3590,11 @@ class TestV260UniversalEfficiencyAndSelfEvolution(unittest.TestCase):
                 encoding="utf-8",
             )
             up = planner_state.auto_upgrade_workspace(repo)
-            self.assertEqual(up["profile_migrated"], (3, 4))
+            self.assertEqual(up["profile_migrated"], (3, 5))
             self.assertEqual(up["plugin_upgraded"][0], "2.5.1")
             self.assertEqual(up["plugin_upgraded"][1], planner_state.read_plugin_version())
             disk = json.loads(prof_p.read_text(encoding="utf-8"))
-            self.assertEqual(disk["schema_version"], 4)
+            self.assertEqual(disk["schema_version"], 5)
             self.assertEqual(disk["plugin_version"], planner_state.read_plugin_version())
 
             # Higher workspace plugin_version must NEVER downgrade
@@ -3740,6 +3760,859 @@ class TestV260UniversalEfficiencyAndSelfEvolution(unittest.TestCase):
             )
             self.assertTrue(any("6/999" in f for f in f3), f3)
             self.assertEqual(w3, [])
+
+    def test_v211_host_context_matrix_baton_and_auto_classifier(self) -> None:
+        import host_context  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            (repo / ".agents" / "scripts").mkdir(parents=True)
+            (repo / ".agents" / "preview").mkdir(parents=True)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+
+            # Isolated empty probe paths so host OS (/sdcard, /root/.dotnet) never bleeds into unit checks
+            empty_probes = {
+                "termux_dir": repo / ".no_termux",
+                "sdcard_dir": repo / ".no_sdcard",
+                "local_dotnet_bin": repo / ".no_dotnet",
+                "gh_hosts_file": repo / ".no_gh",
+                "omni_local_config": repo / ".no_omni",
+                "runtime_env_bridge": repo / ".no_rt_env",
+            }
+
+            # 1. Host detection across all 5 host profiles
+            (repo / ".agents" / "preview" / "server.mjs").write_text("// preview\n", encoding="utf-8")
+            h_cloud = host_context.detect_host(repo, env={}, probe_paths=empty_probes)
+            self.assertEqual(h_cloud["host_id"], "ai-studio-cloud")
+            self.assertTrue(h_cloud["is_cloud"])
+
+            h_ci = host_context.detect_host(repo, env={"GITHUB_ACTIONS": "true"}, probe_paths=empty_probes)
+            self.assertEqual(h_ci["host_id"], "ci-runner")
+
+            h_ag_local = host_context.detect_host(repo, env={"ANTIGRAVITY_AGENT": "1"}, probe_paths=empty_probes)
+            self.assertEqual(h_ag_local["host_id"], "antigravity-local")
+            self.assertTrue(h_ag_local["is_antigravity"])
+
+            termux_probes = dict(empty_probes)
+            termux_probes["termux_dir"] = repo / "fake_termux"
+            termux_probes["termux_dir"].mkdir()
+            h_ag_termux = host_context.detect_host(repo, env={"ANTIGRAVITY_AGENT": "1"}, probe_paths=termux_probes)
+            self.assertEqual(h_ag_termux["host_id"], "antigravity-termux")
+
+            (repo / ".git").mkdir()
+            h_ide = host_context.detect_host(repo, env={}, probe_paths=empty_probes)
+            self.assertEqual(h_ide["host_id"], "local-ide")
+
+            # 2. Matrix audit catches unclassified new script & stale exact path
+            (repo / ".agents" / "scripts" / "check_ok.py").write_text("# universal\n", encoding="utf-8")
+            (repo / ".agents" / "scripts" / "cloud_watcher.py").write_text(
+                "# /tmp/.cavern_runtime_env.json watcher\n", encoding="utf-8"
+            )
+            (repo / ".agents" / "host_matrix.json").write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "strict_coverage": False,
+                        "hosts": {
+                            "antigravity-termux": {"ignore_cloud_env_alerts": True, "boot_steps": ["host-boot"]},
+                            "ai-studio-cloud": {"ignore_cloud_env_alerts": False, "boot_steps": ["recover"]},
+                        },
+                        "scan_globs": [".agents/scripts/*.py"],
+                        "ignore_globs": ["**/test_*.py"],
+                        "entries": [
+                            {
+                                "id": "check-ok",
+                                "category": "universal",
+                                "paths": [".agents/scripts/check_ok.py", ".agents/scripts/missing_gone.py"],
+                                "purpose": "Universal check",
+                                "per_host": {"antigravity-termux": {"mode": "active"}},
+                            }
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            aud = host_context.audit_host_matrix(repo)
+            self.assertFalse(aud["ok"])
+            self.assertEqual(aud["stale"], [".agents/scripts/missing_gone.py"])
+            self.assertEqual(len(aud["unclassified"]), 1)
+            self.assertEqual(aud["unclassified"][0]["path"], ".agents/scripts/cloud_watcher.py")
+            self.assertEqual(aud["unclassified"][0]["suggested_category"], "ai-studio-only")
+
+            # verify_universal surfaces unclassified + stale warnings
+            vf_fails: list[str] = []
+            vf_warns: list[str] = []
+            verify_universal.check_host_matrix_coverage(repo, vf_fails, vf_warns)
+            self.assertEqual(vf_fails, [])
+            self.assertTrue(any("missing_gone.py" in w for w in vf_warns), vf_warns)
+            self.assertTrue(any("cloud_watcher.py" in w and "host-classify" in w for w in vf_warns), vf_warns)
+
+            # 3. host-classify --apply registers tool & clears unclassified
+            cls_res = run_script(
+                "plan_tool.py",
+                ["--workspace", str(repo), "host-classify", ".agents/scripts/cloud_watcher.py", "--apply", "--json"],
+                cwd=repo,
+            )
+            self.assertEqual(cls_res.returncode, 0, cls_res.stderr)
+            cls_json = json.loads(cls_res.stdout)
+            self.assertTrue(cls_json["applied"])
+            self.assertEqual(cls_json["category"], "ai-studio-only")
+            aud2 = host_context.audit_host_matrix(repo)
+            self.assertEqual(aud2["unclassified"], [])
+
+            # 4. handoff auto-stamps host= & preserves ROADMAP| / WAVE| / ARCHIVE|
+            handoff_p = repo / ".agents" / "docs" / "HANDOFF.md"
+            handoff_p.write_text(
+                "# Session Handoff\n"
+                "ts=1700000000|branch=master|head=abc1234|dirty=0|host=ai-studio-cloud|fmt=1\n"
+                "ROADMAP|.agents/docs/PLAN.md\n"
+                "WAVE|W48 [x]\n"
+                "ARCHIVE|.agents/docs/archive/{A,B}.md (!read_full)\n",
+                encoding="utf-8",
+            )
+            ho_res = run_script(
+                "plan_tool.py",
+                ["--workspace", str(repo), "handoff", "--summary", "Shipped host matrix", "--next", "Start W49"],
+                cwd=repo,
+                env_extra={"PLANNER_HOST_OVERRIDE": "antigravity-termux"},
+            )
+            self.assertEqual(ho_res.returncode, 0, ho_res.stderr)
+            ho_txt = handoff_p.read_text(encoding="utf-8")
+            self.assertIn("host=antigravity-termux", ho_txt)
+            self.assertIn("ROADMAP|.agents/docs/PLAN.md", ho_txt)
+            self.assertIn("WAVE|W48 [x]", ho_txt)
+            self.assertIn("ARCHIVE|.agents/docs/archive/{A,B}.md", ho_txt)
+
+            # 5. BATON_SWITCH & BRIDGE_AHEAD detection
+            bridge_ho = repo / "LATEST_HANDOFF.md"
+            bridge_ho.write_text(
+                "# AI Studio — live\n- **UTC**: `2099-01-01T00:00:00Z`\nLive AI Studio edit\n",
+                encoding="utf-8",
+            )
+            now_t = time.time()
+            os.utime(handoff_p, (now_t - 120, now_t - 120))
+            os.utime(bridge_ho, (now_t, now_t))
+            baton = host_context.detect_baton_state(repo, "ai-studio-cloud", bridge_handoff_path=bridge_ho)
+            self.assertTrue(baton["switched"])
+            self.assertEqual(baton["from_host"], "antigravity-termux")
+            self.assertEqual(baton["to_host"], "ai-studio-cloud")
+            self.assertTrue(baton["bridge_ahead"])
+
+            ss_lines = host_context.format_session_start_lines(
+                repo, env={"PLANNER_HOST_OVERRIDE": "ai-studio-cloud"}, bridge_handoff_path=bridge_ho, probe_paths=empty_probes
+            )
+            self.assertTrue(any(ln.startswith("HOST|") for ln in ss_lines), ss_lines)
+            self.assertTrue(any("BATON_SWITCH|" in ln and "BRIDGE_AHEAD|" in ln for ln in ss_lines), ss_lines)
+
+            # 6. Real Cavern SessionStart char budget (<1800) when host_matrix.json present
+            live_cavern = Path("/root/.gemini/antigravity/scratch/Cavern")
+            if live_cavern.is_dir() and (live_cavern / ".agents" / "host_matrix.json").is_file():
+                rc_ss, err_ss, ss_live = run_hook(
+                    "planner_session_start.py",
+                    {"workspacePaths": [str(live_cavern)], "artifactDirectoryPath": art},
+                )
+                self.assertEqual(rc_ss, 0, err_ss)
+                msg_live = ss_live["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("HOST|", msg_live)
+                self.assertLess(len(msg_live), 1800, f"SessionStart bloat ({len(msg_live)} chars):\n{msg_live}")
+
+
+
+class TestDelegationGuardAndPreInvocation(unittest.TestCase):
+    def _guard(self, repo: Path, art: str, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        rc, err, parsed = run_hook(
+            "planner_guard_delegation.py",
+            {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "toolCall": {"name": tool_name, "args": args},
+            },
+        )
+        self.assertEqual(rc, 0, err)
+        return parsed
+
+    def test_v212_delegation_guard_google_only_and_complexity_routing(self) -> None:
+        hooks_cfg = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))
+        pre_hooks = hooks_cfg["dynamic-fractal-planner"]["PreToolUse"]
+        self.assertTrue(
+            any(
+                h.get("matcher") == "invoke_subagent|swarm|run_workflow"
+                and any("planner_guard_delegation.py" in sub.get("command", "") for sub in h.get("hooks", []))
+                for h in pre_hooks
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            (repo / ".agents").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean"}),
+                encoding="utf-8",
+            )
+
+            # 1) Non-Google/OpenAI/Claude models are denied across invoke_subagent, swarm, run_workflow
+            for bad in ("claude-3-7-sonnet", "claude-opus-4", "gpt-4o", "openai/o3-mini", "o3", "chatgpt-4o-latest", "anthropic/haiku", "codex-mini"):
+                res = self._guard(repo, art, "invoke_subagent", {"TypeName": "research", "Role": "Finder", "Prompt": "find files", "Model": bad})
+                self.assertEqual(res["decision"], "deny", f"{bad}: {res}")
+                self.assertIn("google_only", res["reason"])
+
+                sw = self._guard(repo, art, "swarm", {"action": "add", "name": "w1", "model": bad, "brief": "do work"})
+                self.assertEqual(sw["decision"], "deny", bad)
+                sw_m = self._guard(repo, art, "swarm", {"action": "model", "name": "w1", "model": bad})
+                self.assertEqual(sw_m["decision"], "deny", bad)
+
+            wf_deny = self._guard(
+                repo,
+                art,
+                "run_workflow",
+                {"Description": "fanout", "Script": 'agent("audit", model="claude-3-5-sonnet")'},
+            )
+            self.assertEqual(wf_deny["decision"], "deny")
+            self.assertIn("google_only", wf_deny["reason"])
+            wf_ok = self._guard(
+                repo,
+                art,
+                "run_workflow",
+                {"Description": "fanout", "Script": 'agent("audit", model="gemini-2.5-flash")'},
+            )
+            self.assertEqual(wf_ok["decision"], "allow")
+
+            # 2) Omitted Model & unannotated inherit are denied; exempt image-generator passes
+            omit = self._guard(repo, art, "invoke_subagent", {"TypeName": "research", "Role": "Scout", "Prompt": "check files"})
+            self.assertEqual(omit["decision"], "deny")
+            self.assertIn("explicit_model", omit["reason"])
+
+            inh_bad = self._guard(repo, art, "invoke_subagent", {"TypeName": "self", "Role": "Worker", "Prompt": "edit file", "Model": "inherit"})
+            self.assertEqual(inh_bad["decision"], "deny")
+            inh_ok = self._guard(repo, art, "invoke_subagent", {"TypeName": "self", "Role": "Worker [L3]", "Prompt": "complex refactor", "Model": "inherit"})
+            self.assertEqual(inh_ok["decision"], "allow")
+
+            img_ok = self._guard(repo, art, "invoke_subagent", {"TypeName": "image-generator", "Role": "Icon", "Prompt": "make icon"})
+            self.assertEqual(img_ok["decision"], "allow")
+
+            # 3) Trivial research+pro is denied vs [L3]/dsp allow; flash_lite/flash pass
+            triv_pro = self._guard(repo, art, "invoke_subagent", {"TypeName": "research", "Role": "File Finder", "Prompt": "list files in src", "Model": "pro"})
+            self.assertEqual(triv_pro["decision"], "deny")
+            dsp_pro = self._guard(repo, art, "invoke_subagent", {"TypeName": "research", "Role": "DSP Auditor", "Prompt": "audit kalman dsp math", "Model": "pro"})
+            self.assertEqual(dsp_pro["decision"], "allow")
+            self.assertEqual(
+                self._guard(repo, art, "invoke_subagent", {"TypeName": "research", "Role": "Finder", "Prompt": "grep foo", "Model": "flash_lite"})["decision"],
+                "allow",
+            )
+            self.assertEqual(
+                self._guard(repo, art, "invoke_subagent", {"TypeName": "self", "Role": "Impl", "Prompt": "implement helper", "Model": "flash"})["decision"],
+                "allow",
+            )
+
+            # 4) Swarm add without model denies; explicit gemini-2.5-flash & status allow
+            self.assertEqual(self._guard(repo, art, "swarm", {"action": "add", "name": "w1", "brief": "work"})["decision"], "deny")
+            self.assertEqual(self._guard(repo, art, "swarm", {"action": "add", "name": "w1", "model": "gemini-2.5-flash", "brief": "work"})["decision"], "allow")
+            self.assertEqual(self._guard(repo, art, "swarm", {"action": "status"})["decision"], "allow")
+
+            # 5) delegation.enabled: false bypasses all delegation checks
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean", "delegation": {"enabled": False}}),
+                encoding="utf-8",
+            )
+            self.assertEqual(self._guard(repo, art, "invoke_subagent", {"TypeName": "research", "Role": "R", "Prompt": "p"})["decision"], "allow")
+            self.assertEqual(
+                self._guard(repo, art, "invoke_subagent", {"TypeName": "research", "Role": "R", "Prompt": "p", "Model": "claude-3-5-sonnet"})["decision"],
+                "allow",
+            )
+
+    def test_v212_pre_invocation_delegate_directive(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean"}),
+                encoding="utf-8",
+            )
+            t2_prompt = "1. Refactor playback state machine\n2. Add batch queue unit tests\n3. Update docs"
+
+            # T2 normal & eco_mode both emit DELEGATE|
+            with tempfile.TemporaryDirectory() as art2:
+                _, _, pre2 = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art2, "lastUserInput": t2_prompt, "invocationNum": 1},
+                )
+                msg2 = pre2["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("DELEGATE|", msg2)
+                self.assertIn("!cmd-echo", msg2)
+                self.assertIn("Google-only(L0:flash_lite|L1-2:flash|L3:pro)", msg2)
+                self.assertIn("reply<=20L", msg2)
+
+            with tempfile.TemporaryDirectory() as art3:
+                _, _, pre3 = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art3,
+                        "lastUserInput": "Architect audio dsp filter, api schema, auth pipeline, ui tabs and tests across 5 modules",
+                        "invocationNum": 1,
+                    },
+                )
+                msg3 = pre3["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("DELEGATE|", msg3)
+                self.assertIn("SOTA_PREFLIGHT|", msg3)
+                self.assertLessEqual(len(msg3), 1500)
+
+            with tempfile.TemporaryDirectory() as art_eco:
+                _, _, pre_eco = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art_eco, "lastUserInput": "low quota: " + t2_prompt, "invocationNum": 1},
+                )
+                msg_eco = pre_eco["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("DELEGATE|", msg_eco)
+
+            # T0/T1 trivial prompt omits DELEGATE|
+            with tempfile.TemporaryDirectory() as art0:
+                _, _, pre0 = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art0, "lastUserInput": "fix typo in README.md", "invocationNum": 1},
+                )
+                self.assertEqual(pre0, {})
+
+            # delegation.enabled: false suppresses DELEGATE|
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean", "delegation": {"enabled": False}}),
+                encoding="utf-8",
+            )
+            with tempfile.TemporaryDirectory() as art_off:
+                _, _, pre_off = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art_off, "lastUserInput": t2_prompt, "invocationNum": 1},
+                )
+                msg_off = pre_off["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertNotIn("DELEGATE|", msg_off)
+
+
+class TestSotaBlueprintEngine(unittest.TestCase):
+    """Tests for v2.13.0 Universal 6-Stage SOTA Blueprint Engine & Popperian Linter."""
+
+    @staticmethod
+    def _valid_blueprint_text(status: str = "SEED-v1", h2_override: str | None = None, body_override: dict[str, str] | None = None) -> str:
+        sections = {
+            "meta": f"BP_META|id=BP_OMNISCIENT_SPATIAL|domain_vec=dsp-hw:1.00,ai-ml:0.85,ux-product:0.45|door=1-way|tier=T3|status={status}|h1_wave=W0",
+            "value": "VALUE|Convert stereo songs into beat-locked 3D Atmos/IAMF trajectories achieving >=4.2/5 MOS listener preference.",
+            "wardley": "WARDLEY|Custom Trajectory Governor + Lyric Director (Genesis) over existing ONNX stems & ADM/IAMF writers (Product/OSS).",
+            "ng1": "NON_GOAL|Zero per-song neural retraining on user phone.",
+            "ng2": "NON_GOAL|Never pan Lead Vocals >15 deg or rotate LFE sub-bass.",
+            "sota": "SOTA_SOURCES|Audio-driven beat/onset trackers + BS.2076 audioBlockFormat + constrained LLM JSON choreography.",
+            "triz": "TRIZ_CONTRADICTION|Rich 3D motion vs vocal clarity/motion-sickness -> Dynamics + Cushion-in-advance (Governor clamps).",
+            "c1": "CANDIDATE|A|Pure DSP LFO Orbit|Zero AI, deterministic beat-synchronous panning; misses lyric semantics.",
+            "r1": "REJECTED_BECAUSE|A|Fails lyric cues ('left/right') and repeats generic 8D motion yielding <2.8 MOS.",
+            "c2": "CANDIDATE|B|Unconstrained Video/LLM Frame Predictor|Predicts raw XYZ per 20ms frame directly from LLM.",
+            "r2": "REJECTED_BECAUSE|B|Exceeds 50 ms frame jitter budget and rotates Lead Vocal/Kick causing >25 deg phase smear.",
+            "win": "WINNER|3-Plane Hybrid: Offline Beat/Stem Forensics + Compact INT4 JSON Cue Director + Deterministic Spline Governor (<0.3 ms/block).",
+            "pm": "PREMORTEM|T+6mo|Bad external BPM tag or unguarded LLM cue rotates Lead Vocal mid-chorus causing listener fatigue.",
+            "th": "THREAT|Malformed LLM JSON / OOD tempo sweep -> strict schema validator + angular velocity ceiling <=45 deg/s.",
+            "k1": "KILL|R1|Vocal phase smearing|vocal_anchor_err_deg > 15 deg|10 songs eval|Lock Lead Vocal azimuth <= 10 deg.",
+            "k2": "KILL|R2|Mobile OOM/thermal stall|peak_rss_mb > 900 MB|10 min batch|Switch SLM to rule-only semantic cue fallback.",
+            "budget": "BUDGET|latency=<0.5 ms/block|mem=<450 MB|cost=0 USD offline|degraded_floor=DSP-only stem orbits",
+            "planes": "PLANES|offline=stems+beat+SLM JSON cues|rt=0-alloc Catmull-Rom trajectory interpolator|async=section telemetry bus",
+            "q1": "QAS|Q1|Tempo transition 90->140 BPM|On-device offline|Spline locks beat grid|<=15 ms drift|pytest tests/test_traj.py",
+            "q2": "QAS|Q2|Lyric cue 'left, right'|Sync LRC+ADM|Voice/ad-lib sweeps L->R|<=0.1 deg zipper|dotnet test --filter AdmTraj",
+            "spike": "SPIKE|S1|VoI=0.8|Test BS.2076 audioBlockFormat + IAMF decoder parity|ffmpeg + IamfReader roundtrip == 0 errors",
+            "h1": "SLICE|W1|TrajectoryGovernor+BeatMap|stems+LRC->spline keyframes|pytest tests/test_traj.py",
+            "h2": h2_override if h2_override is not None else "STUB|W2|Wire ADM/IAMF block writers & 3D Room X-Ray playback <=1% CPU overhead.",
+            "fit": "FITNESS|CI runs python3 -B .agents/plugins/dynamic-fractal-planner/scripts/plan_tool.py blueprint lint BP_OMNISCIENT_SPATIAL.md --strict",
+            "evo": "EVOLVE_RULE|on(kill_trigger || fitness_fail) -> mark SEED-v1 SUPERSEDED && delta-reenter Stage2-3",
+        }
+        if body_override:
+            sections.update(body_override)
+        return (
+            "# Omniscient Spatial Cortex (`BP_OMNISCIENT_SPATIAL`)\n\n"
+            "> STYLE|lossless symbolic telegraphic EN ONLY.\n\n"
+            f"## 0. Meta & Lineage\n{sections['meta']}\nPARENT_ADR|none\n\n"
+            f"## 1. Value & Non-Goals\n{sections['value']}\n{sections['wardley']}\n{sections['ng1']}\n{sections['ng2']}\n\n"
+            f"## 2. Live SOTA & Blind Morphogenesis\n{sections['sota']}\n{sections['triz']}\n"
+            f"{sections['c1']}\n{sections['r1']}\n{sections['c2']}\n{sections['r2']}\n{sections['win']}\n\n"
+            f"## 3. Cold-Ctx Red-Team, Pre-Mortem & Kill Criteria\n{sections['pm']}\n{sections['th']}\n{sections['k1']}\n{sections['k2']}\n\n"
+            f"## 4. Invariants, Budgets & QAS\n{sections['budget']}\n{sections['planes']}\n{sections['q1']}\n{sections['q2']}\n\n"
+            f"## 5. Epistemic Wave-0 Spikes\n{sections['spike']}\n\n"
+            f"## 6. Rolling-Wave DSM Graph\n### H1 Atomic Slices\n{sections['h1']}\n\n### H2+ Outcome Stubs\n{sections['h2']}\n\n"
+            f"## 7. Fitness Functions & Evolution\n{sections['fit']}\n{sections['evo']}\n"
+        )
+
+    def test_classify_multi_domain_and_topology(self) -> None:
+        c1 = blueprint_engine.classify_blueprint_request(
+            "Build real-time spatial audio DSP + ONNX neural classifier + OneUI 3D screen"
+        )
+        self.assertIn("dsp-hw", c1["active_domains"])
+        self.assertIn("ai-ml", c1["active_domains"])
+        self.assertEqual(c1["risk_tier"], "T3")
+        for lens in c1["active_lenses"].values():
+            self.assertLessEqual(len(lens), 420)
+        self.assertGreaterEqual(len(c1["morph_axes"]), 2)
+        topo = c1["subagent_topology"]
+        self.assertEqual(topo["stage_1_scouts"]["model"], "flash")
+        self.assertEqual(topo["stage_2_blind_solvers"]["model"], "pro")
+        self.assertEqual(topo["stage_3_cold_redteam"]["round_cap"], 1)
+
+        c2 = blueprint_engine.classify_blueprint_request("OAuth JWT API microservice with SELinux key isolation and UI login modal")
+        self.assertIn("security", c2["active_domains"])
+        self.assertIn("software", c2["active_domains"])
+
+        c3 = blueprint_engine.classify_blueprint_request("Wardley strategy pricing unit econ SLA roadmap for Q3")
+        self.assertIn("biz-org", c3["active_domains"])
+
+    def test_detect_blueprint_intent_positive_and_negative(self) -> None:
+        pos = (
+            "Cria um blueprint SOTA completo para o córtex espacial",
+            "Write a SOTA blueprint and RFC for our distributed audio sync protocol",
+            "Elabora uma especificação técnica / design doc para autenticação zero-trust",
+        )
+        for p in pos:
+            self.assertTrue(complexity_triage.detect_blueprint_intent(p), f"Expected True for: {p}")
+            res = complexity_triage.analyze_prompt(p)
+            self.assertIn("blueprint_intent", res)
+            self.assertTrue(res["blueprint_intent"], f"analyze_prompt missed blueprint_intent for: {p}")
+
+        neg = (
+            "Architect audio dsp filter, api schema, auth pipeline, ui tabs and tests across 5 modules",
+            "Fix null reference crash in MainActivity.cs when exporting IAMF",
+            "O que é um blueprint?",
+            "Update blueprint_engine.py to fix typo",
+            "obrigado",
+        )
+        for n in neg:
+            self.assertFalse(complexity_triage.detect_blueprint_intent(n), f"Expected False for: {n}")
+            res = complexity_triage.analyze_prompt(n)
+            self.assertIn("blueprint_intent", res)
+            self.assertFalse(res["blueprint_intent"], f"analyze_prompt false positive for: {n}")
+
+    def test_scaffold_and_popperian_lint_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            sc = blueprint_engine.scaffold_blueprint("Spatial Cortex", "spatial_cortex", repo, prompt="DSP audio AI neural system")
+            bp_path = Path(sc["path"])
+            self.assertTrue(bp_path.is_file())
+            r_sc = blueprint_engine.lint_blueprint(bp_path, strict=True)
+            self.assertFalse(r_sc["passed"])
+            self.assertGreater(r_sc["metrics"]["placeholders"], 0)
+
+            good_path = repo / ".agents" / "docs" / "blueprints" / "BP_GOOD.md"
+            good_path.write_text(self._valid_blueprint_text(), encoding="utf-8")
+            r_good = blueprint_engine.lint_blueprint(good_path, strict=True)
+            self.assertTrue(r_good["passed"], f"Expected PASS, got issues={r_good['issues']}")
+            self.assertGreaterEqual(r_good["score"], 90)
+
+            # Unqualified weasel words fail WBS
+            weasel_p = repo / "BP_WEASEL.md"
+            weasel_p.write_text(
+                self._valid_blueprint_text(body_override={"value": "VALUE|Deliver fast, robust and seamless spatial audio.", "q1": "QAS|Q1|Beat|Live|Seamless fast output|fast|<cmd>"}),
+                encoding="utf-8",
+            )
+            r_w = blueprint_engine.lint_blueprint(weasel_p, strict=True)
+            self.assertFalse(r_w["passed"])
+            self.assertLess(r_w["subscores"]["WBS"], 10)
+
+            # Missing REJECTED_BECAUSE fails ORI
+            noori_p = repo / "BP_NOORI.md"
+            noori_p.write_text(self._valid_blueprint_text(body_override={"r1": "", "r2": ""}), encoding="utf-8")
+            r_o = blueprint_engine.lint_blueprint(noori_p, strict=True)
+            self.assertFalse(r_o["passed"])
+            self.assertEqual(r_o["subscores"]["ORI"], 0)
+
+            # Missing KILL fails KCC (drops below 15 when PREMORTEM exists, 0 when both absent)
+            nokill_p = repo / "BP_NOKILL.md"
+            nokill_p.write_text(self._valid_blueprint_text(body_override={"k1": "", "k2": ""}), encoding="utf-8")
+            r_k = blueprint_engine.lint_blueprint(nokill_p, strict=True)
+            self.assertFalse(r_k["passed"])
+            self.assertLess(r_k["subscores"]["KCC"], 15)
+
+            # Bloated H2+ with code leak fails AWF
+            bloat_h2 = "\n".join(
+                ["STUB|W2|Implement Cavern/Spatial/TrajectoryEngine.cs `public class TrajectoryEngine { }`"]
+                + [f"STUB|W{i}|Extra verbose step {i} detailing internal structs" for i in range(3, 18)]
+            )
+            awf_p = repo / "BP_AWF.md"
+            awf_p.write_text(self._valid_blueprint_text(h2_override=bloat_h2), encoding="utf-8")
+            r_a = blueprint_engine.lint_blueprint(awf_p, strict=True)
+            self.assertFalse(r_a["passed"])
+            self.assertLess(r_a["subscores"]["AWF"], 10)
+
+    def test_cli_pre_invocation_and_verify_integration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".agents").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean"}),
+                encoding="utf-8",
+            )
+            p_cls = run_script("plan_tool.py", ["--workspace", str(repo), "blueprint", "classify", "--prompt", "Create DSP AI blueprint", "--json"], cwd=repo)
+            self.assertEqual(p_cls.returncode, 0, p_cls.stderr)
+            self.assertIn("dsp-hw", json.loads(p_cls.stdout)["active_domains"])
+
+            p_init = run_script("plan_tool.py", ["--workspace", str(repo), "blueprint", "init", "--title", "Demo BP", "--slug", "DEMO_BP", "--prompt", "DSP AI system"], cwd=repo)
+            self.assertEqual(p_init.returncode, 0, p_init.stderr)
+            bp_file = repo / ".agents" / "docs" / "blueprints" / "BP_DEMO_BP.md"
+            self.assertTrue(bp_file.is_file())
+
+            # Replace with valid complete blueprint and test lint + status + handoff
+            bp_file.write_text(self._valid_blueprint_text(status="LOCKED"), encoding="utf-8")
+            p_lint = run_script("plan_tool.py", ["--workspace", str(repo), "blueprint", "lint", str(bp_file), "--strict"], cwd=repo)
+            self.assertEqual(p_lint.returncode, 0, p_lint.stdout + p_lint.stderr)
+            p_st = run_script("plan_tool.py", ["--workspace", str(repo), "blueprint", "status"], cwd=repo)
+            self.assertEqual(p_st.returncode, 0)
+            self.assertIn("PASS", p_st.stdout)
+            p_ho = run_script("plan_tool.py", ["--workspace", str(repo), "blueprint", "handoff", str(bp_file), "--json"], cwd=repo)
+            self.assertEqual(p_ho.returncode, 0)
+            self.assertIn("plan_tool.py init", json.loads(p_ho.stdout)["plan_init_cmd"])
+
+            # PreInvocation hook injects [BLUEPRINT_MODE|SOTA] within 1500c cap, silent on normal prompts
+            with tempfile.TemporaryDirectory() as art1:
+                _, _, pre_bp = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art1,
+                        "lastUserInput": "Crie um blueprint SOTA completo para audio espacial, neural e interface 3D",
+                        "invocationNum": 1,
+                    },
+                )
+                msg_bp = pre_bp["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[BLUEPRINT_MODE|SOTA]", msg_bp)
+                self.assertLessEqual(len(msg_bp), 1500)
+
+            with tempfile.TemporaryDirectory() as art2:
+                _, _, pre_norm = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art2,
+                        "lastUserInput": "Refactor audio decoder buffer, cache, and unit tests across 3 files",
+                        "invocationNum": 1,
+                    },
+                )
+                msg_norm = pre_norm["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertNotIn("[BLUEPRINT_MODE|SOTA]", msg_norm)
+
+            # verify_universal check_blueprint_quality warn vs strict fail & pass
+            fails: list[str] = []
+            warns: list[str] = []
+            verify_universal.check_blueprint_quality(repo, [".agents/docs/blueprints/BP_DEMO_BP.md"], {}, fails, warns)
+            self.assertEqual(fails, [])
+            self.assertEqual(warns, [])
+
+            bad_rel = ".agents/docs/blueprints/BP_BAD.md"
+            (repo / bad_rel).write_text("# Bad (`BP_BAD`)\nBP_META|id=BP_BAD|status=SEED-v1\n<FILL:x>\n", encoding="utf-8")
+            warns.clear()
+            verify_universal.check_blueprint_quality(repo, [bad_rel], {}, fails, warns)
+            self.assertEqual(fails, [])
+            self.assertEqual(len(warns), 1)
+            verify_universal.check_blueprint_quality(repo, [bad_rel], {"blueprint": {"strict_verify": True}}, fails, warns)
+            self.assertEqual(len(fails), 1)
+
+
+class TestFleetSyncAndFastPath(unittest.TestCase):
+    def test_equal_semver_content_drift_mtime_and_in_sync(self) -> None:
+        import self_evolve
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            emb = repo / ".agents" / "plugins" / "dynamic-fractal-planner"
+            glob = root / "global_plugin"
+            emb.mkdir(parents=True)
+            glob.mkdir(parents=True)
+
+            manifest = json.dumps({"name": "dynamic-fractal-planner", "version": "2.14.0"})
+            (emb / "plugin.json").write_text(manifest, encoding="utf-8")
+            (glob / "plugin.json").write_text(manifest, encoding="utf-8")
+            (emb / "marker.txt").write_text("same", encoding="utf-8")
+            (glob / "marker.txt").write_text("same", encoding="utf-8")
+
+            eq = self_evolve.sync_plugin_versions(repo, global_dir=glob, apply=True)
+            self.assertEqual(eq["direction"], "in-sync")
+            self.assertFalse(eq["applied"])
+
+            t_old = 1_700_000_000.0
+            t_new = 1_700_000_100.0
+            (emb / "marker.txt").write_text("emb-newer", encoding="utf-8")
+            (glob / "marker.txt").write_text("glob-older", encoding="utf-8")
+            for p in (emb / "plugin.json", emb / "marker.txt"):
+                os.utime(p, (t_new, t_new))
+            for p in (glob / "plugin.json", glob / "marker.txt"):
+                os.utime(p, (t_old, t_old))
+
+            fwd = self_evolve.sync_plugin_versions(repo, global_dir=glob, apply=True)
+            self.assertEqual(fwd["direction"], "embedded->global")
+            self.assertTrue(fwd["applied"])
+            self.assertEqual((glob / "marker.txt").read_text(encoding="utf-8"), "emb-newer")
+
+            (glob / "marker.txt").write_text("glob-newer", encoding="utf-8")
+            (emb / "marker.txt").write_text("emb-older", encoding="utf-8")
+            for p in (glob / "plugin.json", glob / "marker.txt"):
+                os.utime(p, (t_new + 50, t_new + 50))
+            for p in (emb / "plugin.json", emb / "marker.txt"):
+                os.utime(p, (t_old, t_old))
+
+            rev = self_evolve.sync_plugin_versions(repo, global_dir=glob, apply=True)
+            self.assertEqual(rev["direction"], "global->embedded")
+            self.assertTrue(rev["applied"])
+            self.assertEqual((emb / "marker.txt").read_text(encoding="utf-8"), "glob-newer")
+
+    def test_standalone_host_excludes_and_preservation(self) -> None:
+        import self_evolve
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ws_file = root / ".workspaces.json"
+            glob = root / "global_plugin"
+            standalone = root / "standalone_plugin"
+            host = root / "host_repo"
+            emb = host / ".agents" / "plugins" / "dynamic-fractal-planner"
+            glob.mkdir(parents=True)
+            standalone.mkdir(parents=True)
+            emb.mkdir(parents=True)
+
+            host_sentinels = {
+                "package.json": '{"name":"standalone-shim"}\n',
+                "AGENTS.md": "# Standalone AGENTS\n",
+                ".agents/preview/server.mjs": "// keep preview server\n",
+                ".agents/federation.json": '{"standalone":true}\n',
+                ".agents/bridge_profile.json": '{"bridge":"keep"}\n',
+                ".agents/env_manifest.json": '{"env":"keep"}\n',
+                ".agents/host_matrix.json": '{"host":"keep"}\n',
+                ".agents/planner_profile.json": '{"planner_mode":"lean"}\n',
+            }
+            for rel, body in host_sentinels.items():
+                p = standalone / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+
+            (standalone / "plugin.json").write_text(
+                json.dumps({"name": "dynamic-fractal-planner", "version": "2.0.0"}),
+                encoding="utf-8",
+            )
+            (standalone / "scripts").mkdir(parents=True)
+            (standalone / "scripts" / "core.py").write_text("VER = '2.0.0'\n", encoding="utf-8")
+
+            (emb / "plugin.json").write_text(
+                json.dumps({"name": "dynamic-fractal-planner", "version": "2.1.0"}),
+                encoding="utf-8",
+            )
+            (emb / "scripts").mkdir(parents=True)
+            (emb / "scripts" / "core.py").write_text("VER = '2.1.0'\n", encoding="utf-8")
+
+            with _patched_env({"PLANNER_WORKSPACES_FILE": str(ws_file)}):
+                res1 = self_evolve.sync_plugin_fleet(
+                    host,
+                    apply=True,
+                    push=False,
+                    run_tests=False,
+                    global_dir=glob,
+                    extra_repos=[str(standalone)],
+                )
+            self.assertTrue(res1["ok"])
+            self.assertEqual(res1["authoritative"]["kind"], "embedded")
+            self.assertEqual(json.loads((standalone / "plugin.json").read_text(encoding="utf-8"))["version"], "2.1.0")
+            self.assertEqual((standalone / "scripts" / "core.py").read_text(encoding="utf-8"), "VER = '2.1.0'\n")
+            for rel, body in host_sentinels.items():
+                self.assertEqual((standalone / rel).read_text(encoding="utf-8"), body, rel)
+
+            (standalone / "plugin.json").write_text(
+                json.dumps({"name": "dynamic-fractal-planner", "version": "2.2.0"}),
+                encoding="utf-8",
+            )
+            (standalone / "scripts" / "core.py").write_text("VER = '2.2.0'\n", encoding="utf-8")
+            with _patched_env({"PLANNER_WORKSPACES_FILE": str(ws_file)}):
+                res2 = self_evolve.sync_plugin_fleet(
+                    standalone,
+                    apply=True,
+                    push=False,
+                    run_tests=False,
+                    global_dir=glob,
+                    extra_repos=[str(host)],
+                )
+            self.assertTrue(res2["ok"])
+            self.assertEqual(res2["authoritative"]["kind"], "standalone")
+            self.assertEqual(json.loads((emb / "plugin.json").read_text(encoding="utf-8"))["version"], "2.2.0")
+            self.assertEqual((emb / "scripts" / "core.py").read_text(encoding="utf-8"), "VER = '2.2.0'\n")
+            for excl in self_evolve.STANDALONE_HOST_EXCLUDES:
+                self.assertFalse((emb / excl).exists(), f"excluded path leaked into embedded: {excl}")
+
+    def test_fleet_multi_repo_sync_and_metadata_bump(self) -> None:
+        import self_evolve
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ws_file = root / ".workspaces.json"
+            glob = root / "global_plugin"
+            standalone = root / "standalone_plugin"
+            host1 = root / "host_one"
+            host2 = root / "host_two"
+            for d in (glob, standalone, host1, host2):
+                d.mkdir(parents=True)
+
+            (standalone / "package.json").write_text('{"name":"dfp"}\n', encoding="utf-8")
+            (standalone / "plugin.json").write_text(
+                json.dumps({"name": "dynamic-fractal-planner", "version": "2.14.0"}),
+                encoding="utf-8",
+            )
+            (standalone / ".agents" / "docs").mkdir(parents=True)
+            (standalone / ".agents" / "docs" / "HANDOFF.md").write_text(
+                "# Handoff\n- `Release`: `v2.12.0`\n",
+                encoding="utf-8",
+            )
+
+            (glob / "plugin.json").write_text(
+                json.dumps({"name": "dynamic-fractal-planner", "version": "2.10.0"}),
+                encoding="utf-8",
+            )
+
+            for hdir, ver in ((host1, "2.10.0"), (host2, "2.11.0")):
+                emb = hdir / ".agents" / "plugins" / "dynamic-fractal-planner"
+                (emb / ".agents" / "docs").mkdir(parents=True)
+                (emb / "plugin.json").write_text(
+                    json.dumps({"name": "dynamic-fractal-planner", "version": ver}),
+                    encoding="utf-8",
+                )
+                (emb / ".agents" / "docs" / "HANDOFF.md").write_text(
+                    f"# Handoff\n- `Release`: `v{ver}`\n",
+                    encoding="utf-8",
+                )
+                (hdir / ".agents" / "planner_profile.json").write_text(
+                    json.dumps({"schema_version": 5, "plugin_version": ver}),
+                    encoding="utf-8",
+                )
+                (hdir / "AGENTS.md").write_text(
+                    f"# Repo\nPlanner (`dynamic-fractal-planner v{ver}`)\n",
+                    encoding="utf-8",
+                )
+
+            with _patched_env({"PLANNER_WORKSPACES_FILE": str(ws_file)}):
+                self.assertTrue(self_evolve.register_workspace(standalone, global_dir=glob))
+                self.assertTrue(self_evolve.register_workspace(host1, global_dir=glob))
+                res = self_evolve.sync_plugin_fleet(
+                    host1,
+                    apply=True,
+                    push=False,
+                    run_tests=False,
+                    global_dir=glob,
+                    extra_repos=[str(host2)],
+                )
+
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["authoritative"]["kind"], "standalone")
+            self.assertEqual(res["authoritative"]["version"], "2.14.0")
+            kinds = {t["kind"] for t in res["targets"]}
+            self.assertEqual(kinds, {"standalone", "global", "embedded"})
+            self.assertEqual(len(res["targets"]), 4)
+            for t in res["targets"]:
+                self.assertEqual(t["version_after"], "2.14.0")
+
+            self.assertIn("`v2.14.0`", (standalone / ".agents" / "docs" / "HANDOFF.md").read_text(encoding="utf-8"))
+            self.assertIn("`v2.14.0`", (glob / ".agents" / "docs" / "HANDOFF.md").read_text(encoding="utf-8"))
+            for hdir in (host1, host2):
+                prof = json.loads((hdir / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
+                self.assertEqual(prof["plugin_version"], "2.14.0")
+                self.assertIn("dynamic-fractal-planner v2.14.0", (hdir / "AGENTS.md").read_text(encoding="utf-8"))
+                emb_handoff = (hdir / ".agents" / "plugins" / "dynamic-fractal-planner" / ".agents" / "docs" / "HANDOFF.md").read_text(encoding="utf-8")
+                self.assertIn("`v2.14.0`", emb_handoff)
+
+            # Monotonic: lower target_ver never downgrades metadata or Release
+            self.assertEqual(self_evolve._update_host_metadata(host1, "2.10.0", apply=True), [])
+            self.assertFalse(self_evolve._refresh_plugin_handoff_release(standalone / ".agents" / "docs" / "HANDOFF.md", "2.10.0"))
+            self.assertEqual(json.loads((host1 / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))["plugin_version"], "2.14.0")
+            self.assertIn("`v2.14.0`", (standalone / ".agents" / "docs" / "HANDOFF.md").read_text(encoding="utf-8"))
+
+    def test_detect_plugin_sync_intent_positive_and_negative(self) -> None:
+        positives = (
+            "Atualiza o plugin no cavern. Vai rápido",
+            "sincroniza o plugin em todos os repos",
+            "sync plugin",
+            "update plugin to github",
+        )
+        for p in positives:
+            self.assertTrue(complexity_triage.detect_plugin_sync_intent(p), f"expected True for: {p!r}")
+
+        negatives = (
+            "Implementa nova feature no plugin",
+            "Corrige bug no complexity_triage.py",
+            "Crie um blueprint do plugin",
+            "Como funciona o plugin?",
+            "sync plugin " + ("x" * 215),
+        )
+        for n in negatives:
+            self.assertFalse(complexity_triage.detect_plugin_sync_intent(n), f"expected False for: {n!r}")
+
+    def test_analyze_prompt_plugin_sync_fastpath(self) -> None:
+        res = complexity_triage.analyze_prompt("Atualiza o plugin no cavern. Vai rápido")
+        self.assertEqual(res["tier"], 0)
+        self.assertEqual(res["intent"], "plugin_sync_fastpath")
+        self.assertTrue(res["plugin_sync_intent"])
+
+    def test_pre_invocation_plugin_sync_fastpath_normal_and_eco(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean"}),
+                encoding="utf-8",
+            )
+
+            with tempfile.TemporaryDirectory() as art1:
+                _, _, pre_norm = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art1,
+                        "lastUserInput": "Atualiza o plugin no cavern. Vai rápido",
+                        "invocationNum": 1,
+                    },
+                )
+                msg_norm = pre_norm["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[PLUGIN_SYNC_FASTPATH]", msg_norm)
+                for forbidden in ("Triage|", "DELEGATE|", "SOTA_PREFLIGHT|"):
+                    self.assertNotIn(forbidden, msg_norm)
+
+            with tempfile.TemporaryDirectory() as art2:
+                _, _, pre_eco = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art2,
+                        "lastUserInput": "low quota: sync plugin",
+                        "invocationNum": 1,
+                    },
+                )
+                msg_eco = pre_eco["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[ECO_MODE|ON]", msg_eco)
+                self.assertIn("[PLUGIN_SYNC_FASTPATH]", msg_eco)
+                for forbidden in ("Triage|", "DELEGATE|", "SOTA_PREFLIGHT|"):
+                    self.assertNotIn(forbidden, msg_eco)
+
+    def test_bootstrap_workspace_embed_plugin_and_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "new_project"
+            repo.mkdir()
+            ws_file = root / ".workspaces.json"
+            gemini_home = root / ".gemini"
+
+            with _patched_env({"PLANNER_WORKSPACES_FILE": str(ws_file), "GEMINI_HOME": str(gemini_home)}):
+                created, _ = planner_state.bootstrap_workspace(repo, embed_plugin=True)
+
+            self.assertIn(".agents/planner_profile.json", created)
+            self.assertIn(".agents/plugins/dynamic-fractal-planner", created)
+            self.assertIn(".agents/host_matrix.json", created)
+
+            prof = json.loads((repo / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
+            self.assertEqual(prof["planner_mode"], "auto")
+            self.assertIn("file_budget_limits", prof)
+            self.assertIn("plugin_evolution", prof)
+            self.assertTrue(prof["plugin_evolution"]["auto_sync_higher_version"])
+            self.assertTrue((repo / ".agents" / "plugins" / "dynamic-fractal-planner" / "plugin.json").is_file())
+            self.assertTrue((repo / ".agents" / "host_matrix.json").is_file())
+
+            reg = json.loads(ws_file.read_text(encoding="utf-8"))
+            self.assertIn(str(repo.resolve()), reg["workspaces"])
 
 
 def _stamp_plugin_tests_passed() -> None:

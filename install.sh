@@ -6,12 +6,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TARGET_DIR="${GEMINI_HOME:-$HOME/.gemini}/config/plugins/dynamic-fractal-planner"
 MODE="copy"
 RUN_TESTS=1
+TEST_MODE="--fast"
 DO_ROLLBACK=0
 FORCE_DOWNGRADE=0
 
 usage() {
   cat <<'EOF'
-Usage: ./install.sh [--target <dir>] [--symlink] [--skip-tests] [--force] [--rollback] [-h|--help]
+Usage: ./install.sh [--target <dir>] [--symlink] [--skip-tests] [--full] [--force] [--rollback] [-h|--help]
 EOF
 }
 
@@ -27,6 +28,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-tests)
       RUN_TESTS=0
+      shift
+      ;;
+    --full)
+      TEST_MODE="--full"
       shift
       ;;
     --force)
@@ -150,8 +155,8 @@ print(f"Validated manifests in {root}")
 PY
 
 if [[ "$RUN_TESTS" -eq 1 ]]; then
-  echo "Running plugin regression tests..."
-  python3 "$TARGET_REAL/tests/run_plugin_tests.py"
+  echo "Running plugin regression tests ($TEST_MODE)..."
+  python3 "$TARGET_REAL/tests/run_plugin_tests.py" "$TEST_MODE"
 fi
 
 # Snapshot clean verified state to .last_good_backup for instant --rollback

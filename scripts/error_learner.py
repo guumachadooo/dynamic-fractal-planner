@@ -328,7 +328,7 @@ def lint_timelessness(text: str) -> list[str]:
 
 
 def parse_lessons(md_text: str) -> list[Lesson]:
-    """Parse all `### \`BL-NNN\` | ...` entries from BUILD_LESSONS.md."""
+    r"""Parse all `### \`BL-NNN\` | ...` entries from BUILD_LESSONS.md."""
     lessons: list[Lesson] = []
     header_re = re.compile(r"^###\s+`(BL-\d{3,})`\s*\|\s*(.+?)\s*$", re.MULTILINE)
     matches = list(header_re.finditer(md_text))

@@ -407,7 +407,12 @@ def cmd_init(args: argparse.Namespace, artifact_dir: Path, ws_root: Path) -> Non
 
 def cmd_bootstrap(args: argparse.Namespace, ws_root: Path) -> None:
     """Scaffold universal .agents memory docs and an auto-detected planner_profile.json."""
-    created, skipped = bootstrap_workspace(ws_root, name=args.name, force=args.force)
+    created, skipped = bootstrap_workspace(
+        ws_root,
+        name=args.name,
+        force=args.force,
+        embed_plugin=bool(args.embed_plugin),
+    )
 
     print(f"Bootstrapped universal agent structure in `{ws_root}`:")
     if created:
@@ -735,8 +740,28 @@ def cmd_handoff(args: argparse.Namespace, ws_root: Path) -> int:
     roadmap = (getattr(args, "roadmap", "") or "").strip().replace("\n", " ")
     wave = (getattr(args, "wave", "") or "").strip().replace("\n", " ")
     archives = [str(a).strip().replace("\n", " ") for a in (getattr(args, "archive", None) or []) if str(a).strip()]
+
+    if handoff_file.is_file() and (not roadmap or not wave or not archives):
+        try:
+            for prev_ln in handoff_file.read_text(encoding="utf-8", errors="ignore").splitlines()[:25]:
+                s = prev_ln.strip()
+                if s.startswith("ROADMAP|") and not roadmap:
+                    roadmap = s[8:].strip()
+                elif s.startswith("WAVE|") and not wave:
+                    wave = s[5:].strip()
+                elif s.startswith("ARCHIVE|") and not archives:
+                    raw_arch = s[8:].split("(!read_full", 1)[0].strip()
+                    if raw_arch:
+                        archives = [raw_arch]
+        except Exception:
+            pass
+
     if not any((summary, next_act, roadmap, wave)):
         raise SystemExit("`handoff` requires `--summary`, `--next`, `--roadmap`, or `--wave` (or `--clear`).")
+
+    import host_context  # noqa: E402
+
+    host_id = host_context.detect_host(ws_root).get("host_id") or "local-ide"
 
     branch, head, dirty = "-", "-", "0"
     dirty_preview = ""
@@ -753,7 +778,7 @@ def cmd_handoff(args: argparse.Namespace, ws_root: Path) -> int:
 
     lines = [
         "# Session Handoff",
-        f"ts={int(time.time())}|branch={branch}|head={head}|dirty={dirty}|fmt={CURRENT_DOCS_FORMAT_VERSION}",
+        f"ts={int(time.time())}|branch={branch}|head={head}|dirty={dirty}|host={host_id}|fmt={CURRENT_DOCS_FORMAT_VERSION}",
     ]
     if roadmap:
         lines.append(f"ROADMAP|{roadmap[:180]}")
@@ -995,6 +1020,28 @@ def cmd_evolve(args: argparse.Namespace, ws_root: Path) -> int:
             sub_argv.extend(["--plugin-rel", args.plugin_rel])
         if args.json:
             sub_argv.append("--json")
+    elif args.evolve_cmd == "sync-all":
+        if args.apply:
+            sub_argv.append("--apply")
+        if args.push:
+            sub_argv.append("--push")
+        if args.no_test:
+            sub_argv.append("--no-test")
+        if args.commit:
+            sub_argv.extend(["--commit", args.commit])
+        if args.global_dir:
+            sub_argv.extend(["--global-dir", args.global_dir])
+        if args.plugin_rel:
+            sub_argv.extend(["--plugin-rel", args.plugin_rel])
+        for repo in (args.repo or []):
+            sub_argv.extend(["--repo", repo])
+        if args.json:
+            sub_argv.append("--json")
+    elif args.evolve_cmd == "register-workspace":
+        if args.global_dir:
+            sub_argv.extend(["--global-dir", args.global_dir])
+        if args.json:
+            sub_argv.append("--json")
     return self_evolve.main(sub_argv)
 
 
@@ -1014,6 +1061,35 @@ def cmd_live_diag(args: argparse.Namespace, ws_root: Path) -> int:
     return live_diagnostics.main(sub_argv)
 
 
+def cmd_blueprint(args: argparse.Namespace, ws_root: Path) -> int:
+    """Delegate to Universal SOTA Blueprint Engine (`blueprint_engine.py`)."""
+    import blueprint_engine  # noqa: E402
+
+    sub_argv = ["--workspace", str(ws_root), *(args.extra_args or [])]
+    return blueprint_engine.main(sub_argv)
+
+
+def cmd_host(args: argparse.Namespace, ws_root: Path) -> int:
+    """Delegate multi-host boot, status, matrix audit, or tool classification to `host_context.py`."""
+    import host_context  # noqa: E402
+
+    sub_cmd = args.cmd.removeprefix("host-")
+    sub_argv = ["--workspace", str(ws_root), sub_cmd]
+    if sub_cmd == "classify":
+        sub_argv.append(args.path)
+        if args.category:
+            sub_argv.extend(["--category", args.category])
+        if args.purpose:
+            sub_argv.extend(["--purpose", args.purpose])
+        if args.entry_id:
+            sub_argv.extend(["--id", args.entry_id])
+        if args.apply:
+            sub_argv.append("--apply")
+    if getattr(args, "json", False):
+        sub_argv.append("--json")
+    return host_context.main(sub_argv)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Universal Dynamic Fractal Plan Engine & Project Bootstrapper.")
     parser.add_argument("--dir", default=None, help="Artifact directory override.")
@@ -1028,6 +1104,7 @@ def main() -> None:
     p_boot = sub.add_parser("bootstrap", help="Scaffold universal memory/extra-requests/profile docs in a project.")
     p_boot.add_argument("--name", default="")
     p_boot.add_argument("--force", action="store_true")
+    p_boot.add_argument("--embed-plugin", action="store_true")
 
     p_mig = sub.add_parser("migrate", help="Upgrade .agents/planner_profile.json on disk to current schema.")
     p_mig.add_argument("--dry-run", action="store_true")
@@ -1141,12 +1218,43 @@ def main() -> None:
     p_evo_psync.add_argument("--global-dir", default="")
     p_evo_psync.add_argument("--plugin-rel", default=".agents/plugins/dynamic-fractal-planner")
     p_evo_psync.add_argument("--json", action="store_true")
+    p_evo_all = evo_sub.add_parser("sync-all")
+    p_evo_all.add_argument("--apply", action="store_true")
+    p_evo_all.add_argument("--push", action="store_true")
+    p_evo_all.add_argument("--no-test", action="store_true")
+    p_evo_all.add_argument("--commit", default="")
+    p_evo_all.add_argument("--global-dir", default="")
+    p_evo_all.add_argument("--plugin-rel", default=".agents/plugins/dynamic-fractal-planner")
+    p_evo_all.add_argument("--repo", action="append", default=[])
+    p_evo_all.add_argument("--json", action="store_true")
+    p_evo_reg = evo_sub.add_parser("register-workspace")
+    p_evo_reg.add_argument("--global-dir", default="")
+    p_evo_reg.add_argument("--json", action="store_true")
 
     p_learn = sub.add_parser("learn", help="Run universal timeless build-error learner (forwards remaining args).")
     p_learn.add_argument("extra_args", nargs=argparse.REMAINDER)
 
     p_ldiag = sub.add_parser("live-diag", help="Fetch uncached live CI & runtime diagnostics from GitHub (forwards remaining args).")
     p_ldiag.add_argument("extra_args", nargs=argparse.REMAINDER)
+
+    p_bp = sub.add_parser("blueprint", help="Universal SOTA Blueprint Engine (classify|init|lint|score|status|list|handoff).")
+    p_bp.add_argument("extra_args", nargs=argparse.REMAINDER)
+
+    for h_cmd, h_help in (
+        ("host-boot", "Run unified host-aware session boot (Antigravity local vs AI Studio cloud)."),
+        ("host-status", "Show detected host capabilities, matrix view, and baton state."),
+        ("host-audit", "Audit .agents/host_matrix.json for unclassified or stale tools."),
+    ):
+        p_h = sub.add_parser(h_cmd, help=h_help)
+        p_h.add_argument("--json", action="store_true")
+
+    p_hcls = sub.add_parser("host-classify", help="Classify and optionally register a tool path in .agents/host_matrix.json.")
+    p_hcls.add_argument("path")
+    p_hcls.add_argument("--category", default="")
+    p_hcls.add_argument("--purpose", default="")
+    p_hcls.add_argument("--id", dest="entry_id", default="")
+    p_hcls.add_argument("--apply", action="store_true")
+    p_hcls.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
     ws_root = resolve_workspace_root(args.workspace)
@@ -1181,6 +1289,10 @@ def main() -> None:
         raise SystemExit(cmd_learn(args, ws_root))
     if args.cmd == "live-diag":
         raise SystemExit(cmd_live_diag(args, ws_root))
+    if args.cmd == "blueprint":
+        raise SystemExit(cmd_blueprint(args, ws_root))
+    if args.cmd in ("host-boot", "host-status", "host-audit", "host-classify"):
+        raise SystemExit(cmd_host(args, ws_root))
 
     art_dir = resolve_artifact_dir(args.dir)
     if args.cmd == "init":

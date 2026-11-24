@@ -1,0 +1,151 @@
+{
+  "schema": 1,
+  "strict_coverage": false,
+  "note": "Declarative multi-host tool & integration matrix (`antigravity-termux` <-> `ai-studio-cloud` <-> `ci-runner` <-> `local-ide`). Audited by `verify_universal.py` & `plan_tool.py host-audit`.",
+  "hosts": {
+    "antigravity-termux": {
+      "label": "Antigravity (Termux PRoot on S25 Ultra)",
+      "ignore_cloud_env_alerts": true,
+      "boot_steps": [
+        "python3 -B scripts/plan_tool.py host-boot",
+        "git status -sb && git fetch origin --quiet"
+      ]
+    },
+    "antigravity-local": {
+      "label": "Antigravity (Local Workstation)",
+      "ignore_cloud_env_alerts": true,
+      "boot_steps": [
+        "python3 -B scripts/plan_tool.py host-boot",
+        "git status -sb"
+      ]
+    },
+    "ai-studio-cloud": {
+      "label": "Google AI Studio Cloud Container",
+      "ignore_cloud_env_alerts": false,
+      "boot_steps": [
+        "python3 -B scripts/plan_tool.py host-boot"
+      ]
+    },
+    "ci-runner": {
+      "label": "GitHub Actions CI Runner",
+      "ignore_cloud_env_alerts": true,
+      "boot_steps": [
+        "python3 -B scripts/verify_universal.py --all --plugin-tests"
+      ]
+    },
+    "local-ide": {
+      "label": "Generic Local IDE",
+      "ignore_cloud_env_alerts": true,
+      "boot_steps": [
+        "python3 -B scripts/plan_tool.py host-boot"
+      ]
+    }
+  },
+  "scan_globs": [
+    "scripts/*.py",
+    "hooks/*.py",
+    "tests/*.py",
+    "install.sh",
+    ".agents/preview/*.mjs",
+    ".agents/*.json",
+    "package.json"
+  ],
+  "ignore_globs": [
+    "**/__pycache__/**",
+    "**/test_*.py",
+    "**/test_*.mjs",
+    "**/*.test.mjs",
+    "**/*_test.py"
+  ],
+  "entries": [
+    {
+      "id": "preview-shim",
+      "category": "ai-studio-only",
+      "paths": [
+        "package.json",
+        ".agents/preview/*.mjs"
+      ],
+      "purpose": "Zero-dependency Node.js preview server on port 3000 keeping AI Studio preview healthy, bridging container Secrets, and warming sibling repos.",
+      "per_host": {
+        "ai-studio-cloud": {"mode": "active", "how": "runs npm run dev on 0.0.0.0:3000"},
+        "antigravity-termux": {"mode": "skip_preserve", "how": "do not run; preserve files for AI Studio"},
+        "ci-runner": {"mode": "test_only", "how": "syntax check via node --check .agents/preview/server.mjs"},
+        "local-ide": {"mode": "optional", "how": "preserve compatibility"}
+      }
+    },
+    {
+      "id": "ai-studio-env-manifest",
+      "category": "ai-studio-only",
+      "paths": [
+        ".agents/env_manifest.json"
+      ],
+      "purpose": "Expected AI Studio Secrets manifest used to detect missing cloud environment variables.",
+      "per_host": {
+        "ai-studio-cloud": {"mode": "active", "how": "missingExpectedVars triggers immediate user restore alert"},
+        "antigravity-termux": {"mode": "skip_preserve", "how": "ignore cloud missingExpectedVars alerts; native gh + ~/.omni_agent used"},
+        "ci-runner": {"mode": "skip_preserve", "how": "CI uses GitHub Actions secrets"},
+        "local-ide": {"mode": "skip_preserve", "how": "cloud-only expectation"}
+      }
+    },
+    {
+      "id": "repo-federation",
+      "category": "dual-adapted",
+      "paths": [
+        ".agents/federation.json"
+      ],
+      "purpose": "3-repo ecosystem manifest across Cavern, OmniAgent, and dynamic-fractal-planner.",
+      "per_host": {
+        "ai-studio-cloud": {"mode": "tarball_mount", "how": "hydrates sibling repos into /tmp/cavern-federation/ at boot"},
+        "antigravity-termux": {"mode": "local_scratch_clones", "how": "resolves sibling repos directly in /root/.gemini/antigravity/scratch/ without /tmp tarballs"},
+        "ci-runner": {"mode": "test_only", "how": "validated as JSON"},
+        "local-ide": {"mode": "local_scratch_clones", "how": "resolves sibling git clones if present"}
+      }
+    },
+    {
+      "id": "bridge-profile",
+      "category": "dual-adapted",
+      "paths": [
+        ".agents/bridge_profile.json"
+      ],
+      "purpose": "Public non-secret Cloudflare relay & Smart Knock profile for AI Studio <-> Termux bridge fallback.",
+      "per_host": {
+        "ai-studio-cloud": {"mode": "active", "how": "used by live_bridge_client.py / OmniAgent client for Smart Knock fallback"},
+        "antigravity-termux": {"mode": "skip_preserve", "how": "preserve for AI Studio; local workspace uses native git/gh directly"},
+        "ci-runner": {"mode": "test_only", "how": "validated as JSON"},
+        "local-ide": {"mode": "optional", "how": "optional remote bridge profile"}
+      }
+    },
+    {
+      "id": "plugin-core-runtime",
+      "category": "universal",
+      "paths": [
+        "scripts/*.py",
+        "hooks/*.py",
+        "tests/*.py",
+        "install.sh"
+      ],
+      "purpose": "Pure Python 3 stdlib plugin CLI, hooks, universal verifier, self-evolution engine, test suite, and installer.",
+      "per_host": {
+        "ai-studio-cloud": {"mode": "active", "how": "runs identically in cloud container"},
+        "antigravity-termux": {"mode": "active", "how": "runs identically on Termux PRoot"},
+        "ci-runner": {"mode": "active", "how": "runs in CI verification & plugin test suite"},
+        "local-ide": {"mode": "active", "how": "runs identically"}
+      }
+    },
+    {
+      "id": "plugin-workspace-config",
+      "category": "universal",
+      "paths": [
+        ".agents/planner_profile.json",
+        ".agents/host_matrix.json"
+      ],
+      "purpose": "Workspace planner profile (schema v5) and declarative multi-host capability & routing manifest.",
+      "per_host": {
+        "ai-studio-cloud": {"mode": "active", "how": "checked by verify_universal.py & host-boot"},
+        "antigravity-termux": {"mode": "active", "how": "checked by verify_universal.py & host-boot"},
+        "ci-runner": {"mode": "active", "how": "checked by verify_universal.py --all"},
+        "local-ide": {"mode": "active", "how": "checked by verify_universal.py"}
+      }
+    }
+  ]
+}

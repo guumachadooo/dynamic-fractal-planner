@@ -79,6 +79,14 @@ def main() -> None:
         if is_real_project_root(repo) and (repo / ".agents").is_dir():
             upgrade_info = auto_upgrade_workspace(repo)
 
+        if is_real_project_root(repo):
+            try:
+                import self_evolve  # noqa: E402
+
+                self_evolve.register_workspace(repo)
+            except Exception:
+                pass
+
         profile, profile_warnings = load_project_profile_with_warnings(repo)
         _, task_md, _, hook_file = get_paths(payload)
 
@@ -104,6 +112,12 @@ def main() -> None:
         tree_state = "clean" if not dirty_lines else f"{len(dirty_lines)} dirty"
         head_meta = f"[{proj_name}|mode={mode_tag}" + (f"|branch={branch}|tree={tree_state}]" if branch else f"|ws={repo}]")
         lines = [head_meta]
+        try:
+            import host_context  # noqa: E402
+
+            lines.extend(host_context.format_session_start_lines(repo))
+        except Exception:
+            pass
 
         session_cfg: dict[str, Any] = profile.get("session") or {}
 
@@ -207,7 +221,7 @@ def main() -> None:
         if isinstance(evo_cfg, dict) and evo_cfg.get("enabled"):
             plug_sync_rel = str(evo_cfg.get("plugin_sync_doc") or ".agents/plugins/dynamic-fractal-planner/.agents/docs/EXTERNAL_AI_SYNC.md")
             lines.append(
-                f"EVOLVE|AUTO_DUAL_SCOPE: reusable workflow/tooling/diag ideas -> universalize in plugin (`scripts/`+`{plug_sync_rel}`) && app-only -> host project"
+                f"EVOLVE|AUTO_DUAL_SCOPE: reusable -> plugin (`{plug_sync_rel}`) && app-only -> host"
             )
 
         hist_p = repo / ".agents" / "docs" / "PROJECT_HISTORY.md"
@@ -298,6 +312,12 @@ def main() -> None:
 
         plan_cli = PLUGIN_ROOT / "scripts" / "plan_tool.py"
         verify_cli = PLUGIN_ROOT / "scripts" / "verify_universal.py"
+        try:
+            plan_ref = str(plan_cli.resolve().relative_to(repo.resolve()))
+            verify_ref = str(verify_cli.resolve().relative_to(repo.resolve()))
+        except Exception:
+            plan_ref = str(plan_cli)
+            verify_ref = str(verify_cli)
 
         try:
             in_plugin_repo = repo.resolve() == PLUGIN_ROOT.resolve()
@@ -309,17 +329,48 @@ def main() -> None:
             diag_total, diag_unique = summarize_anomalies()
             if diag_total > 0:
                 lines.append(
-                    f"DIAGNOSTICS|{diag_total} anomaly(ies) ({diag_unique} unique) in `.diagnostics/anomalies.jsonl` -> run `python3 {plan_cli} diag` to inspect"
+                    f"DIAGNOSTICS|{diag_total} anomaly(ies) ({diag_unique} unique) in `.diagnostics/anomalies.jsonl` -> run `python3 {plan_ref} diag` to inspect"
                 )
 
-        lines.append(f"TOOLS|plan=`python3 {plan_cli}`|verify=`python3 {verify_cli}`|board=`{task_md}`")
+        lines.append(f"TOOLS|plan=`python3 {plan_ref}`|verify=`python3 {verify_ref}`|board=`{task_md}`")
 
+        bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1800)
         msg_text = "\n".join(lines)
+        if len(msg_text) > bloat_limit:
+            trimmed: list[str] = []
+            for ln in lines:
+                if ln.startswith("COMMITS|"):
+                    parts = [p.strip()[:48] for p in ln[8:].split(";")[:2] if p.strip()]
+                    ln = "COMMITS|" + " ; ".join(parts)
+                elif ln.startswith("DIRTY|") and len(ln) > 80:
+                    ln = f"DIRTY|{len(dirty_lines)} dirty file(s)"
+                elif ln.startswith("WAVE_BRIDGE|"):
+                    rm_s = (roadmap_ref.split("(", 1)[0].strip() or "-")[:60]
+                    wv_s = (wave_ref or "-")[:70]
+                    ln = f"WAVE_BRIDGE|roadmap={rm_s}|wave={wv_s}"
+                elif ln.startswith("HANDOFF|\n") and len(ln) > 200:
+                    ln = ln[:197] + "..."
+                elif ln.startswith("DOCS|") and len(ln) > 95:
+                    ln = "DOCS|" + ",".join(Path(m).name for m in mem_candidates)
+                elif ln.startswith("EVOLVE|"):
+                    ln = "EVOLVE|AUTO_DUAL_SCOPE: reusable->plugin && app->host"
+                trimmed.append(ln)
+            lines = trimmed
+            msg_text = "\n".join(lines)
+            if len(msg_text) > bloat_limit:
+                trimmed2: list[str] = []
+                for ln in lines:
+                    if ln.startswith(("ENV|", "WATCH|")) and len(ln) > 110:
+                        ln = ln[:107] + "..."
+                    elif ln.startswith("HANDOFF|\n") and len(ln) > 130:
+                        ln = ln[:127] + "..."
+                    trimmed2.append(ln)
+                lines = trimmed2
+                msg_text = "\n".join(lines)
         if profile_warnings:
             from plugin_diagnostics import record_anomaly  # noqa: E402
 
             record_anomaly("profile_warning", "planner_session_start.py", "schema:warning", "; ".join(profile_warnings), repo=repo)
-        bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1800)
         if len(msg_text) > bloat_limit:
             from plugin_diagnostics import record_anomaly  # noqa: E402
 

@@ -207,6 +207,8 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "recon": prev_recon,
             "recon_injected": False,
             "lens_injected": False,
+            "blueprint_injected": False,
+            "plugin_sync_injected": False,
             "btw_injected": False,
         }
     else:
@@ -240,7 +242,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
     doc_mcps = detect_doc_mcps(profile)
     doc_targets = list(triage.get("doc_lookup_targets") or [])
     doc_hint_line = format_doc_mcp_hint(doc_targets, doc_mcps)
-    bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1200)
+    bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1500)
 
     def _append_within_budget(line: str) -> bool:
         if not line:
@@ -254,6 +256,12 @@ def _run_pre_invocation_inner(t0: float) -> None:
     if eco_mode and not hook_state.get("eco_injected"):
         hook_state["eco_injected"] = True
         inject_lines.append("[ECO_MODE|ON] Batch reads/greps in 1 turn && surgical edits only && terse <=8L reply && no optional docs.")
+
+    if triage.get("plugin_sync_intent") and not hook_state.get("plugin_sync_injected"):
+        hook_state["plugin_sync_injected"] = True
+        inject_lines.append(
+            f"[PLUGIN_SYNC_FASTPATH] 0-thinking 1-cmd ONLY (!read !explore !plan): run `sync-plugin` (or `python3 -B {plan_cli} evolve sync-all --apply --push`) && report <=3L."
+        )
 
     rec_state = hook_state.get("recon")
     if isinstance(rec_state, dict) and rec_state.get("active") and not hook_state.get("recon_injected"):
@@ -348,6 +356,15 @@ def _run_pre_invocation_inner(t0: float) -> None:
         if doc_hint_line and not hook_state.get("doc_hint_injected"):
             hook_state["doc_hint_injected"] = True
             inject_lines.append(doc_hint_line)
+        from schema_migrations import resolve_delegation_config  # noqa: E402
+
+        del_cfg = resolve_delegation_config(profile)
+        min_del_tier = int(del_cfg.get("thin_coordinator_min_tier") or 2)
+        if del_cfg.get("enabled", True) and tier >= min_del_tier:
+            max_lines = int(del_cfg.get("max_subagent_reply_lines") or 20)
+            _append_within_budget(
+                f"DELEGATE|thin-coord(!bulk main) -> fresh 1-shot subagents/run_workflow(!cmd-echo,!fork,seq PRoot) | Google-only(L0:flash_lite|L1-2:flash|L3:pro) | reply<={max_lines}L"
+            )
         if not eco_mode:
             if tier == 2:
                 _append_within_budget("DISC|AUDIT_EXISTING: grep/inspect partial impls pre-create (!duplicate)")
@@ -408,6 +425,21 @@ def _run_pre_invocation_inner(t0: float) -> None:
             f"T{tier} edited={total_ed} (code={len(hook_state.get('code_files_edited') or [])},plugin={len(hook_state.get('plugin_files_edited') or [])})",
             repo=repo,
         )
+
+    # SOTA Blueprint directive (after SOTA_PREFLIGHT|, before LENS|; suppressed in ECO_MODE)
+    if (
+        triage.get("blueprint_intent")
+        and not eco_mode
+        and not is_btw_short
+        and not hook_state.get("blueprint_injected")
+    ):
+        bp_line = (
+            "[BLUEPRINT_MODE|SOTA] Follow `skills/sota-blueprint/SKILL.md` "
+            "(6-stage Blind-Morphogenesis + Cold-RedTeam + VoI-Spike) && "
+            "run `plan_tool.py blueprint {classify|init|lint --strict}` (score>=85)."
+        )
+        if _append_within_budget(bp_line):
+            hook_state["blueprint_injected"] = True
 
     # Domain lenses (1-line active-domain critique, suppressed in ECO_MODE & within bloat budget)
     if not is_btw_short and not eco_mode and not plan_ready and not hook_state.get("lens_injected") and tier >= 1:

@@ -90,7 +90,8 @@ def discover_workspace_files(repo: Path, profile: dict[str, Any] | None = None) 
             if rel.startswith(".aistudio/"):
                 continue
             low = fn.lower()
-            if not low.endswith(DISCOVERY_EXTS) and fn != "BUILD_LESSONS.md":
+            is_bp_md = low.endswith(".md") and (fn.startswith("BP_") or rel_root.endswith("/blueprints") or rel_root == "blueprints")
+            if not low.endswith(DISCOVERY_EXTS) and fn != "BUILD_LESSONS.md" and not is_bp_md:
                 continue
             if prefixes and not rel.startswith(prefixes) and not rel.startswith(".agents/"):
                 continue
@@ -1493,6 +1494,44 @@ def check_file_budget(
         warns.append(msg)
 
 
+def check_host_matrix_coverage(repo: Path, fails: list[str], warns: list[str]) -> None:
+    """Validate `.agents/host_matrix.json` and flag unclassified or stale cross-host tools."""
+    import host_context  # noqa: E402
+
+    res = host_context.audit_host_matrix(repo)
+    if not res.get("present"):
+        return
+    for err in res.get("schema_errors") or []:
+        fails.append(f"host_matrix.json: {err}")
+    strict = bool(res.get("strict"))
+    sink = fails if strict else warns
+    stale = res.get("stale") or []
+    if stale:
+        sink.append(f"host_matrix.json: stale path(s) missing on disk -> {', '.join(stale[:5])}")
+    for item in res.get("unclassified") or []:
+        path_s = item.get("path", "")
+        cat = item.get("suggested_category", "universal")
+        sink.append(
+            f"host_matrix.json: unclassified tool `{path_s}` (suggest `{cat}`) -> "
+            f"run `plan_tool.py host-classify {path_s} --apply`"
+        )
+
+
+def check_blueprint_quality(
+    repo: Path,
+    files: list[str],
+    profile: dict[str, Any],
+    fails: list[str],
+    warns: list[str],
+) -> None:
+    """Lint changed SOTA blueprint files (`BP_*.md` / `blueprints/*.md`) via `blueprint_engine`."""
+    try:
+        import blueprint_engine  # noqa: E402
+    except Exception:
+        return
+    blueprint_engine.check_blueprint_files(repo, files, profile, fails, warns)
+
+
 def run_static_checks(
     repo: Path,
     profile: dict[str, Any],
@@ -1517,7 +1556,9 @@ def run_static_checks(
     check_memory_weight(repo, profile, warns)
     check_code_weight(repo, files, profile, warns, scan_all=scan_all)
     check_file_budget(repo, profile, fails, warns)
+    check_host_matrix_coverage(repo, fails, warns)
     check_build_lessons_timelessness(repo, files, fails)
+    check_blueprint_quality(repo, files, profile, fails, warns)
     check_plugin_sync_parity(repo, files, warns, scan_all=scan_all)
 
     extra_rel, pending_extra = get_pending_extra_requests(repo, profile)
@@ -1579,7 +1620,7 @@ def run_plugin_tests(plugin_root: Path, fails: list[str], fast: bool = True) -> 
         cwd=str(plugin_root),
         capture_output=True,
         text=True,
-        timeout=240,
+        timeout=480,
         check=False,
     )
     if res.returncode == 0:

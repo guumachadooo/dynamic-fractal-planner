@@ -34,7 +34,7 @@
         "scripts/verify_universal.py"
       ],
       "termuxPath": "/root/.gemini/antigravity/scratch/dynamic-fractal-planner",
-      "termuxGlobalPluginPath": "/root/.gemini/antigravity/plugins/dynamic-fractal-planner",
+      "termuxGlobalPluginPath": "/root/.gemini/config/plugins/dynamic-fractal-planner",
       "ciWorkflow": ""
     }
   },
@@ -76,6 +76,10 @@
             ".agents/federation.json",
             ".agents/bridge_profile.json",
             ".agents/env_manifest.json",
+            ".agents/host_matrix.json",
+            ".agents/planner_profile.json",
+            ".workspaces.json",
+            ".last_good_backup",
             "__pycache__",
             "*.pyc",
             "*.pyo",
@@ -84,6 +88,64 @@
             ".hook_state.json",
             ".diagnostics"
           ]
+        }
+      ]
+    },
+    {
+      "name": "fractal-embedded-plugin-omniagent",
+      "sourceRepo": "fractal",
+      "targetRepo": "omniagent",
+      "mappings": [
+        {
+          "src": ".",
+          "dst": ".agents/plugins/dynamic-fractal-planner",
+          "exclude": [
+            ".git",
+            "package.json",
+            "AGENTS.md",
+            ".agents/preview",
+            ".agents/federation.json",
+            ".agents/bridge_profile.json",
+            ".agents/env_manifest.json",
+            ".agents/host_matrix.json",
+            ".agents/planner_profile.json",
+            ".workspaces.json",
+            ".last_good_backup",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            ".metrics.jsonl",
+            ".model_modes.json",
+            ".hook_state.json",
+            ".diagnostics"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "cavern-oneui9-design-kit",
+      "sourceRepo": "cavern",
+      "targetRepo": "omniagent",
+      "mappings": [
+        {
+          "src": "CavernSamples/CavernizeAndroid/Theme/OneUiTheme.cs",
+          "dst": "OmniAgentAndroid/SharedOneUi/OneUiTheme.cs",
+          "exclude": []
+        },
+        {
+          "src": "CavernSamples/CavernizeAndroid/Views/OneUiIconView.cs",
+          "dst": "OmniAgentAndroid/SharedOneUi/OneUiIconView.cs",
+          "exclude": []
+        },
+        {
+          "src": "CavernSamples/CavernizeAndroid/Views/OneUiComponents.cs",
+          "dst": "OmniAgentAndroid/SharedOneUi/OneUiComponents.cs",
+          "exclude": []
+        },
+        {
+          "src": "CavernSamples/CavernizeAndroid/Assets/fonts/sf_pro_android_ui.ttf",
+          "dst": "OmniAgentAndroid/Assets/fonts/sf_pro_android_ui.ttf",
+          "exclude": []
         }
       ]
     }
