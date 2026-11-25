@@ -226,6 +226,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "recon_injected": False,
             "lens_injected": False,
             "blueprint_injected": False,
+            "hygiene_injected": False,
             "plugin_sync_injected": False,
             "btw_injected": False,
             "task_status_polls": prev_task_polls,
@@ -455,7 +456,28 @@ def _run_pre_invocation_inner(t0: float) -> None:
             repo=repo,
         )
 
+    # Pre-resumption plan hygiene gate (before resuming paused plans/roadmaps/waves)
+    from schema_migrations import resolve_blueprint_config  # noqa: E402
+
+    bp_cfg = resolve_blueprint_config(profile)
+    hub_rel = str(bp_cfg.get("hub_file") or ".agents/docs/PLANS_HUB.md")
+    if (
+        triage.get("plan_resume_intent")
+        and bp_cfg.get("require_pre_resume_hygiene", True)
+        and not is_btw_short
+        and not hook_state.get("hygiene_injected")
+    ):
+        hyg_line = (
+            f"[PLAN_HYGIENE_GATE] Resuming plan/roadmap -> BEFORE edits run `plan_tool.py blueprint hygiene --strict`, "
+            f"read `{hub_rel}`, && resolve stale/conflicting directives first."
+        )
+        if _append_within_budget(hyg_line):
+            hook_state["hygiene_injected"] = True
+
     # SOTA Blueprint directive (after SOTA_PREFLIGHT|, before LENS|; suppressed in ECO_MODE)
+    bp_fmt = str(triage.get("recommended_blueprint_format") or ("mini" if tier <= 1 else ("compact" if tier == 2 else "full")))
+    if bp_fmt == "none":
+        bp_fmt = "mini" if tier <= 1 else ("compact" if tier == 2 else "full")
     if (
         triage.get("blueprint_intent")
         and not eco_mode
@@ -463,11 +485,23 @@ def _run_pre_invocation_inner(t0: float) -> None:
         and not hook_state.get("blueprint_injected")
     ):
         bp_line = (
-            "[BLUEPRINT_MODE|SOTA] Follow `skills/sota-blueprint/SKILL.md` "
-            "(6-stage Blind-Morphogenesis + Cold-RedTeam + VoI-Spike) && "
-            "run `plan_tool.py blueprint {classify|init|lint --strict}` (score>=85)."
+            f"[BLUEPRINT_MODE|SOTA] Follow `skills/sota-blueprint/SKILL.md` (`fmt={bp_fmt}`: "
+            f"tiered Blind-Morphogenesis + RedTeam) && run `plan_tool.py blueprint {{match|classify|init --format {bp_fmt}|lint --strict}}` (>=85)."
         )
         if _append_within_budget(bp_line):
+            hook_state["blueprint_injected"] = True
+    elif (
+        triage.get("blueprint_required_by_policy")
+        and not triage.get("blueprint_opt_out")
+        and not eco_mode
+        and not is_btw_short
+        and not hook_state.get("blueprint_injected")
+    ):
+        bp_first_line = (
+            f"[BLUEPRINT_FIRST|SOTA] Policy requires `{bp_fmt}` Blueprint (`>=85/100 --strict`) BEFORE edits "
+            f"(skip ONLY on user opt-out/eco) -> `plan_tool.py blueprint match` (amend active) OR `init --format {bp_fmt} && lint --strict`."
+        )
+        if _append_within_budget(bp_first_line):
             hook_state["blueprint_injected"] = True
 
     # Domain lenses (1-line active-domain critique, suppressed in ECO_MODE & within bloat budget)

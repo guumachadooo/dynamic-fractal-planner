@@ -5030,6 +5030,526 @@ class TestAntiPollingGuard(unittest.TestCase):
             self.assertLessEqual(len(del_lines[0]), 200, del_lines[0])
 
 
+class TestPlanGovernanceAndHub(unittest.TestCase):
+    """Tests for v2.18.0 Plan Governance, Central Plans Hub auto-sync, hygiene audit, and Blueprint-First default."""
+
+    def _valid_bp_text(self, bp_id: str, status: str = "ACTIVE-v1", extra_meta: str = "") -> str:
+        extra = f"{extra_meta}\n" if extra_meta else ""
+        return (
+            f"# SOTA Blueprint — {bp_id}\n\n"
+            f"> STYLE|lossless symbolic telegraphic EN ONLY.\n"
+            f"BP_META|id={bp_id}|domain_vec=software:0.90|door=2-way|tier=T2|status={status}|updated=2026-11-25\n"
+            f"{extra}\n"
+            "## 1. Strategic Frame\n"
+            "VALUE|Measurable governance improvement >=95% compliance.\n"
+            "WARDLEY|Build custom lint engine | reuse stdlib python3.\n"
+            "NON_GOAL|No C# DSP rewrites.\n"
+            "NON_GOAL|No third-party pip deps.\n\n"
+            "## 2. Blind Morphogenesis & TRIZ\n"
+            "TRIZ_CONTRADICTION|Freshness vs manual doc maintenance.\n"
+            "CANDIDATE|PureManual|Hand-edited markdown hub only.\n"
+            "CANDIDATE|HybridMarker|Curated prose + machine-synced marker inventory.\n"
+            "WINNER|Hybrid curated + auto-synced marker hub.\n"
+            "REJECTED_BECAUSE|PureManual|Drifts within 2 commits (>15% stale).\n"
+            "REJECTED_BECAUSE|FullAutoGen|Destroys curated priority ordering (0% human narrative).\n\n"
+            "## 3. Cold-Context Red-Team & Kill Criteria\n"
+            "PREMORTEM|T+6mo|Hub drifts silently causing stale plan execution.\n"
+            "THREAT|Stale superseded directive re-enabled -> mitigated by hygiene gate.\n"
+            "KILL|K1|Hub drift|hub_check_exit!=0|every PR|Run blueprint hub --sync.\n"
+            "KILL|K2|Runtime slow|hygiene_ms>250ms|every run|Skip heavy scans.\n\n"
+            "## 4. Wave-0 Spikes\n"
+            "SPIKE|S1|1-way|Verify marker preservation|0 B outside diff|python3 -c 'print(0)'|0 B diff\n\n"
+            "## 5. Budgets & QAS\n"
+            "BUDGET|latency<=150ms|mem<=32MB|cost=$0\n"
+            "PLANES|offline=CLI | rt=hook <=10ms | async=CI\n"
+            "QAS|Q1|Sync hub|Repo w/ blueprints|Updates marker block|0 B diff outside markers|python3 -B scripts/plan_tool.py blueprint hub --check\n\n"
+            "## 6. Rolling-Wave DSM\n"
+            "### H1 Atomic Slices\n"
+            "SLICE|W1|Sync hub engine|scripts/blueprint_engine.py|<=150ms|tests pass\n"
+            "### H2+ Outcome Stubs\n"
+            "STUB|W2|Optional future extension <=10ms\n\n"
+            "## 7. Fitness\n"
+            "FITNESS|F1|Hub check stays green|0 drift|plan_tool.py blueprint hub --check\n"
+        )
+
+    def test_v218_hygiene_audit_and_hub_sync_preserves_curated_prose(self) -> None:
+        import blueprint_engine
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            bp_dir = repo / ".agents" / "docs" / "blueprints"
+            bp_dir.mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "planner_mode": "lean", "blueprint": {"hub_file": ".agents/docs/PLANS_HUB.md"}}),
+                encoding="utf-8",
+            )
+            # 1. Conflict + stale SUPERSEDED_BY + missing hub -> hygiene fails
+            (bp_dir / "BP_ALPHA.md").write_text(
+                self._valid_bp_text("BP_ALPHA", status="ACTIVE-v1", extra_meta="CONFLICTS_WITH|BP_BETA|Blur conflict"),
+                encoding="utf-8",
+            )
+            (bp_dir / "BP_BETA.md").write_text(
+                self._valid_bp_text("BP_BETA", status="ACTIVE-v1", extra_meta="SUPERSEDED_BY|BP_GAMMA"),
+                encoding="utf-8",
+            )
+            res_bad = blueprint_engine.hygiene_audit(repo)
+            self.assertFalse(res_bad["ok"])
+            joined_bad = "\n".join(res_bad["issues"])
+            self.assertIn("Unresolved CONFLICTS_WITH|", joined_bad)
+            self.assertIn("declares SUPERSEDED_BY|BP_GAMMA", joined_bad)
+            self.assertIn("Central Plans Hub missing", joined_bad)
+
+            # 2. Resolve conflicts + create curated hub w/ markers -> sync preserves curated text 100%
+            (bp_dir / "BP_ALPHA.md").write_text(
+                self._valid_bp_text("BP_ALPHA", status="DONE", extra_meta="CONFLICT_RESOLVED|Blur disabled by W51.4"),
+                encoding="utf-8",
+            )
+            (bp_dir / "BP_BETA.md").write_text(
+                self._valid_bp_text("BP_BETA", status="SUPERSEDED", extra_meta="SUPERSEDED_BY|BP_GAMMA"),
+                encoding="utf-8",
+            )
+            curated_head = "# Central Plans Hub\n\nCURATED_TOP_KEEP_EXACT\n\n"
+            curated_tail = "\n\nCURATED_BOTTOM_KEEP_EXACT\n"
+            hub_path = repo / ".agents" / "docs" / "PLANS_HUB.md"
+            hub_path.write_text(
+                f"{curated_head}{blueprint_engine.HUB_AUTO_START}\nstale\n{blueprint_engine.HUB_AUTO_END}{curated_tail}",
+                encoding="utf-8",
+            )
+
+            # Check detects drift before sync
+            rc_drift = blueprint_engine.main(["--workspace", str(repo), "hub", "--check"])
+            self.assertEqual(rc_drift, 1)
+
+            # Sync updates only inside markers and preserves curated sections verbatim
+            sync_info = blueprint_engine.sync_plans_hub(repo)
+            self.assertTrue(sync_info["changed"])
+            hub_txt = hub_path.read_text(encoding="utf-8")
+            self.assertTrue(hub_txt.startswith(curated_head))
+            self.assertTrue(hub_txt.endswith(curated_tail))
+            self.assertIn("`BP_ALPHA`", hub_txt)
+            self.assertIn("`BP_BETA`", hub_txt)
+
+            # Idempotent re-sync & clean hub --check + hygiene --strict
+            sync_again = blueprint_engine.sync_plans_hub(repo)
+            self.assertFalse(sync_again["changed"])
+            self.assertEqual(blueprint_engine.main(["--workspace", str(repo), "hub", "--check"]), 0)
+            self.assertEqual(blueprint_engine.main(["--workspace", str(repo), "hygiene", "--strict"]), 0)
+
+    def test_v218_blueprint_first_default_opt_out_and_resume_hygiene_gate(self) -> None:
+        # Pure helper checks (PT-BR & EN)
+        for p_opt in (
+            "Implementa o filtro de audio sem blueprint para economizar token",
+            "nao faz blueprint, corrige o bug direto",
+            "pula o blueprint e faz logo",
+            "Add logging helper, skip blueprint to save tokens",
+            "no blueprint needed, just patch auth.py",
+        ):
+            self.assertTrue(complexity_triage.detect_blueprint_opt_out(p_opt), p_opt)
+        self.assertFalse(complexity_triage.detect_blueprint_opt_out("Cria um novo filtro de audio espacial"))
+
+        for p_res in (
+            "Vamos retomar o plano da fase 3 W31",
+            "continua o roadmap de modularizacao",
+            "Resume the deferred Phase B blueprint now",
+            "executa o plano W4 que deixamos pendente",
+        ):
+            self.assertTrue(complexity_triage.detect_plan_resume_intent(p_res), p_res)
+        self.assertFalse(complexity_triage.detect_plan_resume_intent("Como funciona o filtro de audio?"))
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents" / "docs" / "blueprints").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 5,
+                        "planner_mode": "lean",
+                        "blueprint": {
+                            "hub_file": ".agents/docs/PLANS_HUB.md",
+                            "require_by_default": True,
+                            "default_min_tier": 1,
+                            "require_pre_resume_hygiene": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            import blueprint_engine
+
+            (repo / ".agents" / "docs" / "blueprints" / "BP_ONE.md").write_text(
+                self._valid_bp_text("BP_ONE", status="PARTIAL"),
+                encoding="utf-8",
+            )
+            blueprint_engine.sync_plans_hub(repo)
+
+            # 1. Feature task w/ require_by_default=True injects [BLUEPRINT_FIRST|SOTA]
+            with tempfile.TemporaryDirectory() as art1:
+                _, _, pre1 = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art1,
+                        "lastUserInput": "Adiciona um novo modulo de cache de sessao no backend e testes unitarios",
+                        "invocationNum": 1,
+                    },
+                )
+                msg1 = pre1["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[BLUEPRINT_FIRST|SOTA]", msg1)
+
+            # 2. Explicit token-saving opt-out suppresses [BLUEPRINT_FIRST|SOTA]
+            with tempfile.TemporaryDirectory() as art2:
+                _, _, pre2 = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art2,
+                        "lastUserInput": "Adiciona um novo modulo de cache no backend sem blueprint para economizar token",
+                        "invocationNum": 1,
+                    },
+                )
+                msg2 = pre2.get("injectSteps", [{}])[0].get("systemMessage", {}).get("systemMessage", "")
+                self.assertNotIn("[BLUEPRINT_FIRST|SOTA]", msg2)
+                self.assertNotIn("[BLUEPRINT_MODE|SOTA]", msg2)
+
+            # 3. Resuming an older plan injects [PLAN_HYGIENE_GATE]
+            with tempfile.TemporaryDirectory() as art3:
+                _, _, pre3 = run_hook(
+                    "planner_pre_invocation.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art3,
+                        "lastUserInput": "Vamos retomar o plano da fase 3 W31 agora",
+                        "invocationNum": 1,
+                    },
+                )
+                msg3 = pre3["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[PLAN_HYGIENE_GATE]", msg3)
+                self.assertIn(".agents/docs/PLANS_HUB.md", msg3)
+
+            # 4. SessionStart surfaces PLANS_HUB.md & compact PLANS_HUB| line
+            with tempfile.TemporaryDirectory() as art4:
+                _, _, ss = run_hook(
+                    "planner_session_start.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art4},
+                )
+                ss_msg = ss["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("PLANS_HUB.md", ss_msg)
+                self.assertIn("PLANS_HUB|bp=1(done=0,partial=1,active=0,def=0)|sync=OK|bp_default=ON", ss_msg)
+
+
+class TestBlueprintArchitectureV2(unittest.TestCase):
+    """v2.19.0: Tiered mini|compact|full formats, Anti-Gaming Linter v2, lossless DONE compaction, match, transition & triage alignment."""
+
+    def test_tiered_format_classify_scaffold_lint_and_topology(self) -> None:
+        import blueprint_engine
+
+        # T1/2-way -> mini format, 0 subagents, zero dead boilerplate
+        c_mini = blueprint_engine.classify_blueprint_request("Add a small toggle switch to disable album art blur in Settings")
+        self.assertEqual(c_mini["recommended_format"], "mini")
+        self.assertIn("ux-product", c_mini["domain_vector"])
+        self.assertEqual(c_mini["subagent_topology"]["stage_1_scouts"]["count"], 0)
+        self.assertEqual(c_mini["subagent_topology"]["stage_2_blind_solvers"]["count"], 0)
+        self.assertEqual(c_mini["subagent_topology"]["stage_3_cold_redteam"]["count"], 0)
+
+        # T3/1-way -> full format, full pro [L3] topology
+        c_full = blueprint_engine.classify_blueprint_request(
+            "Architect a new zero-alloc real-time neural ONNX DSP pipeline with SELinux security migration"
+        )
+        self.assertEqual(c_full["recommended_format"], "full")
+        self.assertEqual(c_full["subagent_topology"]["stage_2_blind_solvers"]["model"], "pro")
+
+        # Scaffold mini -> no EVOLVE_RULE or PARENT_ADR|none boilerplate, <=35L
+        with tempfile.TemporaryDirectory() as td_sc:
+            sc_res = blueprint_engine.scaffold_blueprint(
+                "Album Art Blur Toggle",
+                "ALBUM_BLUR_TOGGLE",
+                Path(td_sc),
+                prompt="Add a toggle switch to disable album art blur in Settings",
+                fmt="mini",
+            )
+            mini_scaffold = Path(sc_res["path"]).read_text(encoding="utf-8")
+        self.assertIn("|format=mini|", mini_scaffold)
+        self.assertNotIn("EVOLVE_RULE|", mini_scaffold)
+        self.assertNotIn("PARENT_ADR|none", mini_scaffold)
+        self.assertLessEqual(len(mini_scaffold.splitlines()), 35)
+
+        # Complete mini blueprint passes --strict >=95 in <=30L & <=3KB
+        valid_mini = "\n".join([
+            "# Album Art Blur Toggle (`BP_ALBUM_BLUR_TOGGLE`)",
+            "",
+            "## 0. Meta & Lineage",
+            "BP_META|id=BP_ALBUM_BLUR_TOGGLE|format=mini|domain_vec=ux-product:1.00|door=2-way|tier=T1|status=ACTIVE|h1_wave=W1",
+            "",
+            "## 1. Value & Non-Goals",
+            "VALUE|Allow disabling album art blur in Settings in <=2 taps, cutting GPU overdraw >=20% on scrolling.",
+            "NON_GOAL|Zero redesign of NowPlaying layout or custom shader rewrite.",
+            "",
+            "## 2. Decision, Trade-off & Kill Guard",
+            "CANDIDATE|A|Runtime Toggle Flag|Single SharedPreferences boolean checked before blur pass.",
+            "CANDIDATE|B|Compile-Time Build Flavor|Separate APK build variant without blur.",
+            "REJECTED_BECAUSE|B|Doubles CI APK matrix (+100% build cost) and forces uninstall/reinstall to change preference.",
+            "WINNER|Candidate A: single persisted boolean toggle in Settings w/ immediate invalidation.",
+            "KILL|R1|Visual Glitch or Jank|frame_time_p99 > 16.6ms or l10n_missing > 0|Unit & UI toggle check|Default blur enabled and revert view branch.",
+            "",
+            "## 3. Invariants, QAS & H1 Slices",
+            "BUDGET|latency=<=16.6ms/frame|mem=<=1MB|cost=<=100L diff|degraded_floor=Fallback to default blur=true if pref corrupt.",
+            "QAS|Q1|Toggle blur switch OFF in Settings|Android Settings screen|Blur layer skipped immediately|<=16.6ms && 0 crashes|python3 -B .agents/scripts/check_android_cs.py --ci-parity",
+            "SLICE|W1|Add pref key, Settings toggle, EN/PT-BR strings, & draw guard|Toggle persists across restart|python3 -B .agents/scripts/check_android_cs.py --ci-parity",
+            "FITNESS|python3 -B .agents/scripts/check_android_cs.py --ci-parity",
+            "",
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "BP_ALBUM_BLUR_TOGGLE.md"
+            p.write_text(valid_mini, encoding="utf-8")
+            res = blueprint_engine.lint_blueprint(p, strict=True)
+            self.assertEqual(res["format"], "mini")
+            self.assertTrue(res["passed"], f"Expected mini BP to pass, got {res}")
+            self.assertGreaterEqual(res["score"], 95)
+            self.assertLessEqual(len(valid_mini.splitlines()), 30)
+            self.assertLessEqual(len(valid_mini.encode("utf-8")), 3072)
+
+    def test_anti_gaming_linter_v2(self) -> None:
+        import blueprint_engine
+
+        # 1. Adversarial 1-word tautology blueprint MUST FAIL (<50)
+        garbage = "\n".join([
+            "# BP_GARBAGE",
+            "BP_META|id=BP_GARBAGE|format=full|domain_vec=software:1.00|door=1-way|tier=T3|status=ACTIVE|h1_wave=W1",
+            "## 1. Value & Non-Goals",
+            "VALUE|1ms startup " + ("x " * 70) + "makes the system super fast and scalable.",
+            "WARDLEY|Commodity=a | Product=b | Custom=c",
+            "NON_GOAL|none1",
+            "NON_GOAL|none2",
+            "## 2. Live SOTA & Blind Morphogenesis",
+            "AUDIT_EXISTING|checked",
+            "SOTA_SOURCES|web",
+            "TRIZ_CONTRADICTION|a vs b",
+            "CANDIDATE|A|optA|desc",
+            "REJECTED_BECAUSE|A|bad",
+            "CANDIDATE|B|optB|desc",
+            "REJECTED_BECAUSE|B|slow",
+            "WINNER|C",
+            "## 3. Cold-Ctx Red-Team, Pre-Mortem & Kill Criteria",
+            "PREMORTEM|T+6mo|fails",
+            "THREAT|bad -> fix",
+            "KILL|R1|fail|bad|1d|revert",
+            "KILL|R2|fail|worse|1d|revert",
+            "## 4. Invariants, Budgets & QAS",
+            "BUDGET|latency=1ms|mem=1MB|cost=1$|degraded_floor=ok",
+            "PLANES|offline=a|rt=b|async=c",
+            "QAS|Q1|s|e|r|1ms|echo ok",
+            "## 5. Epistemic Wave-0 Spikes",
+            "SPIKE|S1|VoI=1|check|done",
+            "## 6. Rolling-Wave DSM Graph",
+            "### H1 Atomic Slices",
+            "SLICE|W1|do|done|echo ok",
+            "### H2+ Outcome Stubs",
+            "STUB|W2|later",
+            "## 7. Fitness Functions & Evolution",
+            "FITNESS|echo ok",
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            gp = Path(td) / "BP_GARBAGE.md"
+            gp.write_text(garbage, encoding="utf-8")
+            gres = blueprint_engine.lint_blueprint(gp, strict=True)
+            self.assertFalse(gres["passed"])
+            self.assertLessEqual(gres["score"], 50, f"Garbage BP scored too high: {gres}")
+            joined = " ".join(gres["issues"] + gres["blockers"])
+            self.assertIn("ORI|", joined)
+            self.assertIn("KCC|", joined)
+            self.assertIn("IDS|", joined)
+            self.assertIn("WBS|", joined)
+            self.assertIn("CTB|", joined)
+
+            # 2. `--fast` CLI flag and `||` / backticked pipes MUST NOT false-positive
+            valid_pipes = "\n".join([
+                "# Pipe Safe (`BP_PIPE_SAFE`)",
+                "## 0. Meta & Lineage",
+                "BP_META|id=BP_PIPE_SAFE|format=mini|domain_vec=software:1.00|door=2-way|tier=T1|status=ACTIVE|h1_wave=W1",
+                "## 1. Value & Non-Goals",
+                "VALUE|Ensure `a || b` and `--fast` tests pass in <=5s with 0 regressions.",
+                "NON_GOAL|No shell rewrites outside test runner.",
+                "## 2. Decision, Trade-off & Kill Guard",
+                "CANDIDATE|A|Code-aware parser|Track backticks and double-pipe operators.",
+                "CANDIDATE|B|Regex split|Naive split on single pipe character.",
+                "REJECTED_BECAUSE|B|Mangles `a || b` boolean logic and backticked pipes causing >10% false lint failures.",
+                "WINNER|Candidate A: deterministic backtick-aware pipe splitter.",
+                "KILL|R1|Parser Regression|`err_count > 0 || test_fails > 0`|`<=10s` suite|Revert parser helper and restore prior split.",
+                "## 3. Invariants, QAS & H1 Slices",
+                "BUDGET|latency=<=10ms|mem=<=8MB|cost=<=50L|degraded_floor=Fallback to line-level report on parse error.",
+                "QAS|Q1|Run plugin suite w/ `--fast` & `a || b` expressions|Local Python 3|All assertions pass|0 errors && <=10s|python3 -B tests/run_plugin_tests.py --fast",
+                "SLICE|W1|Implement `_split_pipe_fields` and unit test|Zero split bugs|python3 -B tests/run_plugin_tests.py --fast",
+                "FITNESS|python3 -B tests/run_plugin_tests.py --fast",
+            ])
+            pp = Path(td) / "BP_PIPE_SAFE.md"
+            pp.write_text(valid_pipes, encoding="utf-8")
+            pres = blueprint_engine.lint_blueprint(pp, strict=True)
+            self.assertTrue(pres["passed"], f"Valid pipe/--fast BP failed: {pres}")
+            self.assertEqual(pres["score"], 100)
+
+    def test_compact_done_blueprints_lossless_sha256_and_hub_sync(self) -> None:
+        import blueprint_engine
+        import hashlib
+        import tarfile
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            bp_dir = repo / ".agents" / "docs" / "blueprints"
+            bp_dir.mkdir(parents=True, exist_ok=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "blueprint": {"require_by_default": True}}),
+                encoding="utf-8",
+            )
+
+            def _mk(bp_id: str, status: str) -> str:
+                return "\n".join([
+                    f"# {bp_id}",
+                    f"BP_META|id={bp_id}|format=mini|domain_vec=software:1.00|door=2-way|tier=T1|status={status}|h1_wave=W1",
+                    "VALUE|Cut latency >=20% with 0 regressions.",
+                    "NON_GOAL|Zero third-party deps.",
+                    "CANDIDATE|A|Keep|Baseline.",
+                    "CANDIDATE|B|Upgrade|Target.",
+                    "REJECTED_BECAUSE|A|Fails latency budget by >25ms under peak load.",
+                    "WINNER|Candidate B with deterministic checks.",
+                    "KILL|R1|Regression|fail_count > 0|Unit test run|Revert commit immediately.",
+                    "BUDGET|latency=<=10ms|mem=<=8MB|cost=<=50L|degraded_floor=Safe fallback.",
+                    "QAS|Q1|Run suite|Local|Passes|0 errors|python3 -B tests/run_plugin_tests.py --fast",
+                    "SLICE|W1|Apply change|Verified|python3 -B tests/run_plugin_tests.py --fast",
+                    "FITNESS|python3 -B tests/run_plugin_tests.py --fast",
+                ]) + "\n"
+
+            done1_txt = _mk("BP_OLD_ONE", "DONE")
+            done2_txt = _mk("BP_OLD_TWO", "DONE")
+            keep_txt = _mk("BP_KEEP_DONE", "DONE")
+            act_txt = _mk("BP_LIVE_WORK", "ACTIVE")
+            (bp_dir / "BP_OLD_ONE.md").write_text(done1_txt, encoding="utf-8")
+            (bp_dir / "BP_OLD_TWO.md").write_text(done2_txt, encoding="utf-8")
+            (bp_dir / "BP_KEEP_DONE.md").write_text(keep_txt, encoding="utf-8")
+            (bp_dir / "BP_LIVE_WORK.md").write_text(act_txt, encoding="utf-8")
+            blueprint_engine.sync_plans_hub(repo)
+
+            # Dry-run first must not delete anything
+            dry = blueprint_engine.compact_done_blueprints(repo, apply=False, keep_ids={"BP_KEEP_DONE"})
+            self.assertEqual(sorted(dry["candidates"]), ["BP_OLD_ONE", "BP_OLD_TWO"])
+            self.assertTrue((bp_dir / "BP_OLD_ONE.md").is_file())
+
+            # Apply compaction
+            res = blueprint_engine.compact_done_blueprints(repo, apply=True, keep_ids={"BP_KEEP_DONE"})
+            self.assertTrue(res["applied"], res)
+            self.assertTrue(res["verified_sha256"], res)
+            self.assertEqual(sorted(res["compacted"]), ["BP_OLD_ONE", "BP_OLD_TWO"])
+            self.assertFalse((bp_dir / "BP_OLD_ONE.md").is_file())
+            self.assertFalse((bp_dir / "BP_OLD_TWO.md").is_file())
+            self.assertTrue((bp_dir / "BP_KEEP_DONE.md").is_file())
+            self.assertTrue((bp_dir / "BP_LIVE_WORK.md").is_file())
+
+            # Verify verbatim bytes & SHA-256 in tarball
+            tar_p = repo / ".agents" / "docs" / "archive" / "blueprints_done.tar.gz"
+            self.assertTrue(tar_p.is_file())
+            with tarfile.open(tar_p, "r:gz") as tf:
+                b1 = tf.extractfile("BP_OLD_ONE.md").read()
+                b2 = tf.extractfile("BP_OLD_TWO.md").read()
+            self.assertEqual(b1.decode("utf-8"), done1_txt)
+            self.assertEqual(b2.decode("utf-8"), done2_txt)
+            ledger_txt = (repo / ".agents" / "docs" / "archive" / "BLUEPRINTS_DONE_LEDGER.md").read_text(encoding="utf-8")
+            self.assertIn(hashlib.sha256(b1).hexdigest()[:12], ledger_txt)
+            self.assertIn("BP_OLD_TWO", ledger_txt)
+
+            # PLANS_HUB & SessionStart reflect archived_done=2
+            hub_txt = (repo / ".agents" / "docs" / "PLANS_HUB.md").read_text(encoding="utf-8")
+            self.assertIn("ARCHIVED_DONE|count=2|", hub_txt)
+            hyg = blueprint_engine.hygiene_audit(repo)
+            self.assertTrue(hyg["ok"], hyg)
+            self.assertEqual(hyg["counts"]["archived_done"], 2)
+
+            with tempfile.TemporaryDirectory() as art:
+                _, _, ss = run_hook(
+                    "planner_session_start.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art},
+                )
+                ss_msg = ss["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("arch=2", ss_msg)
+
+    def test_match_and_transition_blueprints(self) -> None:
+        import blueprint_engine
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            bp_dir = repo / ".agents" / "docs" / "blueprints"
+            bp_dir.mkdir(parents=True, exist_ok=True)
+            bp_path = bp_dir / "BP_AUDIO_CACHE_ENGINE.md"
+            bp_path.write_text(
+                "\n".join([
+                    "# Audio Cache Engine (`BP_AUDIO_CACHE_ENGINE`)",
+                    "BP_META|id=BP_AUDIO_CACHE_ENGINE|format=mini|domain_vec=software:1.00|door=2-way|tier=T1|status=ACTIVE|h1_wave=W1",
+                    "VALUE|Cache decoded audio frames for <=5ms lookup latency.",
+                    "NON_GOAL|No network sync.",
+                    "CANDIDATE|A|LRU Cache|Bounded memory cache.",
+                    "CANDIDATE|B|No Cache|Decode every seek.",
+                    "REJECTED_BECAUSE|B|Adds >150ms seek latency on every scrubber move.",
+                    "WINNER|Candidate A bounded LRU cache.",
+                    "KILL|R1|OOM|cache_mb > 64MB|Runtime monitor|Evict oldest entries.",
+                    "BUDGET|latency=<=5ms|mem=<=64MB|cost=<=100L|degraded_floor=Bypass cache on pressure.",
+                    "QAS|Q1|Seek cached track|Player|Frame ready|<=5ms|python3 -B tests/run_plugin_tests.py --fast",
+                    "SLICE|W1|Build cache|Verified|python3 -B tests/run_plugin_tests.py --fast",
+                    "FITNESS|python3 -B tests/run_plugin_tests.py --fast",
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            blueprint_engine.sync_plans_hub(repo)
+
+            m_hit = blueprint_engine.match_blueprints("Fix seek latency bug in audio cache engine LRU", repo)
+            self.assertEqual(m_hit["action"], "AMEND")
+            self.assertEqual(m_hit["top_match"]["id"], "BP_AUDIO_CACHE_ENGINE")
+
+            m_miss = blueprint_engine.match_blueprints("Design new OAuth2 billing webhook service", repo)
+            self.assertEqual(m_miss["action"], "CREATE")
+
+            tr = blueprint_engine.transition_blueprint(
+                bp_path,
+                status="DONE",
+                note="Shipped W1 LRU cache w/ 0 regressions.",
+                sync_hub=True,
+                repo=repo,
+            )
+            self.assertEqual(tr["status"], "DONE")
+            self.assertTrue(tr["hub_synced"])
+            updated_txt = bp_path.read_text(encoding="utf-8")
+            self.assertIn("|status=DONE|", updated_txt)
+            self.assertIn("HYGIENE_NOTE|Shipped W1 LRU cache w/ 0 regressions.", updated_txt)
+            self.assertTrue(blueprint_engine.hygiene_audit(repo)["hub_in_sync"])
+
+    def test_t0_tiny_copy_fix_and_domain_filename_stripping(self) -> None:
+        import blueprint_engine
+        import complexity_triage
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / ".agents").mkdir(parents=True, exist_ok=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "blueprint": {"require_by_default": True, "default_min_tier": 1}}),
+                encoding="utf-8",
+            )
+
+            # 1-line UI label change is T0 tiny_fix and MUST NOT force a blueprint
+            t_copy = complexity_triage.analyze_prompt(
+                "Muda o texto do botão de exportar para Salvar em FLAC",
+                workspace_root=repo,
+            )
+            self.assertEqual(t_copy["tier"], 0)
+            self.assertEqual(t_copy["intent"], "tiny_fix")
+            self.assertFalse(t_copy["blueprint_required_by_policy"])
+
+            # Code filename containing 'Studio' must not misclassify software refactor as ux-product
+            c_ref = blueprint_engine.classify_blueprint_request(
+                "Refactor StudioBatchExporter.cs into 3 smaller partial files"
+            )
+            self.assertIn("software", c_ref["domain_vector"])
+            self.assertNotIn("ux-product", c_ref["domain_vector"])
+
+
 def _stamp_plugin_tests_passed() -> None:
     art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
     if not art_dir or os.environ.get("PLANNER_NO_HOOK_STAMP"):

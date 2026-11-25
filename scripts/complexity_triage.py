@@ -18,7 +18,7 @@ for _p in (str(_SCRIPTS_DIR), str(_HOOKS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from schema_migrations import migrate_profile  # noqa: E402
+from schema_migrations import migrate_profile, resolve_blueprint_config  # noqa: E402
 
 try:
     from planner_state import detect_pace_mode  # noqa: E402
@@ -402,12 +402,52 @@ def detect_plugin_sync_intent(text: str) -> bool:
     return any(pat.search(scoring) for pat in _PLUGIN_SYNC_PATTERNS)
 
 
+_BLUEPRINT_OPT_OUT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _BLUEPRINT_NEGATION_RE,
+    re.compile(
+        r"\b(?:sem\s+(?:fazer\s+)?(?:o\s+)?blueprint|pula\w*\s+(?:o\s+)?blueprint|"
+        r"no\s+blueprint|skip\s+(?:the\s+)?blueprint|without\s+(?:a\s+)?blueprint|"
+        r"economiz\w*\s+tokens?|poupar?\s+tokens?|save\s+tokens?|modo\s+eco|eco\s+mode)\b",
+        re.IGNORECASE,
+    ),
+)
+
+_PLAN_RESUME_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:retom\w*|continu\w*|execut\w*|volt\w*\s+(?:pro|para\s+o|ao)|segu\w*\s+(?:com\s+)?o|resum\w*|pick\s+up)\b"
+        r"[^\n.;!?]{0,45}"
+        r"\b(?:plano|planos|roadmap|fase\s*\d+|phase\s*\d+|etapa\s*\d+|onda\s*\d+|wave\s*\d+|plan\b|blueprint)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:fase\s*3|phase\s*3|vocal\s+cortex|w3[1-9]\b|w4[0-4]\b|pr[oó]xima\s+(?:onda|etapa|fase)|next\s+(?:wave|phase|stage))\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def detect_blueprint_opt_out(text: str) -> bool:
+    """Detect explicit user instruction to skip SOTA blueprint (e.g. to save tokens)."""
+    scoring = _strip_long_quotes(text or "").strip()
+    if not scoring:
+        return False
+    return any(pat.search(scoring) for pat in _BLUEPRINT_OPT_OUT_PATTERNS)
+
+
+def detect_plan_resume_intent(text: str) -> bool:
+    """Detect intent to resume or execute an existing plan, roadmap, phase, or wave."""
+    scoring = _strip_long_quotes(text or "").strip()
+    if not scoring or len(scoring) < 6:
+        return False
+    return any(pat.search(scoring) for pat in _PLAN_RESUME_PATTERNS)
+
+
 def detect_blueprint_intent(text: str) -> bool:
     """Detect explicit request to author/scaffold a SOTA blueprint, RFC, or technical design spec."""
     scoring = _strip_long_quotes(text or "").strip()
     if not scoring or len(scoring) < 12:
         return False
-    if _BLUEPRINT_META_EDIT_RE.search(scoring) or _BLUEPRINT_NEGATION_RE.search(scoring):
+    if _BLUEPRINT_META_EDIT_RE.search(scoring) or detect_blueprint_opt_out(scoring):
         return False
     lower = scoring.lower()
     if lower.startswith(QUESTION_ONLY_PREFIXES) and not any(
@@ -844,6 +884,9 @@ def analyze_prompt(
     broad_scope = _has_broad_scope(scoring_lower)
     followup = classify_followup_intent(scoring_text)
     plugin_sync_intent = detect_plugin_sync_intent(text)
+    bp_cfg = resolve_blueprint_config(profile)
+    bp_opt_out = detect_blueprint_opt_out(text)
+    plan_resume = detect_plan_resume_intent(text)
     if plugin_sync_intent:
         return {
             "tier": 0,
@@ -861,6 +904,9 @@ def analyze_prompt(
             "file_refs": file_refs[:12],
             "btw_queue_intent": False,
             "blueprint_intent": False,
+            "blueprint_opt_out": bp_opt_out,
+            "blueprint_required_by_policy": False,
+            "plan_resume_intent": False,
             "plugin_sync_intent": True,
             "pace_mode": pace_mode,
         }
@@ -870,11 +916,27 @@ def analyze_prompt(
     has_plan_prop = any(p.search(scoring_lower) for p in _PLAN_PROPOSAL_PATTERNS)
 
     tiny_fix_hints = ("typo", "ortografia", "1 linha", "uma linha", "rename", "renomea")
+    tiny_copy_re = re.compile(
+        r"\b(?:mud\w*|alter\w*|troc\w*|corrig\w*|chang\w*|updat\w*|fix\w*|renam\w*)\s+"
+        r"(?:o\s+|a\s+|the\s+)?(?:texto|label|r[oó]tulo|cor|color|t[ií]tulo|title|placeholder|copy)\b"
+        r"|\b(?:texto|label|cor)\s+do\s+bot[aã]o\b"
+        r"|\bbutton\s+(?:text|label|color)\b",
+        re.IGNORECASE,
+    )
     raw_breadth = max(list_items, action_clauses, len(file_refs), 1 if (domains or len(scoring_text) > 25) else 0)
     if broad_scope:
         raw_breadth = max(raw_breadth, 3)
 
-    is_tiny_fix = (
+    is_explicit_copy_fix = (
+        raw_breadth <= 1
+        and len(file_refs) < 2
+        and not broad_scope
+        and len(scoring_text) < 120
+        and not depth_hits
+        and not bp_intent
+        and bool(tiny_copy_re.search(scoring_lower))
+    )
+    is_tiny_fix = is_explicit_copy_fix or (
         raw_breadth <= 1
         and len(file_refs) < 2
         and not broad_scope
@@ -927,6 +989,9 @@ def analyze_prompt(
             "file_refs": file_refs[:12],
             "btw_queue_intent": btw_intent,
             "blueprint_intent": False,
+            "blueprint_opt_out": bp_opt_out,
+            "blueprint_required_by_policy": False,
+            "plan_resume_intent": False,
             "plugin_sync_intent": False,
             "pace_mode": pace_mode,
         }
@@ -948,6 +1013,9 @@ def analyze_prompt(
             "file_refs": file_refs[:12],
             "btw_queue_intent": btw_intent,
             "blueprint_intent": bp_intent,
+            "blueprint_opt_out": bp_opt_out,
+            "blueprint_required_by_policy": False,
+            "plan_resume_intent": plan_resume,
             "plugin_sync_intent": False,
             "pace_mode": pace_mode,
         }
@@ -969,6 +1037,9 @@ def analyze_prompt(
             "file_refs": file_refs[:12],
             "btw_queue_intent": btw_intent,
             "blueprint_intent": False,
+            "blueprint_opt_out": bp_opt_out,
+            "blueprint_required_by_policy": False,
+            "plan_resume_intent": False,
             "plugin_sync_intent": False,
             "pace_mode": pace_mode,
         }
@@ -1014,6 +1085,16 @@ def analyze_prompt(
     modules = build_recommended_modules(tier, domains, depth_level, domain_specs)
     confidence = _triage_confidence(tier, len(scoring_text), file_refs, domains, depth_hits, list_items, source, intent)
 
+    bp_min_tier = int(bp_cfg.get("default_min_tier") or 1)
+    bp_required = (
+        bool(bp_cfg.get("require_by_default", False))
+        and not bp_opt_out
+        and not btw_intent
+        and intent not in ("read_only_analysis", "gratitude_close", "pure_question", "tiny_fix")
+        and tier >= bp_min_tier
+    )
+
+    bp_rec_fmt = "none" if tier == 0 else ("mini" if tier == 1 else ("compact" if tier == 2 else "full"))
     result: dict[str, Any] = {
         "tier": tier,
         "tier_name": tier_name,
@@ -1030,6 +1111,10 @@ def analyze_prompt(
         "file_refs": file_refs[:12],
         "btw_queue_intent": btw_intent,
         "blueprint_intent": bp_intent,
+        "blueprint_opt_out": bp_opt_out,
+        "blueprint_required_by_policy": bp_required,
+        "recommended_blueprint_format": bp_rec_fmt,
+        "plan_resume_intent": plan_resume,
         "plugin_sync_intent": False,
         "pace_mode": pace_mode,
     }

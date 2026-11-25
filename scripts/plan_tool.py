@@ -1237,7 +1237,10 @@ def main() -> None:
     p_ldiag = sub.add_parser("live-diag", help="Fetch uncached live CI & runtime diagnostics from GitHub (forwards remaining args).")
     p_ldiag.add_argument("extra_args", nargs=argparse.REMAINDER)
 
-    p_bp = sub.add_parser("blueprint", help="Universal SOTA Blueprint Engine (classify|init|lint|score|status|list|handoff).")
+    p_bp = sub.add_parser(
+        "blueprint",
+        help="Universal SOTA Blueprint Engine (classify|init|lint|score|status|list|handoff|hygiene|hub|compact|match|transition).",
+    )
     p_bp.add_argument("extra_args", nargs=argparse.REMAINDER)
 
     for h_cmd, h_help in (

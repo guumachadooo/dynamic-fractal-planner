@@ -70,11 +70,23 @@ DEFAULT_DELEGATION_CONFIG: dict[str, Any] = {
 
 DEFAULT_BLUEPRINT_CONFIG: dict[str, Any] = {
     "dir": ".agents/docs/blueprints",
+    "hub_file": ".agents/docs/PLANS_HUB.md",
+    "archive_ledger": ".agents/docs/archive/BLUEPRINTS_DONE_LEDGER.md",
+    "archive_tarball": ".agents/docs/archive/blueprints_done.tar.gz",
     "min_score": 85,
     "max_lines": 350,
     "max_kb": 24,
+    "mini_max_lines": 35,
+    "mini_max_kb": 4,
+    "compact_max_lines": 65,
+    "compact_max_kb": 10,
+    "max_line_chars_warn": 600,
     "max_h2_ratio": 0.25,
+    "tiered_formats": True,
     "strict_verify": False,
+    "require_by_default": False,
+    "default_min_tier": 1,
+    "require_pre_resume_hygiene": True,
 }
 
 

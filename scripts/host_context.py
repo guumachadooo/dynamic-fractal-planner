@@ -758,11 +758,11 @@ def run_host_boot(
         if fr_script.is_file():
             try:
                 res = subprocess.run(
-                    [sys.executable, "-B", str(fr_script), "recover", "--json"],
+                    [sys.executable, "-B", str(fr_script), "resume", "--compact", "--skip-github"],
                     cwd=str(repo_root),
                     capture_output=True,
                     text=True,
-                    timeout=15,
+                    timeout=10,
                     check=False,
                 )
                 fr_recover = {

@@ -206,6 +206,7 @@ def main() -> None:
 
         mem_candidates = []
         for rel in (
+            ".agents/docs/PLANS_HUB.md",
             ".agents/docs/PROJECT_HISTORY.md",
             ".agents/docs/SAVED_IDEAS.md",
             ".agents/docs/BUILD_LESSONS.md",
@@ -216,6 +217,28 @@ def main() -> None:
                 mem_candidates.append(rel)
         if mem_candidates:
             lines.append("DOCS|" + ",".join(f"`{m}`" for m in mem_candidates))
+
+        try:
+            import blueprint_engine  # noqa: E402
+            from schema_migrations import resolve_blueprint_config  # noqa: E402
+
+            bp_cfg = resolve_blueprint_config(profile)
+            hub_rel = str(bp_cfg.get("hub_file") or ".agents/docs/PLANS_HUB.md")
+            if (repo / hub_rel).is_file():
+                h_res = blueprint_engine.hygiene_audit(repo, profile=profile)
+                c = h_res.get("counts") or {}
+                sync_tag = "OK" if h_res.get("hub_in_sync") else "DRIFT"
+                iss_n = len(h_res.get("issues") or [])
+                pol_tag = "|bp_default=ON" if bp_cfg.get("require_by_default") else ""
+                iss_tag = f"|issues={iss_n}" if iss_n else ""
+                arch_n = int(c.get("archived_done") or 0)
+                arch_tag = f",arch={arch_n}" if arch_n > 0 else ""
+                lines.append(
+                    f"PLANS_HUB|bp={c.get('total', 0)}(done={c.get('done', 0)},partial={c.get('partial', 0)},active={c.get('active', 0)},def={c.get('deferred', 0)}{arch_tag})"
+                    f"|sync={sync_tag}{iss_tag}{pol_tag}"
+                )
+        except Exception:
+            pass
 
         evo_cfg = profile.get("plugin_evolution") or {}
         if isinstance(evo_cfg, dict) and evo_cfg.get("enabled"):

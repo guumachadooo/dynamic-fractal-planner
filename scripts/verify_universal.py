@@ -1530,12 +1530,13 @@ def check_blueprint_quality(
     fails: list[str],
     warns: list[str],
 ) -> None:
-    """Lint changed SOTA blueprint files (`BP_*.md` / `blueprints/*.md`) via `blueprint_engine`."""
+    """Lint changed SOTA blueprint files (`BP_*.md` / `blueprints/*.md`) & Plans Hub hygiene via `blueprint_engine`."""
     try:
         import blueprint_engine  # noqa: E402
     except Exception:
         return
     blueprint_engine.check_blueprint_files(repo, files, profile, fails, warns)
+    blueprint_engine.check_plans_hub_hygiene(repo, profile, fails, warns)
 
 
 def run_static_checks(
