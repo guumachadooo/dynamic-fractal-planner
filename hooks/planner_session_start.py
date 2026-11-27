@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -53,23 +54,107 @@ def main() -> None:
             if p not in sys.path:
                 sys.path.insert(0, p)
 
-        from planner_state import (  # noqa: E402
-            BOOTSTRAP_REQUIRED_FILES,
-            DEFAULT_EXTRA_REQUESTS_FILE,
-            auto_upgrade_workspace,
-            bootstrap_workspace,
-            detect_doc_mcps,
-            eval_conditions,
-            get_paths,
-            get_pending_extra_requests,
-            is_real_project_root,
-            load_json,
-            load_project_profile_with_warnings,
-            resolve_planner_mode_info,
-            resolve_repo_root,
-        )
+        import planner_state as _ps  # noqa: E402
 
-        repo = resolve_repo_root(payload)
+        repo = _ps.resolve_repo_root(payload)
+
+        # C7: Run higher-version plugin sync BEFORE bootstrap/auto_upgrade_workspace, and re-exec or reload
+        # modules when `.py` files change so `auto_upgrade_workspace()` NEVER runs on stale in-memory code.
+        sync_notices: list[str] = []
+        reexec_notice = os.environ.get("PLANNER_REEXEC_SYNC_LINE", "").strip()
+        if reexec_notice:
+            sync_notices.append(reexec_notice)
+
+        if _ps.is_real_project_root(repo):
+            early_profile, _ = _ps.load_project_profile_with_warnings(repo)
+            early_evo = early_profile.get("plugin_evolution") or {}
+            if isinstance(early_evo, dict) and early_evo.get("enabled"):
+                plug_rel = str(early_evo.get("plugin_path") or ".agents/plugins/dynamic-fractal-planner").strip()
+                if (repo / plug_rel / "plugin.json").is_file():
+                    try:
+                        import self_evolve  # noqa: E402
+
+                        auto_sync = bool(early_evo.get("auto_sync_higher_version", True))
+                        chk = self_evolve.sync_plugin_versions(repo, plugin_rel=plug_rel, apply=False)
+                        direction = chk.get("direction")
+                        done: dict[str, Any] = {}
+                        if direction == "embedded->global":
+                            if auto_sync:
+                                done = self_evolve.sync_plugin_versions(repo, plugin_rel=plug_rel, apply=True)
+                                sync_notices.append(
+                                    f"PLUGIN_SYNCED|embedded->global|v{chk.get('global_version') or '0.0.0'}->v{done.get('embedded_version')}"
+                                )
+                            else:
+                                sync_notices.append(
+                                    f"PLUGIN_VERSION_SKEW|embedded=v{chk.get('embedded_version')}>global=v{chk.get('global_version')}|ACT:run `plan_tool.py evolve sync-plugin --apply`"
+                                )
+                        elif direction == "global->embedded":
+                            if auto_sync:
+                                done = self_evolve.sync_plugin_versions(repo, plugin_rel=plug_rel, apply=True)
+                                sync_notices.append(
+                                    f"PLUGIN_SYNCED|global->embedded|v{chk.get('embedded_version') or '0.0.0'}->v{done.get('embedded_version')}"
+                                )
+                            else:
+                                sync_notices.append(
+                                    f"PLUGIN_UPGRADE_AVAILABLE|global=v{chk.get('global_version')}>embedded=v{chk.get('embedded_version')}|ACT:run `plan_tool.py evolve sync-plugin --apply`"
+                                )
+
+                        copied_files = done.get("copied") or []
+                        py_changed = bool(done.get("applied")) and any(str(c).endswith(".py") for c in copied_files)
+                        if py_changed:
+                            dst_key = "embedded_dir" if direction == "global->embedded" else "global_dir"
+                            dst_raw = str(done.get(dst_key) or "").strip()
+                            dst_resolved = Path(dst_raw).resolve() if dst_raw else None
+                            if (
+                                dst_resolved is not None
+                                and dst_resolved == PLUGIN_ROOT.resolve()
+                                and not os.environ.get("PLANNER_REEXEC")
+                            ):
+                                child_env = os.environ.copy()
+                                child_env["PLANNER_REEXEC"] = "1"
+                                if sync_notices:
+                                    child_env["PLANNER_REEXEC_SYNC_LINE"] = sync_notices[-1]
+                                proc = subprocess.run(
+                                    [sys.executable, "-B", str(Path(__file__).resolve()), *sys.argv[1:]],
+                                    input=json.dumps(payload, ensure_ascii=False),
+                                    text=True,
+                                    capture_output=True,
+                                    env=child_env,
+                                    timeout=15,
+                                    check=False,
+                                )
+                                if proc.returncode == 0 and proc.stdout.strip():
+                                    print(proc.stdout.strip())
+                                    return
+                            for mod_name in (
+                                "schema_migrations",
+                                "planner_state",
+                                "blueprint_hub",
+                                "blueprint_engine",
+                                "host_context",
+                                "self_evolve",
+                            ):
+                                mod_obj = sys.modules.get(mod_name)
+                                if mod_obj is not None:
+                                    try:
+                                        importlib.reload(mod_obj)
+                                    except Exception:
+                                        pass
+                            import planner_state as _ps  # noqa: E402
+                    except Exception:
+                        pass
+
+        BOOTSTRAP_REQUIRED_FILES = _ps.BOOTSTRAP_REQUIRED_FILES
+        auto_upgrade_workspace = _ps.auto_upgrade_workspace
+        bootstrap_workspace = _ps.bootstrap_workspace
+        detect_doc_mcps = _ps.detect_doc_mcps
+        eval_conditions = _ps.eval_conditions
+        get_paths = _ps.get_paths
+        get_pending_extra_requests = _ps.get_pending_extra_requests
+        is_real_project_root = _ps.is_real_project_root
+        load_json = _ps.load_json
+        load_project_profile_with_warnings = _ps.load_project_profile_with_warnings
+        resolve_planner_mode_info = _ps.resolve_planner_mode_info
 
         auto_initialized: list[str] = []
         if is_real_project_root(repo) and any(not (repo / rel).exists() for rel in BOOTSTRAP_REQUIRED_FILES):
@@ -287,37 +372,8 @@ def main() -> None:
             stored_pv, cur_pv = upgrade_info["plugin_downgrade_blocked"]
             lines.append(f"PLUGIN_DOWNGRADE_GUARD|workspace=v{stored_pv}>installed=v{cur_pv}|keeping workspace profile intact")
 
-        if is_real_project_root(repo) and isinstance(evo_cfg, dict) and evo_cfg.get("enabled"):
-            plug_rel = str(evo_cfg.get("plugin_path") or ".agents/plugins/dynamic-fractal-planner").strip()
-            if (repo / plug_rel / "plugin.json").is_file():
-                try:
-                    import self_evolve  # noqa: E402
-
-                    auto_sync = bool(evo_cfg.get("auto_sync_higher_version", True))
-                    chk = self_evolve.sync_plugin_versions(repo, plugin_rel=plug_rel, apply=False)
-                    if chk.get("direction") == "embedded->global":
-                        if auto_sync:
-                            done = self_evolve.sync_plugin_versions(repo, plugin_rel=plug_rel, apply=True)
-                            lines.append(
-                                f"PLUGIN_SYNCED|embedded->global|v{chk.get('global_version') or '0.0.0'}->v{done.get('embedded_version')}"
-                            )
-                        else:
-                            lines.append(
-                                f"PLUGIN_VERSION_SKEW|embedded=v{chk.get('embedded_version')}>global=v{chk.get('global_version')}|ACT:run `plan_tool.py evolve sync-plugin --apply`"
-                            )
-                    elif chk.get("direction") == "global->embedded":
-                        if auto_sync:
-                            done = self_evolve.sync_plugin_versions(repo, plugin_rel=plug_rel, apply=True)
-                            auto_upgrade_workspace(repo)
-                            lines.append(
-                                f"PLUGIN_SYNCED|global->embedded|v{chk.get('embedded_version') or '0.0.0'}->v{done.get('embedded_version')}"
-                            )
-                        else:
-                            lines.append(
-                                f"PLUGIN_UPGRADE_AVAILABLE|global=v{chk.get('global_version')}>embedded=v{chk.get('embedded_version')}|ACT:run `plan_tool.py evolve sync-plugin --apply`"
-                            )
-                except Exception:
-                    pass
+        if sync_notices:
+            lines.extend(sync_notices)
 
         pending_doc_mig = upgrade_info.get("docs_needing_ai_conversion") or []
         if pending_doc_mig:

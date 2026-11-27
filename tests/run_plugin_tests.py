@@ -5777,6 +5777,1035 @@ class TestAdversarialQaGate(unittest.TestCase):
             self.assertIn("[QA_GATE|COLD_CTX]", json.dumps(pre_t2))
 
 
+class TestFractalParallelWaveOrchestration(unittest.TestCase):
+    """v2.21.0: Multi-wave DAG epoch scheduling, `[LEASE:...]` auto-bind/guard, ScriptPath/define_subagent, & dirty-safe rollback."""
+
+    def test_slice_dag_lint_valid_cycle_dangling_and_wbs_safe(self) -> None:
+        import blueprint_engine
+        import wave_scheduler
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            bp_ok = repo / "BP_DAG_OK.md"
+            txt = TestSotaBlueprintEngine._valid_blueprint_text(
+                body_override={
+                    "h1": "\n".join([
+                        "SLICE|W1|Update CI workflow|clean pipeline|python3 -B tests/x.py",
+                        "SLICE_DAG|W1|deps=none|writes=.github/workflows/FastQualityGuard.yml,SmartClean.cs|locks=proot_build|tier=L2",
+                        "SLICE|W2|Update UI view|new widget|python3 -B tests/y.py",
+                        "SLICE_DAG|W2|deps=W1|writes=Views/Foo.cs|locks=proot_build|tier=L1",
+                    ])
+                }
+            )
+            bp_ok.write_text(txt, encoding="utf-8")
+            res = blueprint_engine.lint_blueprint(bp_ok, strict=True)
+            self.assertTrue(res["passed"], f"Expected 100/100 PASS, got {res}")
+            self.assertEqual(res["score"], 100)
+
+            # Cycle and unknown dep MUST fail strict lint
+            bp_cyc = repo / "BP_DAG_CYC.md"
+            bp_cyc.write_text(
+                TestSotaBlueprintEngine._valid_blueprint_text(
+                    body_override={
+                        "h1": "\n".join([
+                            "SLICE|W1|Step one|out1|pytest -q",
+                            "SLICE_DAG|W1|deps=W2|writes=a.py|tier=L2",
+                            "SLICE|W2|Step two|out2|pytest -q",
+                            "SLICE_DAG|W2|deps=W1,W99|writes=b.py|tier=L9",
+                        ])
+                    }
+                ),
+                encoding="utf-8",
+            )
+            res_cyc = blueprint_engine.lint_blueprint(bp_cyc, strict=True)
+            self.assertFalse(res_cyc["passed"])
+            self.assertIn("DAG_CYCLE", " ".join(res_cyc["blockers"]))
+
+            # Legacy unannotated BP with sub-bullets uses safe inference & __legacy_serial when needed
+            parsed = wave_scheduler.parse_blueprint_waves("\n".join([
+                "SLICE|W1|Alpha (`foo/a.py`)|done|pytest",
+                "- `W1.1`: edit `foo/sub.py`",
+                "SLICE|W2|Beta prose only|done|pytest",
+            ]))
+            m1 = wave_scheduler.infer_legacy_wave_meta(parsed["waves"][0])
+            m2 = wave_scheduler.infer_legacy_wave_meta(parsed["waves"][1])
+            self.assertIn("foo/sub.py", m1["writes"])
+            self.assertIn("__legacy_serial", m2["locks"])
+
+    def test_dual_mode_seq_vs_parallel_and_host_max_width(self) -> None:
+        import wave_scheduler
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            bp = repo / "BP_MULTI.md"
+            bp.write_text(
+                "\n".join([
+                    "BP_META|id=BP_MULTI|format=full|domain_vec=software:1.00|door=1-way|tier=T3|status=ACTIVE",
+                    "## 6. Rolling-Wave DSM Graph",
+                    "### H1 Atomic Slices",
+                    "SLICE|W1|Core A|out|pytest a",
+                    "SLICE_DAG|W1|deps=none|writes=src/a.py|locks=proot_build|tier=L2",
+                    "SLICE|W2|Core B|out|pytest b",
+                    "SLICE_DAG|W2|deps=none|writes=src/b.py|locks=proot_build|tier=L2",
+                    "SLICE|W3|Core C|out|pytest c",
+                    "SLICE_DAG|W3|deps=none|writes=src/c.py|locks=proot_build|tier=L1",
+                    "SLICE|W4|Shared Strings|out|pytest d",
+                    "SLICE_DAG|W4|deps=W1|writes=src/d.py|locks=l10n|tier=L2",
+                    "SLICE|W5|Another Strings|out|pytest e",
+                    "SLICE_DAG|W5|deps=none|writes=src/e.py|locks=l10n|tier=L2",
+                ]),
+                encoding="utf-8",
+            )
+            with _patched_env({"PLANNER_HOST_OVERRIDE": "antigravity-local", "PLANNER_LEASE_DIR": str(repo / ".leases")}):
+                s_seq = wave_scheduler.schedule_blueprint(bp, repo, mode="seq")
+                s_loc = wave_scheduler.schedule_blueprint(bp, repo, mode="parallel")
+            self.assertEqual(s_seq["total_epochs"], 5)
+            # Local allows max_width=4; proot_build is barrier-deferred, l10n serializes W4 & W5 -> 2 or 3 epochs (<5)
+            self.assertLessEqual(s_loc["total_epochs"], 3)
+            self.assertGreaterEqual(max(len(e["waves"]) for e in s_loc["epochs"]), 3)
+
+            with _patched_env({"PLANNER_HOST_OVERRIDE": "antigravity-termux", "PLANNER_LEASE_DIR": str(repo / ".leases")}):
+                s_tmx = wave_scheduler.schedule_blueprint(bp, repo, mode="parallel")
+            self.assertEqual(s_tmx["max_width"], 2)
+            self.assertTrue(all(len(e["waves"]) <= 2 for e in s_tmx["epochs"]))
+
+    def test_emit_workflow_compile_and_subagent_prompts(self) -> None:
+        import ast
+        import wave_scheduler
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            bp = repo / "BP_WF.md"
+            bp.write_text(
+                "\n".join([
+                    "BP_META|id=BP_WF|format=full|domain_vec=software:1.00|door=1-way|tier=T3|status=ACTIVE",
+                    "## 6. Rolling-Wave DSM Graph",
+                    "### H1 Atomic Slices",
+                    "SLICE|W1|A|out|python3 -m py_compile a.py",
+                    "SLICE_DAG|W1|deps=none|writes=a.py|tier=L1",
+                    "SLICE|W2|B|out|python3 -m py_compile b.py",
+                    "SLICE_DAG|W2|deps=none|writes=b.py|tier=L3",
+                ]),
+                encoding="utf-8",
+            )
+            with _patched_env({"PLANNER_HOST_OVERRIDE": "antigravity-local", "PLANNER_LEASE_DIR": str(repo / ".leases")}):
+                sched = wave_scheduler.schedule_blueprint(bp, repo, mode="parallel")
+                wf_p = wave_scheduler.emit_workflow_script(sched, bp, repo, Path(art) / "scratch" / "wf.py", artifact_dir=Path(art))
+                prompts = wave_scheduler.emit_subagent_prompts(sched)
+            wf_src = wf_p.read_text(encoding="utf-8")
+            ast.parse(wf_src)
+            self.assertIn("PLANNER_ARTIFACT_DIR=", wf_src)
+            self.assertIn("pipeline(SCHEDULE[\"epochs\"]", wf_src)
+            self.assertIn("D1_CAPTAIN|model=", prompts)
+            self.assertIn("EnableSubagentTools=true", prompts)
+
+    def test_lease_autobind_guards_scriptpath_and_dirty_rollback(self) -> None:
+        import wave_scheduler
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art, tempfile.TemporaryDirectory() as ldir:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents").mkdir(parents=True, exist_ok=True)
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps({"schema_version": 5, "planner_mode": "lean"}), encoding="utf-8")
+            (repo / "a.py").write_text("A = 1\n", encoding="utf-8")
+            (repo / "b.py").write_text("B = 1\n", encoding="utf-8")
+            (repo / "AndroidStrings.cs").write_text("// l10n\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
+            # Pre-existing dirty file that MUST survive rollback untouched
+            (repo / "dirty_keep.txt").write_text("preexisting dirty content\n", encoding="utf-8")
+
+            env_x = {"PLANNER_LEASE_DIR": ldir}
+            with _patched_env(env_x):
+                eb = wave_scheduler.epoch_begin(
+                    repo, "BP_T", "E1",
+                    [
+                        {"id": "W1", "writes": ["a.py"], "locks": []},
+                        {"id": "W2", "writes": ["b.py"], "locks": []},
+                    ],
+                    nonces={"W1": "n111", "W2": "n222"},
+                )
+                lease_w1 = eb["leases"]["W1"]
+                # Auto-bind D1 Captain + D2 Leaf via PreInvocation
+                _, _, _ = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "conversationId": "conv-w1", "lastUserInput": f"{lease_w1}\nImplement W1", "invocationNum": 1},
+                    env_extra=env_x,
+                )
+                _, _, _ = run_hook(
+                    "planner_pre_invocation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "conversationId": "conv-w1-leaf", "lastUserInput": f"[LEASE:BP_T:E1:W1:n111:sub=a.py]\nLeaf edit", "invocationNum": 1},
+                    env_extra=env_x,
+                )
+
+                def _edit_guard(cid: str, rel: str) -> dict[str, Any]:
+                    _, _, p = run_hook(
+                        "planner_guard_files.py",
+                        {
+                            "workspacePaths": [str(repo)],
+                            "artifactDirectoryPath": art,
+                            "conversationId": cid,
+                            "toolCall": {"name": "edit_file", "args": {"Path": str(repo / rel), "Target": "1", "Replacement": "2"}},
+                        },
+                        env_extra=env_x,
+                    )
+                    return p
+
+                self.assertEqual(_edit_guard("conv-w1", "a.py")["decision"], "allow")
+                self.assertEqual(_edit_guard("conv-w1-leaf", "a.py")["decision"], "allow")
+                self.assertEqual(_edit_guard("conv-w1", "b.py")["decision"], "deny")
+                self.assertEqual(_edit_guard("conv-w1", "AndroidStrings.cs")["decision"], "deny")
+                self.assertEqual(_edit_guard("conv-rogue", "b.py")["decision"], "deny")
+
+                # Parallel worker blocked from running dotnet build / git push directly
+                _, _, cmd_deny = run_hook(
+                    "planner_guard_command.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art,
+                        "conversationId": "conv-w1",
+                        "toolCall": {"name": "run_command", "args": {"CommandLine": "git push origin master"}},
+                    },
+                    env_extra=env_x,
+                )
+                self.assertEqual(cmd_deny["decision"], "deny")
+                self.assertIn("LEASE CMD DENY", cmd_deny["reason"])
+
+                _, _, cmd_ok = run_hook(
+                    "planner_guard_command.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art,
+                        "conversationId": "conv-w1",
+                        "toolCall": {"name": "run_command", "args": {"CommandLine": "git status -s"}},
+                    },
+                    env_extra=env_x,
+                )
+                self.assertEqual(cmd_ok["decision"], "allow")
+
+                # Delegation guard inspects ScriptPath & define_subagent
+                bad_wf = Path(art) / "bad_wf.py"
+                bad_wf.write_text('async def f(): await agent("x", model="claude-3-7-sonnet")\n', encoding="utf-8")
+                _, _, dg_sp = run_hook(
+                    "planner_guard_delegation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "toolCall": {"name": "run_workflow", "args": {"ScriptPath": str(bad_wf)}}},
+                    env_extra=env_x,
+                )
+                self.assertEqual(dg_sp["decision"], "deny")
+
+                bad_wf2 = Path(art) / "bad_wf2.py"
+                bad_wf2.write_text('async def run_one(w): await call_tool("run_command", CommandLine="dotnet build")\nawait parallel(["x"], run_one)\n', encoding="utf-8")
+                _, _, dg_par = run_hook(
+                    "planner_guard_delegation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "toolCall": {"name": "run_workflow", "args": {"ScriptPath": str(bad_wf2)}}},
+                    env_extra=env_x,
+                )
+                self.assertEqual(dg_par["decision"], "deny")
+
+                (repo / ".agents" / "planner_profile.json").write_text(
+                    json.dumps({"schema_version": 5, "delegation": {"sub_subagent": {"allow_nesting": False}}}),
+                    encoding="utf-8",
+                )
+                _, _, dg_def = run_hook(
+                    "planner_guard_delegation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "toolCall": {"name": "define_subagent", "args": {"Name": "cap", "EnableSubagentTools": True}}},
+                    env_extra=env_x,
+                )
+                self.assertEqual(dg_def["decision"], "deny")
+
+                # Simulate W1 success + W2 half-baked failure -> barrier keeps a.py, reverts b.py, preserves dirty_keep.txt!
+                (repo / "a.py").write_text("A = 2\n", encoding="utf-8")
+                (repo / "b.py").write_text("B = BROKEN\n", encoding="utf-8")
+                bar = wave_scheduler.epoch_barrier(
+                    repo, "BP_T", "E1",
+                    [{"slice_id": "W1", "status": "ok"}, {"slice_id": "W2", "status": "failed"}],
+                    run_probes=False, artifact_dir=Path(art),
+                )
+                self.assertEqual(bar["kept_changes"], ["a.py"])
+                self.assertEqual(bar["rolled_back"], ["b.py"])
+                self.assertEqual((repo / "a.py").read_text(encoding="utf-8"), "A = 2\n")
+                self.assertEqual((repo / "b.py").read_text(encoding="utf-8"), "B = 1\n")
+                self.assertEqual((repo / "dirty_keep.txt").read_text(encoding="utf-8"), "preexisting dirty content\n")
+                self.assertFalse(wave_scheduler.has_active_parallel_leases(repo))
+
+    def test_wave_exec_mode_triage_and_eco_precedence(self) -> None:
+        self.assertEqual(
+            complexity_triage.detect_wave_exec_mode("Executa na menor quantidade possível de waves separadas e maior em paralelo sem conflito"),
+            "parallel_max",
+        )
+        self.assertEqual(complexity_triage.detect_wave_exec_mode("Executa uma wave por vez em modo sequencial"), "sequential")
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art1, tempfile.TemporaryDirectory() as art2:
+            repo = Path(td)
+            (repo / ".agents").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps({"schema_version": 5, "planner_mode": "lean"}), encoding="utf-8")
+            _, _, pre_par = run_hook(
+                "planner_pre_invocation.py",
+                {"workspacePaths": [str(repo)], "artifactDirectoryPath": art1, "lastUserInput": "Executa as waves em paralelo no mínimo de contextos", "invocationNum": 1},
+            )
+            self.assertIn("[WAVE_ORCH|MAX_PAR]", json.dumps(pre_par))
+
+            _, _, pre_eco = run_hook(
+                "planner_pre_invocation.py",
+                {"workspacePaths": [str(repo)], "artifactDirectoryPath": art2, "lastUserInput": "low quota: executa as waves em paralelo no mínimo de contextos", "invocationNum": 1},
+            )
+            self.assertNotIn("[WAVE_ORCH|MAX_PAR]", json.dumps(pre_eco))
+
+
+class TestW56_1_FoundationSafety(unittest.TestCase):
+    """W56.1 foundation safety tests: C1, C2, C4, C7, verify_wiring split, live_diagnostics, & error_learner."""
+
+    _SAMPLE_BUILD_LESSONS = """# Timeless Build & Commit Error Lessons (`BUILD_LESSONS.md`)
+
+> STYLE|lossless symbolic telegraphic EN ONLY (`!articles/copulas/filler`).
+> LAW|ANTI-OBSOLESCENCE (MANDATORY): NEVER hardcode ephemeral versions.
+
+## 1. Core Timeless Build & Commit Lessons (`BL-001` .. `BL-010`)
+
+### `BL-001` | SDK, TFM, MSBuild & CI Runner Version Drift
+- `Category`: `toolchain-ci`
+- `Codes`: `XA1006, XA4211, NETSDK1045`
+- `Keywords`: `TargetFramework, TargetPlatformVersion, targetSdkVersion`
+- `RootCause`: Runner SDKs evolve continuously.
+- `TimelessRule`: Keep `<TargetFramework>` aligned w/ active runner toolchain && audit `targetSdkVersion` delta warnings.
+- `DynamicLookup`: Check live official `.NET Android` docs & CI diagnostics.
+
+### `BL-002` | Platform OS Version Guards (`CA1416`)
+- `Category`: `android-platform`
+- `Codes`: `CA1416`
+- `Keywords`: `Build.VERSION.SdkInt, IsAndroidVersionAtLeast, SupportedOSPlatform`
+- `RootCause`: Analyzers do not propagate outer guards across lambdas.
+- `TimelessRule`: Use `OperatingSystem.IsAndroidVersionAtLeast(N)` inside the exact call scope.
+- `DynamicLookup`: Check live official Android docs.
+
+### `BL-003` | Platform API Obsolescence (`CA1422`, `CS0618`)
+- `Category`: `android-platform`
+- `Codes`: `CA1422, CS0618`
+- `Keywords`: `obsoleted on, deprecated, SetDecorFitsSystemWindows`
+- `RootCause`: Platform bindings obsolete older APIs.
+- `TimelessRule`: Prefer current non-obsolete stable APIs over legacy calls.
+- `DynamicLookup`: Check live official Android docs.
+
+### `BL-004` | Namespace Collisions (`CS0104`)
+- `Category`: `android-bindings`
+- `Codes`: `CS0104`
+- `Keywords`: `ambiguous reference, Stream, Process, OperationCanceledException`
+- `RootCause`: Importing Android namespaces alongside `System.*` collides.
+- `TimelessRule`: Fully qualify collision-prone BCL types (`System.IO.Stream`).
+- `DynamicLookup`: Check file `using` directives.
+
+### `BL-006` | Cross-Layer Contract & Symbol Drift (`CS0103`, `CS0117`)
+- `Category`: `cross-layer-contract`
+- `Codes`: `CS0103, CS0117, CS1061`
+- `Keywords`: `AndroidStrings.Active, AndroidStrings.Current, SpatialProgramMetadata`
+- `RootCause`: Guessing member names breaks cross-layer builds.
+- `TimelessRule`: Always grep exact symbol definitions before editing && use `AndroidStrings.Active`.
+- `DynamicLookup`: Grep exact declaration across layers.
+
+### `BL-008` | XML Documentation Comments (`CS1591`, `CS0419`)
+- `Category`: `xml-docs`
+- `Codes`: `CS1591, CS0419`
+- `Keywords`: `missing XML comment, ambiguous reference in cref`
+- `RootCause`: Undocumented public symbols or ambiguous crefs trigger warnings.
+- `TimelessRule`: Add XML summaries on public members && qualify overloaded crefs.
+- `DynamicLookup`: Check `<GenerateDocumentationFile>` in `.csproj`.
+
+### `BL-010` | Android Packaging Duplicates (`XA4301`)
+- `Category`: `android-packaging`
+- `Codes`: `XA4301, XA4300`
+- `Keywords`: `APK already contains, AndroidNativeLibrary`
+- `RootCause`: Duplicate item inclusion in `.csproj` conflicts with SDK default globs.
+- `TimelessRule`: Use `Update` instead of duplicating SDK-default items.
+- `DynamicLookup`: Check current `.NET Android` SDK item glob rules.
+
+## 2. Auto-Learned Build Lessons
+<!-- AUTO-LEARNED-LESSONS:START -->
+<!-- AUTO-LEARNED-LESSONS:END -->
+"""
+
+    def test_c7_session_start_reload_presync_version_bump(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            root = Path(td)
+            repo = root / "host_app"
+            emb = repo / ".agents" / "plugins" / "dynamic-fractal-planner"
+            glob = root / ".gemini" / "config" / "plugins" / "dynamic-fractal-planner"
+            ws_file = root / ".workspaces.json"
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / "package.json").write_text('{"name":"c7-host"}\n', encoding="utf-8")
+            (repo / ".agents" / "docs" / "PROJECT_HISTORY.md").write_text(
+                planner_state.PROJECT_HISTORY_TEMPLATE, encoding="utf-8"
+            )
+            (repo / ".agents" / "docs" / "SAVED_IDEAS.md").write_text(
+                planner_state.SAVED_IDEAS_TEMPLATE, encoding="utf-8"
+            )
+            (repo / ".agents" / "docs" / "EXTRA_REQUESTS.md").write_text(
+                planner_state.EXTRA_REQUESTS_TEMPLATE, encoding="utf-8"
+            )
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 5,
+                        "planner_mode": "auto",
+                        "plugin_version": "2.20.0",
+                        "docs_format_version": 1,
+                        "plugin_evolution": {"enabled": True, "auto_sync_higher_version": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            ignore_p = shutil.ignore_patterns(
+                ".git", ".last_good_backup", "__pycache__", "*.pyc", ".metrics.jsonl",
+                ".diagnostics", ".hook_state.json", ".workspaces.json", ".model_modes.json",
+            )
+            shutil.copytree(PLUGIN_ROOT, emb, ignore=ignore_p)
+            shutil.copytree(PLUGIN_ROOT, glob, ignore=ignore_p)
+
+            emb_manifest = json.loads((emb / "plugin.json").read_text(encoding="utf-8"))
+            emb_manifest["version"] = "2.20.0"
+            (emb / "plugin.json").write_text(json.dumps(emb_manifest), encoding="utf-8")
+
+            glob_manifest = dict(emb_manifest)
+            glob_manifest["version"] = "2.99.0"
+            (glob / "plugin.json").write_text(json.dumps(glob_manifest), encoding="utf-8")
+            (glob / "CHANGELOG.md").write_text(
+                "# Plugin History\n\n- 2026-11-27|v2.99.0|simulated version bump for C7 pre-sync reload\n",
+                encoding="utf-8",
+            )
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "GEMINI_HOME": str(root / ".gemini"),
+                    "PLANNER_WORKSPACES_FILE": str(ws_file),
+                    "PLANNER_DISABLE_TELEMETRY": "1",
+                }
+            )
+            env.pop("PLANNER_REEXEC", None)
+
+            payload = {"workspacePaths": [str(repo)], "artifactDirectoryPath": art}
+            res = subprocess.run(
+                [sys.executable, str(emb / "hooks" / "planner_session_start.py")],
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                env=env,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            out_data = json.loads(res.stdout.strip())
+            msg = out_data["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("PLUGIN_SYNCED|global->embedded|v2.20.0->v2.99.0", msg)
+            self.assertEqual(json.loads((emb / "plugin.json").read_text(encoding="utf-8"))["version"], "2.99.0")
+            # Pre-sync / reload ensures the updated plugin version is reflected immediately in the SAME SessionStart turn
+            self.assertEqual(
+                json.loads((repo / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))["plugin_version"],
+                "2.99.0",
+            )
+
+    def test_c4_sync_excludes_perms_federation_and_tree_sha256(self) -> None:
+        import stat
+        import unittest.mock  # noqa: E402
+        import self_evolve  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "standalone_src"
+            dst = root / "embedded_dst"
+            src.mkdir(parents=True)
+            (src / ".github" / "workflows").mkdir(parents=True)
+            (src / ".github" / "workflows" / "ReleasePlugin.yml").write_text("name: Release\n", encoding="utf-8")
+            (src / "rules").mkdir(parents=True)
+            (src / "skills" / "sota").mkdir(parents=True)
+            (src / "scripts").mkdir(parents=True)
+            (src / "plugin.json").write_text(json.dumps({"name": "dynamic-fractal-planner", "version": "2.21.0"}), encoding="utf-8")
+            (src / "README.md").write_text("# Docs\n", encoding="utf-8")
+            (src / "rules" / "AGENTS.md").write_text("# Rules\n", encoding="utf-8")
+            (src / "skills" / "sota" / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+            (src / "install.sh").write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
+            (src / "scripts" / "core.py").write_text("X = 1\n", encoding="utf-8")
+            os.chmod(src / "README.md", 0o755)
+            os.chmod(src / "rules" / "AGENTS.md", 0o755)
+            os.chmod(src / "skills" / "sota" / "SKILL.md", 0o755)
+            os.chmod(src / "install.sh", 0o644)
+
+            self.assertTrue(self_evolve._is_rel_excluded(".github/workflows/ReleasePlugin.yml"))
+            self_evolve._sync_plugin_tree(src, dst, snapshot_backup=False)
+            self.assertFalse((dst / ".github").exists(), ".github must be excluded from synced plugin tree")
+            self.assertTrue((dst / "rules" / "AGENTS.md").is_file())
+            self.assertEqual(stat.S_IMODE((dst / "README.md").stat().st_mode) & 0o111, 0)
+            self.assertEqual(stat.S_IMODE((dst / "rules" / "AGENTS.md").stat().st_mode) & 0o111, 0)
+            self.assertEqual(stat.S_IMODE((dst / "skills" / "sota" / "SKILL.md").stat().st_mode) & 0o111, 0)
+            self.assertTrue(bool((dst / "install.sh").stat().st_mode & 0o111), ".sh scripts must stay +x")
+
+            # compute_plugin_tree_sha256 detects 1-byte canonical drift and ignores runtime/excluded files
+            sha_fn = getattr(self_evolve, "compute_plugin_tree_sha256")
+            r1 = sha_fn(dst)
+            v1, h1 = r1 if isinstance(r1, tuple) else ("", r1)
+            self.assertEqual(v1, "2.21.0")
+            self.assertRegex(h1, r"^[0-9a-f]{64}$")
+            self.assertEqual(sha_fn(dst), r1)
+            (dst / ".metrics.jsonl").write_text('{"ev":"turn"}\n', encoding="utf-8")
+            self.assertEqual(sha_fn(dst), r1)
+            (dst / "scripts" / "core.py").write_text("X = 2\n", encoding="utf-8")
+            r2 = sha_fn(dst)
+            _, h2 = r2 if isinstance(r2, tuple) else ("", r2)
+            self.assertNotEqual(h2, h1)
+
+            # verify_universal.check_plugin_sync_parity compares (semver, tree_sha256) against mounted peers + standalone fallback
+            peer = root / "peer_plugin"
+            shutil.copytree(dst, peer)
+            (peer / "scripts" / "core.py").write_text("X = 9\n", encoding="utf-8")
+            repo_p = root / "host_repo"
+            emb_p = repo_p / ".agents" / "plugins" / "dynamic-fractal-planner"
+            shutil.copytree(dst, emb_p)
+            (emb_p / ".agents" / "docs").mkdir(parents=True, exist_ok=True)
+            (emb_p / ".agents" / "docs" / "EXTERNAL_AI_SYNC.md").write_text("### v2.21.0\n", encoding="utf-8")
+            (emb_p / ".agents" / "docs" / "PROJECT_HISTORY.md").write_text("- v2.21.0\n", encoding="utf-8")
+
+            warns_drift: list[str] = []
+            verify_universal.check_plugin_sync_parity(
+                repo_p,
+                [".agents/plugins/dynamic-fractal-planner/scripts/core.py"],
+                warns_drift,
+                scan_all=True,
+                global_dir=peer,
+                sibling_dirs=[],
+            )
+            self.assertTrue(any("parity mismatch" in w for w in warns_drift), warns_drift)
+
+            # Standalone inline fallback when self_evolve is unavailable
+            with unittest.mock.patch.dict(sys.modules, {"self_evolve": None}):
+                warns_fb: list[str] = []
+                verify_universal.check_plugin_sync_parity(
+                    repo_p,
+                    [".agents/plugins/dynamic-fractal-planner/scripts/core.py"],
+                    warns_fb,
+                    scan_all=True,
+                    global_dir=peer,
+                    sibling_dirs=[],
+                )
+                self.assertTrue(any("parity mismatch" in w for w in warns_fb), warns_fb)
+
+            # repo_federation preserves rules/AGENTS.md while excluding root AGENTS.md
+            fed_candidates = [
+                PLUGIN_ROOT.parents[2] / ".agents" / "agent" / "repo_federation.py" if len(PLUGIN_ROOT.parents) >= 3 else Path("/nonexistent"),
+                PLUGIN_ROOT / ".agents" / "agent" / "repo_federation.py",
+                Path("/tmp/cavern-federation/cavern/.agents/agent/repo_federation.py"),
+            ]
+            fed_path = next((p for p in fed_candidates if p.is_file()), None)
+            if fed_path is not None:
+                fed_mod = _load_mod(fed_path)
+                self.assertTrue(fed_mod._is_excluded("AGENTS.md", ["AGENTS.md"]))
+                self.assertFalse(fed_mod._is_excluded("rules/AGENTS.md", ["AGENTS.md"]))
+
+                # Test generated Termux batch sync_global_plugin script preserves rules/AGENTS.md
+                script_src = fed_mod._build_termux_batch_sync_script([{"alias": "fractal", "termuxPath": str(src), "branch": "main"}])
+                ns: dict[str, Any] = {}
+                exec(compile(script_src, "<batch_sync>", "exec"), ns)
+                (src / "AGENTS.md").write_text("# Root AGENTS\n", encoding="utf-8")
+                batch_dst = root / "batch_dst"
+                batch_dst.mkdir()
+                ns["sync_global_plugin"](src, batch_dst)
+                self.assertTrue((batch_dst / "rules" / "AGENTS.md").is_file())
+                self.assertFalse((batch_dst / "AGENTS.md").exists())
+                self.assertFalse((batch_dst / ".github").exists())
+
+    def test_c1_triage_bp_unification_and_match_threshold(self) -> None:
+        import inspect  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / ".agents" / "docs" / "blueprints").mkdir(parents=True)
+            prof = {"schema_version": 5, "planner_mode": "lean", "blueprint": {"require_by_default": True, "tiered_formats": True}}
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps(prof), encoding="utf-8")
+
+            # 1) Sync vs feature disambiguation
+            self.assertTrue(complexity_triage.detect_plugin_sync_intent("Atualiza o plugin no cavern"))
+            self.assertFalse(
+                complexity_triage.detect_plugin_sync_intent(
+                    "Atualiza o plugin para adicionar novo hook de validação e refatorar triage"
+                )
+            )
+            feat_tri = complexity_triage.analyze_prompt(
+                "Atualiza o plugin para adicionar novo hook de validação e refatorar complexity_triage.py",
+                workspace_root=repo,
+            )
+            self.assertFalse(feat_tri["plugin_sync_intent"])
+            self.assertGreaterEqual(feat_tri["tier"], 1)
+
+            if hasattr(complexity_triage, "classify_scope_and_tier"):
+                fn = complexity_triage.classify_scope_and_tier
+                sig = inspect.signature(fn)
+                kw: dict[str, Any] = {}
+                if "workspace_root" in sig.parameters:
+                    kw["workspace_root"] = repo
+                if "profile" in sig.parameters:
+                    kw["profile"] = prof
+                c_sync = fn("sync plugin", **kw)
+                c_feat = fn("Atualiza o plugin para implementar novo hook e corrigir parser", **kw)
+                self.assertTrue(c_sync.get("plugin_sync_intent"))
+                self.assertFalse(c_feat.get("plugin_sync_intent"))
+
+            # 2) "audit" must NOT clear read_only_block
+            for ro_prompt in (
+                "Read-only audit of the codebase without modifying any files",
+                "Só analisa e faz uma auditoria sem alterar nada",
+            ):
+                ro_tri = complexity_triage.analyze_prompt(ro_prompt, workspace_root=repo)
+                self.assertEqual(ro_tri["intent"], "read_only_analysis", ro_prompt)
+                self.assertLessEqual(ro_tri["tier"], 1)
+                self.assertFalse(ro_tri["blueprint_required_by_policy"])
+
+            # 3) Triage <-> Blueprint format parity across T1/T2/T3
+            for prompt in (
+                "Fix timeout bug in cache loader",
+                "Refactor audio pipeline across Core.cs, Engine.cs, View.cs, and Tests.cs",
+                "Design cross-process NPU GPU spatial audio architecture across C# DSP, C++ NDK, JNI, and lifecycle",
+            ):
+                tri = complexity_triage.analyze_prompt(prompt, workspace_root=repo)
+                bp_cls = blueprint_engine.classify_blueprint_request(prompt, profile=prof)
+                self.assertEqual(tri["recommended_blueprint_format"], bp_cls["recommended_format"], prompt)
+                self.assertEqual(f"T{tri['tier']}", bp_cls["risk_tier"], prompt)
+
+            # 4) match_blueprints ratio >= 0.40 & ignores archived/done blueprints
+            bp_act = repo / ".agents" / "docs" / "blueprints" / "BP_AUDIO_SPATIAL_CORTEX.md"
+            bp_act.write_text(
+                "BP_META|id=BP_AUDIO_SPATIAL_CORTEX|format=full|domain_vec=dsp-hw:1.00,software:0.80|door=1-way|tier=T3|status=ACTIVE\n"
+                "VALUE|Spatial audio cortex pipeline dsp tuning\n",
+                encoding="utf-8",
+            )
+            bp_done = repo / ".agents" / "docs" / "blueprints" / "BP_LEGACY_SYNC.md"
+            bp_done.write_text(
+                "BP_META|id=BP_LEGACY_SYNC|format=mini|domain_vec=software:1.00|door=2-way|tier=T1|status=DONE\n"
+                "VALUE|Legacy sync tool refactor\n",
+                encoding="utf-8",
+            )
+            low_match = blueprint_engine.match_blueprints(
+                "Add authentication middleware header timeout handler for audio websocket", repo, profile=prof
+            )
+            self.assertEqual(low_match["action"], "CREATE", low_match)
+
+            done_match = blueprint_engine.match_blueprints("Legacy sync tool refactor", repo, profile=prof)
+            self.assertEqual(done_match["matches"], [], done_match)
+
+            hi_match = blueprint_engine.match_blueprints("Enhance audio spatial cortex dsp", repo, profile=prof)
+            self.assertEqual(hi_match["action"], "AMEND", hi_match)
+            self.assertEqual((hi_match.get("top_match") or {}).get("id"), "BP_AUDIO_SPATIAL_CORTEX")
+
+    def test_c2_shlex_ship_gates_verifiable_paths_and_doc_compaction(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            (repo / ".agents" / "docs" / "blueprints").mkdir(parents=True)
+            (repo / ".agents" / "qa").mkdir(parents=True)
+            (repo / ".agents" / "plugins" / "dynamic-fractal-planner" / "rules").mkdir(parents=True)
+            (repo / ".agents" / "preview").mkdir(parents=True)
+            (repo / ".github" / "workflows").mkdir(parents=True)
+            (repo / "node_modules" / "pkg").mkdir(parents=True)
+            (repo / "src").mkdir()
+            (repo / "package.json").write_text('{"name":"c2"}\n', encoding="utf-8")
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 5,
+                        "planner_mode": "lean",
+                        "code_path_prefixes": ["Cavern/"],
+                        "code_extensions": [".cs", ".csproj"],
+                        "build_extensions": [".cs", ".csproj"],
+                        "build_rules": [{"label": "cs", "command": "echo build", "trigger_extensions": [".cs"]}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (repo / ".agents" / "docs" / "EXTRA_REQUESTS.md").write_text(planner_state.EXTRA_REQUESTS_TEMPLATE, encoding="utf-8")
+
+            # 1) shlex command guard: wc/grep/cat/echo/py_compile untouched; python3 -B rewritten to --fast
+            def run_cg(cmd: str, env_x: dict[str, str] | None = None) -> dict[str, Any]:
+                ex = {"PLANNER_SKIP_DNS_CHECK": "1"}
+                if env_x:
+                    ex.update(env_x)
+                rc, err, parsed = run_hook(
+                    "planner_guard_command.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art,
+                        "toolCall": {"name": "run_command", "args": {"CommandLine": cmd}},
+                    },
+                    env_extra=ex,
+                )
+                self.assertEqual(rc, 0, err)
+                return parsed
+
+            for untouched in (
+                "wc -l .agents/plugins/dynamic-fractal-planner/tests/run_plugin_tests.py",
+                "grep -n TestW56_1 tests/run_plugin_tests.py",
+                "cat tests/run_plugin_tests.py",
+                'echo "python3 tests/run_plugin_tests.py"',
+                "python3 -m py_compile tests/run_plugin_tests.py",
+            ):
+                res_u = run_cg(untouched)
+                self.assertEqual(res_u["decision"], "allow", untouched)
+                self.assertNotIn("overwrite", res_u, untouched)
+
+            rw_py = run_cg("ENV=1 env -u X python3 -B tests/run_plugin_tests.py 2>&1")
+            self.assertEqual(rw_py["decision"], "allow")
+            rw_cmd = rw_py.get("overwrite", {}).get("CommandLine", "")
+            self.assertIn("tests/run_plugin_tests.py --fast 2>&1", rw_cmd)
+
+            rw_chain = run_cg("wc -l tests/run_plugin_tests.py && python3 -B tests/run_plugin_tests.py")
+            self.assertIn("wc -l tests/run_plugin_tests.py && python3 -B tests/run_plugin_tests.py --fast", rw_chain.get("overwrite", {}).get("CommandLine", ""))
+
+            # 2) Gitless AI Studio fallback: intercept all ship entrypoints without calling git
+            fake_bin = repo / ".fake_bin"
+            fake_bin.mkdir()
+            git_called_marker = repo / ".git_was_called"
+            fake_git = fake_bin / "git"
+            fake_git.write_text(f"#!/usr/bin/env bash\ntouch {git_called_marker}\nexit 99\n", encoding="utf-8")
+            os.chmod(fake_git, 0o755)
+            gitless_env = {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}", "PLANNER_SKIP_DNS_CHECK": "1"}
+
+            hs_file = Path(art) / "scratch" / ".hook_state.json"
+            hs_file.parent.mkdir(parents=True, exist_ok=True)
+            hs_file.write_text(json.dumps({"needs_verify": True}), encoding="utf-8")
+            for ship_cmd in (
+                'python3 -B .agents/scripts/omni_agent.py ship --commit "test"',
+                'python3 -B .agents/scripts/omni_agent.py push-workspace --commit "test"',
+                'python3 -B .agents/agent/github_direct.py push --commit "test"',
+                "python3 -B .agents/plugins/dynamic-fractal-planner/scripts/plan_tool.py evolve sync-all --apply --push",
+            ):
+                d_nv = run_cg(ship_cmd, env_x=gitless_env)
+                self.assertEqual(d_nv["decision"], "deny", ship_cmd)
+                self.assertIn("needs_verify", d_nv["reason"], ship_cmd)
+            self.assertFalse(git_called_marker.exists(), "gitless fallback must NOT call git")
+
+            # Clear needs_verify -> dry-run sync-all allowed, pending EXTRA_REQUESTS blocks all ship entrypoints
+            hs_file.write_text(json.dumps({"needs_verify": False}), encoding="utf-8")
+            self.assertEqual(
+                run_cg("python3 -B .agents/plugins/dynamic-fractal-planner/scripts/plan_tool.py evolve sync-all --apply", env_x=gitless_env)["decision"],
+                "allow",
+            )
+            self.assertEqual(run_cg('echo "omni_agent.py ship"', env_x=gitless_env)["decision"], "allow")
+            self.assertEqual(run_cg('python3 -B .agents/scripts/omni_agent.py ship --commit "ok"', env_x=gitless_env)["decision"], "allow")
+
+            (repo / ".agents" / "docs" / "EXTRA_REQUESTS.md").write_text(
+                "# Queue\n\n## Pending Extra Requests\n- REQ|c2 -> fix ship gate\n\n## Completed Requests\n(None)\n",
+                encoding="utf-8",
+            )
+            for ship_cmd in (
+                'python3 -B .agents/scripts/omni_agent.py ship --commit "test"',
+                'python3 -B .agents/agent/github_direct.py push --commit "test"',
+                "python3 -B .agents/plugins/dynamic-fractal-planner/scripts/plan_tool.py evolve sync-all --apply --push",
+            ):
+                d_ex = run_cg(ship_cmd, env_x=gitless_env)
+                self.assertEqual(d_ex["decision"], "deny", ship_cmd)
+                self.assertIn("Pending extra requests", d_ex["reason"], ship_cmd)
+            self.assertFalse(git_called_marker.exists())
+
+            # 3) is_verifiable_path & fast doc tracking without triggering heavy C# builds
+            prof = planner_state.load_project_profile(repo)
+            for vp in (
+                ".agents/docs/blueprints/BP_C2_TEST.md",
+                ".agents/docs/HANDOFF.md",
+                ".agents/qa/regression_contracts.json",
+                ".github/workflows/BuildAndroid.yml",
+                ".agents/plugins/dynamic-fractal-planner/rules/AGENTS.md",
+                ".agents/preview/dashboard.mjs",
+                "src/worker.js",
+                "package.json",
+            ):
+                fp = repo / vp
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                fp.write_text("// stub\n", encoding="utf-8")
+                self.assertTrue(planner_state.is_verifiable_path(str(fp), repo, prof), vp)
+            nm = repo / "node_modules" / "pkg" / "index.js"
+            nm.write_text("// dep\n", encoding="utf-8")
+            self.assertFalse(planner_state.is_verifiable_path(str(nm), repo, prof))
+            self.assertFalse(planner_state.is_build_relevant_path(str(repo / ".agents/docs/blueprints/BP_C2_TEST.md"), repo, prof))
+            self.assertFalse(planner_state.is_build_relevant_path(str(repo / ".agents/preview/dashboard.mjs"), repo, prof))
+
+            bp_file = repo / ".agents" / "docs" / "blueprints" / "BP_C2_TEST.md"
+            bp_file.write_text("BP_META|id=BP_C2_TEST|format=mini|domain_vec=software:1.00|door=2-way|tier=T1|status=ACTIVE\n", encoding="utf-8")
+            _, _, fg_bp = run_hook(
+                "planner_guard_files.py",
+                {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "toolCall": {"name": "edit_file", "args": {"Path": str(bp_file), "Target": "ACTIVE", "Replacement": "ACTIVE"}}},
+            )
+            self.assertEqual(fg_bp["decision"], "allow")
+            run_hook(
+                "planner_post_tool.py",
+                {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "toolCall": {"name": "edit_file", "args": {"Path": str(bp_file)}}},
+            )
+            hs_doc = json.loads(hs_file.read_text(encoding="utf-8"))
+            self.assertIn(".agents/docs/blueprints/BP_C2_TEST.md", hs_doc.get("doc_files_edited") or [])
+            self.assertTrue(hs_doc.get("needs_verify"))
+            self.assertTrue(hs_doc.get("doc_verify_only"))
+            self.assertFalse(hs_doc.get("needs_build"))
+
+            # 4) Doc compaction exemption vs blanking/code protection
+            comp_doc = repo / ".agents" / "docs" / "PROJECT_HISTORY.md"
+            comp_doc.write_text("\n".join(f"- entry {i}" for i in range(180)) + "\n", encoding="utf-8")
+            _, _, fg_comp = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {
+                        "name": "write_file",
+                        "args": {"Path": str(comp_doc), "Content": "# Project History\n\n- 2026-11-27|compacted older entries\n- archived: 170 lines\n"},
+                    },
+                },
+            )
+            self.assertEqual(fg_comp["decision"], "allow")
+
+            _, _, fg_blank = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "write_file", "args": {"Path": str(comp_doc), "Content": ""}},
+                },
+            )
+            self.assertEqual(fg_blank["decision"], "force_ask")
+
+            cl_file = repo / "CHANGELOG.md"
+            cl_file.write_text("\n".join(f"- v{i}" for i in range(170)) + "\n", encoding="utf-8")
+            _, _, fg_cl = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "write_file", "args": {"Path": str(cl_file), "Content": "# Changelog\n\n- v2.21.0|compacted release summary\n"}},
+                },
+            )
+            self.assertEqual(fg_cl["decision"], "allow")
+
+            # 5) verify_wiring re-exports stay intact
+            import verify_wiring  # noqa: E402
+            for sym_name in ("check_orphan_calls", "check_forward_wiring", "check_balanced_brackets", "_scan_brace_if_else", "ORPHAN_CHECK_EXTS"):
+                self.assertIs(getattr(verify_universal, sym_name), getattr(verify_wiring, sym_name), sym_name)
+
+    def test_live_diagnostics_mocked_cloudflare_and_github(self) -> None:
+        import hashlib  # noqa: E402
+        import unittest.mock  # noqa: E402
+        import urllib.error  # noqa: E402
+        import live_diagnostics  # noqa: E402
+
+        raw_secret = "AB" * 32
+        norm = live_diagnostics.normalize_pair_secret_hex(f"CAVPAIR-{raw_secret}")
+        self.assertEqual(norm, "ab" * 32)
+        headers = live_diagnostics.derive_telemetry_headers(raw_secret)
+        self.assertEqual(headers["X-Device-Hash"], hashlib.sha256(f"wake-channel-v2:{norm}".encode()).hexdigest())
+        self.assertEqual(headers["X-Telemetry-Key"], hashlib.sha256(f"telemetry-access-v3:{norm}".encode()).hexdigest())
+        with self.assertRaises(ValueError):
+            live_diagnostics.normalize_pair_secret_hex("too-short")
+
+        bad_code, bad_res = live_diagnostics.fetch_cloudflare_telemetry("http://insecure.example", norm)
+        self.assertEqual(bad_code, 0)
+        self.assertFalse(bad_res["ok"])
+
+        seen_reqs: list[tuple[str, dict[str, str]]] = []
+
+        class _FakeResp:
+            def __init__(self, status: int, body: str) -> None:
+                self.status = status
+                self._body = body.encode("utf-8")
+
+            def read(self) -> bytes:
+                return self._body
+
+            def __enter__(self) -> "_FakeResp":
+                return self
+
+            def __exit__(self, *args: Any) -> bool:
+                return False
+
+        def _fake_urlopen(req: Any, timeout: int = 15) -> _FakeResp:
+            url = req.full_url
+            hdrs = {k.lower(): v for k, v in req.header_items()}
+            seen_reqs.append((url, hdrs))
+            if "/v1/telemetry/latest" in url:
+                return _FakeResp(
+                    200,
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "meta": {"uploadedAtUtc": "2026-11-27T12:00:00Z", "trigger": "manual", "appVersion": "2.9.82", "verdict": "PASS"},
+                            "artifacts": {
+                                "selfcheck_md": "# SelfCheck OK",
+                                "summary": '{"errors":0}',
+                                "log": "2026-11-27 [INFO] boot\n2026-11-27 [ERROR] Audio underrun",
+                            },
+                        }
+                    ),
+                )
+            if "/commits/diagnostics" in url:
+                return _FakeResp(200, json.dumps({"sha": "deadbeef1234", "commit": {"committer": {"date": "2026-11-27"}, "message": "ci diag"}}))
+            if "/actions/runs" in url:
+                return _FakeResp(200, json.dumps({"workflow_runs": [{"name": "CI", "status": "completed", "conclusion": "failure", "head_sha": "cafe1234", "created_at": "2026-11-27"}]}))
+            if "ci/latest-build-diagnostics.md" in url:
+                return _FakeResp(200, "error CS0103: missing symbol")
+            if "ci/latest-learned-lessons.md" in url:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"not found"))
+            return _FakeResp(404, "not found")
+
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            rc_missing = live_diagnostics.main(["--cloudflare", "--repo", "o/r"])
+            self.assertEqual(rc_missing, 2)
+
+            with _patched_env({}) as (out_buf, _):
+                rc = live_diagnostics.main(
+                    [
+                        "--repo", "owner/repo",
+                        "--all", "--errors-only",
+                        "--cloudflare",
+                        "--relay-url", "https://hub.example.workers.dev",
+                        "--pair-secret", raw_secret,
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            stdout_txt = out_buf.getvalue()
+            self.assertIn("deadbeef", stdout_txt)
+            self.assertIn("conclusion=failure", stdout_txt)
+            self.assertIn("error CS0103: missing symbol", stdout_txt)
+            self.assertIn("[HTTP 404]", stdout_txt)
+            self.assertIn("[ERROR] Audio underrun", stdout_txt)
+            self.assertNotIn("[INFO] boot", stdout_txt)
+            cf_req_hdrs = next(h for u, h in seen_reqs if "/v1/telemetry/latest" in u)
+            self.assertEqual(cf_req_hdrs.get("x-device-hash"), headers["X-Device-Hash"])
+            self.assertEqual(cf_req_hdrs.get("x-telemetry-key"), headers["X-Telemetry-Key"])
+
+    def test_error_learner_timelessness_and_auto_learn(self) -> None:
+        import error_learner as el  # noqa: E402
+
+        # Also validate live host BUILD_LESSONS.md when embedded inside a host repo
+        if len(PLUGIN_ROOT.parents) >= 3 and PLUGIN_ROOT.parent.name == "plugins" and PLUGIN_ROOT.parents[1].name == ".agents":
+            host_lessons = PLUGIN_ROOT.parents[2] / ".agents" / "docs" / "BUILD_LESSONS.md"
+            if host_lessons.is_file():
+                ok_host, errs_host = el.audit_lessons_file(host_lessons)
+                self.assertTrue(ok_host, f"Host BUILD_LESSONS.md audit failed: {errs_host}")
+                self.assertGreaterEqual(len(el.parse_lessons(host_lessons.read_text(encoding="utf-8"))), 16)
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            lessons_file = tmp / "BUILD_LESSONS.md"
+            lessons_file.write_text(self._SAMPLE_BUILD_LESSONS, encoding="utf-8")
+            ok_s, errs_s = el.audit_lessons_file(lessons_file)
+            self.assertTrue(ok_s, errs_s)
+            lessons = el.parse_lessons(lessons_file.read_text(encoding="utf-8"))
+
+            sample_ci_json = {
+                "errorsByLayer": {
+                    "04_CavernizeAndroid": [
+                        "CavernSamples/CavernizeAndroid/Services/SelfDiagnosticEngine.cs(12,1): error CS0103: The name 'SpatialProgramMetadata' does not exist in the current context",
+                        "CavernSamples/CavernizeAndroid/Services/SelfDiagnosticEngine.cs(22,1): error CS0117: 'AndroidStrings' does not contain a definition for 'Current'",
+                        "CavernSamples/CavernizeAndroid/Services/SelfDiagnosticEngine.cs(33,1): error CS0104: 'Stream' is an ambiguous reference between 'Android.Media.Stream' and 'System.IO.Stream'",
+                    ]
+                },
+                "warningsByLayer": {
+                    "02_Cavern.Format": [
+                        "Cavern.Format/Decoders/IamfDecoder.cs(10,5): warning CS1591: Missing XML comment for publicly visible type or member",
+                    ],
+                    "04_CavernizeAndroid": [
+                        "CavernSamples/CavernizeAndroid/MainActivity.cs(705,13): warning CA1422: 'Window.SetDecorFitsSystemWindows(bool)' is obsoleted on: 'android' 35.0 and later.",
+                        "CavernSamples/CavernizeAndroid/MainActivity.PlayerMusicTab.cs(4919,52): warning CA1416: 'WindowInsets.GetInsets(int)' is only supported on: 'android' 30.0 and later.",
+                        "CavernSamples/CavernizeAndroid/Services/MediaServiceUtils.cs(65,121): warning CS0419: Ambiguous reference in cref attribute: 'TimeSpan.TryParse'.",
+                        "Microsoft.Android.Sdk.Tooling.targets(72,5): warning XA1006: The TargetFrameworkVersion (Android API level 37) is higher than the targetSdkVersion (35).",
+                        "NativeLibs/arm64-v8a/libffmpeg.so : warning XA4301: APK already contains the item lib/arm64-v8a/libffmpeg.so; ignoring.",
+                    ],
+                },
+            }
+            res_known = el.analyze_diagnostics(el.load_diagnostics_from_ci_json(sample_ci_json), lessons)
+            self.assertEqual(len(res_known.new_candidates), 0, res_known.new_candidates)
+            self.assertEqual(len(res_known.skipped_transient), 0)
+            for bid in ("BL-001", "BL-002", "BL-003", "BL-004", "BL-006", "BL-008", "BL-010"):
+                self.assertIn(bid, res_known.known_matches)
+
+            raw_transient = "\n".join(
+                [
+                    "error NU1301: Unable to load the service index for source https://api.nuget.org/v3/index.json.",
+                    "error MSB3021: Unable to copy file because it is being used by another process.",
+                    "error: HTTP 503 Service Unavailable timed out",
+                    "::warning::No space left on device",
+                ]
+            )
+            res_tr = el.analyze_diagnostics(el.load_diagnostics_from_log_text(raw_transient), lessons)
+            self.assertEqual(len(res_tr.new_candidates), 0)
+            self.assertGreaterEqual(len(res_tr.skipped_transient), 3)
+
+            for bad_txt in (
+                "Always upgrade to Android 17 API 37 immediately.",
+                "Target net11.0-android and .NET 11 in all projects.",
+                "Use actions/setup-java@v5 with Java 21 on ubuntu-24.04.",
+                "Pin libusb 1.0.27 and NDK r27 as of 2026.",
+            ):
+                self.assertTrue(el.lint_timelessness(bad_txt), bad_txt)
+            for good_txt in (
+                "Check live official Android & .NET Android docs for the current non-obsolete API replacement.",
+                "Keep `<TargetFramework>` aligned w/ the active SDK installed in CI; verify `CS0104` / `CA1416`.",
+                'Use `OperatingSystem.IsAndroidVersionAtLeast(N)` or `[SupportedOSPlatform("androidN.0")]`.',
+                "Zero Fake DSP: follow ISO 226 / ITU-R BS.1770 / 16 KB ELF standards; keep C# 8.0 in `netstandard2.1`.",
+            ):
+                self.assertEqual(el.lint_timelessness(good_txt), [], good_txt)
+
+            ci_json = tmp / "diag.json"
+            ci_json.write_text(
+                json.dumps(
+                    {
+                        "errorsByLayer": {
+                            "04_CavernizeAndroid": [
+                                "CavernSamples/CavernizeAndroid/Services/Foo.cs(42,9): error IL2026: Members annotated with RequiresUnreferencedCode break on net14.0-android and Android 42.0 and later [CavernizeAndroid.csproj]",
+                            ]
+                        },
+                        "warningsByLayer": {
+                            "03_Cavernize.Logic": [
+                                "CavernSamples/Reusable/Cavernize.Logic/Bar.cs(18,5): warning CA1861: Prefer static readonly arrays for constant arguments on .NET 14 [Cavernize.Logic.csproj]",
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(el.main(["--lessons-file", str(lessons_file), "--from-ci-json", str(ci_json), "--apply"]), 0)
+            after_1 = lessons_file.read_text(encoding="utf-8")
+            self.assertIn("IL2026", after_1)
+            self.assertIn("CA1861", after_1)
+            self.assertNotIn("net14.0-android", after_1)
+            self.assertNotIn("Android 42.0", after_1)
+            self.assertNotIn(".NET 14", after_1)
+            self.assertTrue(el.audit_lessons_file(lessons_file)[0])
+            self.assertEqual(el.main(["--lessons-file", str(lessons_file), "--from-ci-json", str(ci_json), "--apply"]), 0)
+            self.assertEqual(lessons_file.read_text(encoding="utf-8"), after_1)
+
+            self.assertNotEqual(
+                el.main(
+                    [
+                        "--lessons-file", str(lessons_file), "--record",
+                        "--title", "Upgrade to Android 18", "--codes", "XA9999",
+                        "--root-cause", "Older API fails on Android 18.",
+                        "--rule", "Always target API 38 with actions/setup-java@v6.",
+                        "--lookup", "Check docs.", "--apply",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                el.main(
+                    [
+                        "--lessons-file", str(lessons_file), "--record",
+                        "--title", "Dynamic ABI Manifest Filter Hygiene", "--category", "android-packaging",
+                        "--codes", "XA9998",
+                        "--root-cause", "Mismatched ABI filters drop native libraries during APK packaging.",
+                        "--rule", "Keep native library ABI folders aligned w/ `<RuntimeIdentifiers>` in `.csproj`.",
+                        "--lookup", "Check current `.NET Android` ABI packaging docs && CI APK entry verifier.",
+                        "--apply",
+                    ]
+                ),
+                0,
+            )
+            self.assertTrue(el.audit_lessons_file(lessons_file)[0])
+            self.assertIn("XA9998", lessons_file.read_text(encoding="utf-8"))
+
+
 def _stamp_plugin_tests_passed() -> None:
     art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
     if not art_dir or os.environ.get("PLANNER_NO_HOOK_STAMP"):

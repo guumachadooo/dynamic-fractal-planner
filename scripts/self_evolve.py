@@ -14,12 +14,12 @@ Zero third-party dependencies (Python stdlib only).
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import time
@@ -47,6 +47,7 @@ SYNC_PRESERVE_NAMES = frozenset({
 })
 
 STANDALONE_HOST_EXCLUDES: tuple[str, ...] = (
+    ".github",
     ".gitignore",
     "package.json",
     "AGENTS.md",
@@ -57,6 +58,12 @@ STANDALONE_HOST_EXCLUDES: tuple[str, ...] = (
     ".agents/host_matrix.json",
     ".agents/planner_profile.json",
 )
+
+_DOC_DATA_EXTS: tuple[str, ...] = (
+    ".md", ".json", ".jsonl", ".txt", ".yml", ".yaml",
+    ".toml", ".ini", ".cfg", ".csv", ".png", ".svg",
+)
+_RULES_AGENTS_VER_RE = re.compile(r"(?:Plugin\s+v|dynamic-fractal-planner\s+v)(\d+\.\d+\.\d+)")
 
 UNIVERSAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("build/CI error learning & timelessness", re.compile(r"\b(?:error.?learn|build.?lessons|timeless|anti-?obsolescence|ci.?diag|diagnostic.?fetch|log.?digest)\b", re.I)),
@@ -263,43 +270,127 @@ def _is_standalone_plugin_root(root: Path) -> bool:
     )
 
 
-def _is_rel_excluded(rel_posix: str, *, include_standalone_excludes: bool = True) -> bool:
+def _get_sync_excludes(roots: tuple[Path, ...] | list[Path] | None = None) -> tuple[str, ...]:
+    """Combine `STANDALONE_HOST_EXCLUDES` with `.agents/federation.json` `fractal-embedded-plugin` excludes."""
+    out: list[str] = list(STANDALONE_HOST_EXCLUDES)
+    seen: set[str] = set(out)
+    candidates: list[Path] = []
+    for r in roots or ():
+        if not isinstance(r, Path):
+            continue
+        rp = r.expanduser().resolve()
+        candidates.append(rp)
+        if len(rp.parents) >= 3:
+            candidates.append(rp.parents[2])
+    if len(_SCRIPTS_DIR.parents) >= 4:
+        candidates.append(_SCRIPTS_DIR.parents[3])
+
+    fed_data: dict[str, Any] = {}
+    for cand in candidates:
+        fp = cand / ".agents" / "federation.json"
+        if fp.is_file():
+            try:
+                loaded = json.loads(fp.read_text(encoding="utf-8", errors="ignore"))
+                if isinstance(loaded, dict) and isinstance(loaded.get("mirrors"), list):
+                    fed_data = loaded
+                    break
+            except Exception:
+                pass
+
+    for mirror in fed_data.get("mirrors") or []:
+        if not isinstance(mirror, dict):
+            continue
+        m_name = str(mirror.get("name") or "")
+        if m_name != "fractal-embedded-plugin" and not m_name.startswith("fractal-embedded-plugin"):
+            continue
+        for mapping in mirror.get("mappings") or []:
+            if not isinstance(mapping, dict):
+                continue
+            for pat in mapping.get("exclude") or []:
+                s = str(pat or "").replace("\\", "/").strip("/")
+                if s and s not in seen:
+                    seen.add(s)
+                    out.append(s)
+    return tuple(out)
+
+
+def _is_rel_excluded(
+    rel_posix: str,
+    *,
+    include_standalone_excludes: bool = True,
+    excludes: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> bool:
     """Return True if rel_posix belongs to runtime state, bytecode, or standalone host-only files."""
     rel = rel_posix.replace("\\", "/").strip("/")
     if not rel:
         return True
-    if any(part in SYNC_PRESERVE_NAMES for part in rel.split("/")):
+    parts = rel.split("/")
+    if any(part in SYNC_PRESERVE_NAMES for part in parts):
         return True
     if rel.endswith((".pyc", ".pyo")):
         return True
-    if include_standalone_excludes:
-        for excl in STANDALONE_HOST_EXCLUDES:
-            if rel == excl or rel.startswith(excl + "/"):
+    if include_standalone_excludes or excludes is not None:
+        excl_list = excludes if excludes is not None else _get_sync_excludes()
+        for raw_excl in excl_list:
+            excl = str(raw_excl or "").replace("\\", "/").strip("/")
+            if not excl:
+                continue
+            if any(ch in excl for ch in "*?["):
+                if fnmatch.fnmatch(rel, excl) or any(fnmatch.fnmatch(seg, excl) for seg in parts):
+                    return True
+            elif excl in SYNC_PRESERVE_NAMES:
+                if excl in parts:
+                    return True
+            elif rel == excl or rel.startswith(excl + "/"):
                 return True
     return False
 
 
-def _iter_canonical_plugin_files(root: Path) -> list[Path]:
+def _iter_canonical_plugin_files(
+    root: Path,
+    *,
+    excludes: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> list[Path]:
     """Return sorted canonical plugin file Paths inside root (excluding runtime state and standalone host files)."""
     if not root.is_dir():
         return []
+    eff_excludes = excludes if excludes is not None else _get_sync_excludes((root,))
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         cur = Path(dirpath)
         rel_dir = "" if cur == root else cur.relative_to(root).as_posix()
         dirnames[:] = sorted(
             d for d in dirnames
-            if not _is_rel_excluded(f"{rel_dir}/{d}" if rel_dir else d, include_standalone_excludes=True)
+            if not _is_rel_excluded(f"{rel_dir}/{d}" if rel_dir else d, include_standalone_excludes=True, excludes=eff_excludes)
         )
         for fn in sorted(filenames):
             f_rel = f"{rel_dir}/{fn}" if rel_dir else fn
-            if _is_rel_excluded(f_rel, include_standalone_excludes=True):
+            if _is_rel_excluded(f_rel, include_standalone_excludes=True, excludes=eff_excludes):
                 continue
             p = cur / fn
             if p.is_file() and not p.is_symlink():
                 files.append(p)
     files.sort(key=lambda p: p.relative_to(root).as_posix())
     return files
+
+
+def compute_plugin_tree_sha256(
+    plugin_root: Path,
+    excludes: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> tuple[str, str]:
+    """Return deterministic `(semver, tree_sha256)` over relative path + exec bit + file sha256."""
+    root = Path(plugin_root).expanduser().resolve()
+    semver = _read_manifest_version(root)
+    files = _iter_canonical_plugin_files(root, excludes=excludes)
+    if not files:
+        return (semver, "")
+    h = hashlib.sha256()
+    for p in files:
+        rel = p.relative_to(root).as_posix()
+        file_sha = hashlib.sha256(p.read_bytes()).hexdigest()
+        exec_bit = "1" if os.access(p, os.X_OK) else "0"
+        h.update(f"{rel}\0{exec_bit}\0{file_sha}\n".encode("utf-8"))
+    return (semver, h.hexdigest())
 
 
 def _tree_fingerprint(root: Path) -> tuple[str, float]:
@@ -324,8 +415,44 @@ def _tree_fingerprint(root: Path) -> tuple[str, float]:
     return (h.hexdigest(), max_mtime)
 
 
+def _has_shebang(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            return fh.read(2) == b"#!"
+    except OSError:
+        return False
+
+
+def _desired_sync_mode(rel_posix: str, src_path: Path) -> int:
+    """Mode-preserving policy: +x ONLY on .sh or scripts with shebang / source X_OK in hooks/scripts/tests; 0o644 on docs/JSON/md."""
+    low = rel_posix.lower()
+    if low.endswith(_DOC_DATA_EXTS) or any(part in ("docs", "rules", "skills", "fixtures") for part in low.split("/")[:-1]):
+        return 0o644
+    if low.endswith(".sh"):
+        return 0o755
+    if low.startswith(("hooks/", "scripts/", "tests/")) and os.access(src_path, os.X_OK) and (_has_shebang(src_path) or low.endswith(".py")):
+        return 0o755
+    return 0o644
+
+
+def _is_older_rules_agents(src_file: Path, dst_file: Path, src_root: Path, dst_root: Path) -> bool:
+    if not dst_file.is_file():
+        return False
+    dst_txt = dst_file.read_text(encoding="utf-8", errors="ignore")
+    src_txt = src_file.read_text(encoding="utf-8", errors="ignore")
+    m_dst = _RULES_AGENTS_VER_RE.search(dst_txt)
+    m_src = _RULES_AGENTS_VER_RE.search(src_txt)
+    if m_dst and m_src:
+        return compare_semver(m_dst.group(1), m_src.group(1)) > 0
+    dst_mv = _read_manifest_version(dst_root)
+    src_mv = _read_manifest_version(src_root)
+    if dst_mv and src_mv and compare_semver(dst_mv, src_mv) > 0:
+        return True
+    return False
+
+
 def _sync_plugin_tree(src: Path, dst: Path, *, snapshot_backup: bool = True) -> list[str]:
-    """Mirror ONLY canonical plugin files from src to dst, preserving runtime state and standalone host files."""
+    """Mirror ONLY canonical plugin files from src to dst, preserving runtime state, mode invariants, and standalone host files."""
     dst.mkdir(parents=True, exist_ok=True)
     if snapshot_backup and (dst / "plugin.json").is_file():
         tmp_bak = dst / ".last_good_backup.tmp"
@@ -338,10 +465,11 @@ def _sync_plugin_tree(src: Path, dst: Path, *, snapshot_backup: bool = True) -> 
             shutil.rmtree(bak)
         tmp_bak.rename(bak)
 
-    src_files = _iter_canonical_plugin_files(src)
+    eff_excludes = _get_sync_excludes((src, dst))
+    src_files = _iter_canonical_plugin_files(src, excludes=eff_excludes)
     src_map = {p.relative_to(src).as_posix(): p for p in src_files}
 
-    for dp in _iter_canonical_plugin_files(dst):
+    for dp in _iter_canonical_plugin_files(dst, excludes=eff_excludes):
         rel = dp.relative_to(dst).as_posix()
         if rel not in src_map:
             dp.unlink()
@@ -350,7 +478,7 @@ def _sync_plugin_tree(src: Path, dst: Path, *, snapshot_backup: bool = True) -> 
         cur = Path(dirpath)
         if cur == dst:
             continue
-        if _is_rel_excluded(cur.relative_to(dst).as_posix(), include_standalone_excludes=True):
+        if _is_rel_excluded(cur.relative_to(dst).as_posix(), include_standalone_excludes=True, excludes=eff_excludes):
             continue
         try:
             if not any(cur.iterdir()):
@@ -361,16 +489,16 @@ def _sync_plugin_tree(src: Path, dst: Path, *, snapshot_backup: bool = True) -> 
     copied: list[str] = []
     for rel, sp in src_map.items():
         tp = dst / rel
+        if rel == "rules/AGENTS.md" and _is_older_rules_agents(sp, tp, src, dst):
+            continue
         tp.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(sp, tp)
+        try:
+            os.chmod(tp, _desired_sync_mode(rel, sp))
+        except OSError:
+            pass
         copied.append(rel)
 
-    for rel_glob in ("install.sh", "hooks/*.py", "scripts/*.py", "tests/*.py"):
-        for p in dst.glob(rel_glob):
-            try:
-                p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-            except Exception:
-                pass
     for manifest_name in ("plugin.json", "hooks.json"):
         mp = dst / manifest_name
         if mp.is_file():

@@ -135,15 +135,21 @@ def main() -> None:
             )
             return
 
+        def _clean_rel(s: str) -> str:
+            c = str(s or "").replace("\\", "/")
+            while c.startswith("./"):
+                c = c[2:]
+            return c.lstrip("/")
+
         rel, _ = normalize_rel_path(raw_path, repo)
-        archive_specs = [str(a).replace("\\", "/").lstrip("./") for a in (profile.get("archive_docs") or []) if str(a).strip()]
+        archive_specs = [_clean_rel(str(a)) for a in (profile.get("archive_docs") or []) if str(a).strip()]
         handoff_p = repo / ".agents" / "docs" / "HANDOFF.md"
         if handoff_p.is_file():
             for h_ln in handoff_p.read_text(encoding="utf-8", errors="ignore").splitlines():
                 if h_ln.startswith("ARCHIVE|"):
                     arch_body = h_ln[8:].split("(", 1)[0].strip()
                     for tok in arch_body.split(","):
-                        t_clean = tok.strip().strip("`").replace("\\", "/").lstrip("./")
+                        t_clean = _clean_rel(tok.strip().strip("`"))
                         if t_clean:
                             archive_specs.append(t_clean)
         is_archive = (

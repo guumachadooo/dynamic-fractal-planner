@@ -1062,11 +1062,23 @@ def cmd_live_diag(args: argparse.Namespace, ws_root: Path) -> int:
 
 
 def cmd_blueprint(args: argparse.Namespace, ws_root: Path) -> int:
-    """Delegate to Universal SOTA Blueprint Engine (`blueprint_engine.py`)."""
+    """Delegate to Universal SOTA Blueprint Engine (`blueprint_engine.py`) or `wave_scheduler.py`."""
+    extra = list(args.extra_args or [])
+    if extra and extra[0] in ("schedule", "epoch-begin", "epoch-barrier", "lease", "checkpoint"):
+        import wave_scheduler  # noqa: E402
+
+        return wave_scheduler.main(["--workspace", str(ws_root), *extra])
     import blueprint_engine  # noqa: E402
 
-    sub_argv = ["--workspace", str(ws_root), *(args.extra_args or [])]
+    sub_argv = ["--workspace", str(ws_root), *extra]
     return blueprint_engine.main(sub_argv)
+
+
+def cmd_wave(args: argparse.Namespace, ws_root: Path) -> int:
+    """Delegate directly to `wave_scheduler.py` (`schedule|epoch-begin|epoch-barrier|lease|checkpoint`)."""
+    import wave_scheduler  # noqa: E402
+
+    return wave_scheduler.main(["--workspace", str(ws_root), *(args.extra_args or [])])
 
 
 def cmd_qa(args: argparse.Namespace, ws_root: Path) -> int:
@@ -1247,9 +1259,15 @@ def main() -> None:
 
     p_bp = sub.add_parser(
         "blueprint",
-        help="Universal SOTA Blueprint Engine (classify|init|lint|score|status|list|handoff|hygiene|hub|compact|match|transition).",
+        help="Universal SOTA Blueprint Engine (classify|init|lint|score|status|list|handoff|hygiene|hub|compact|match|transition|schedule).",
     )
     p_bp.add_argument("extra_args", nargs=argparse.REMAINDER)
+
+    p_wave = sub.add_parser(
+        "wave",
+        help="Deterministic Multi-Wave DAG Epoch Scheduler & Lease Guard (schedule|epoch-begin|epoch-barrier|lease|checkpoint).",
+    )
+    p_wave.add_argument("extra_args", nargs=argparse.REMAINDER)
 
     p_qa = sub.add_parser(
         "qa",
@@ -1308,6 +1326,8 @@ def main() -> None:
         raise SystemExit(cmd_live_diag(args, ws_root))
     if args.cmd == "blueprint":
         raise SystemExit(cmd_blueprint(args, ws_root))
+    if args.cmd == "wave":
+        raise SystemExit(cmd_wave(args, ws_root))
     if args.cmd == "qa":
         raise SystemExit(cmd_qa(args, ws_root))
     if args.cmd in ("host-boot", "host-status", "host-audit", "host-classify"):

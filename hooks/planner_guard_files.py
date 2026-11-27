@@ -237,6 +237,17 @@ def check_shift_left_diff_rules(
     return None
 
 
+def _is_compactable_doc(rel: str) -> bool:
+    s = rel.replace("\\", "/")
+    while s.startswith("./"):
+        s = s[2:]
+    low = s.lstrip("/").lower()
+    name = Path(low).name
+    if name in ("changelog.md", "agents.md", "skill.md"):
+        return True
+    return low.endswith(".md") and (low.startswith(".agents/docs/") or "/.agents/docs/" in low)
+
+
 def check_destructive_write(
     tool_name: str,
     args: dict[str, Any],
@@ -270,6 +281,10 @@ def check_destructive_write(
     new_lines = len(content.splitlines())
     rel = plugin_rel if in_plugin else normalize_rel_path(raw_path, repo)[0]
     if new_lines < 0.70 * orig_lines:
+        non_empty = [ln for ln in content.splitlines() if ln.strip()]
+        is_blanking = len(non_empty) < 2 or len(content.strip()) < 20
+        if _is_compactable_doc(rel) and not is_blanking:
+            return None
         return (
             "force_ask",
             f"DESTRUCTIVE WRITE SHIELD|`{rel}` shrunk {orig_lines}L -> {new_lines}L (<70%). Confirm deletion or use `edit_file`.",
@@ -328,13 +343,16 @@ def main() -> None:
             get_planner_mode,
             has_active_turn_plan,
             is_app_code_path,
+            is_doc_verifiable_path,
             is_plugin_path,
             load_json,
             load_project_profile,
             normalize_rel_path,
+            record_doc_file_edit,
             record_telemetry,
             resolve_plugin_root,
             resolve_repo_root,
+            save_json,
             scan_secrets_and_conflicts,
             unique_edited_files,
         )
@@ -381,6 +399,20 @@ def main() -> None:
             reply("deny", recon_hit, payload=payload, repo=repo)
             return
 
+        # 1c3. Parallel epoch write-set lease guard
+        try:
+            from wave_scheduler import check_file_lease  # noqa: E402
+
+            rel_lease = normalize_rel_path(raw_path, repo)[0]
+            if rel_lease and not rel_lease.startswith(("/", "..")):
+                conv_id = str(payload.get("conversationId") or "").strip()
+                if (lease_hit := check_file_lease(repo, conv_id, rel_lease, profile)):
+                    record_telemetry("lease_guard_deny", {"file": rel_lease})
+                    reply("deny", lease_hit, payload=payload, repo=repo)
+                    return
+        except Exception:
+            pass
+
         # 1d. Shift-left fail diff_rules before disk write
         sl_hit = check_shift_left_diff_rules(tool_name, args, raw_path, repo, profile)
         if sl_hit:
@@ -399,9 +431,13 @@ def main() -> None:
         # 2. Plan Gate (strict) vs Blast Radius Guard (lean) + invisible Tier>=2 snapshot
         is_plugin_protected = in_plugin and plugin_rel.lower().endswith((".py", ".json", ".md", ".sh"))
         is_app = is_app_code_path(raw_path, repo, profile)
+        hook_file_cache: Path | None = None
+        hook_state_cache: dict[str, Any] | None = None
         if is_app or is_plugin_protected:
             _, task_md, _, hook_file = get_paths(payload)
             hook_state = load_json(hook_file)
+            hook_file_cache = hook_file
+            hook_state_cache = hook_state
             mode = get_planner_mode(profile, payload, hook_state=hook_state)
             plan_ready = has_active_turn_plan(payload, hook_state)
             triage = hook_state.get("triage")
@@ -468,8 +504,24 @@ def main() -> None:
                             save_json(hook_file, hook_state)
                             record_telemetry("blast_radius_warn", {"edited": len(edited)})
 
-            if tier >= 2 and is_app and not in_plugin and not hook_state.get("turn_snapshot_taken"):
+            skip_snap = False
+            try:
+                from wave_scheduler import has_active_parallel_leases  # noqa: E402
+
+                skip_snap = has_active_parallel_leases(repo)
+            except Exception:
+                skip_snap = False
+            if tier >= 2 and is_app and not in_plugin and not hook_state.get("turn_snapshot_taken") and not skip_snap:
                 _capture_invisible_snapshot(repo, hook_file, hook_state)
+
+        if tool_name in ("edit_file", "write_file", "replace_file_content", "write_to_file"):
+            if is_doc_verifiable_path(raw_path, repo) or (in_plugin and plugin_rel.lower().endswith(".md")):
+                if hook_file_cache is None or hook_state_cache is None:
+                    _, _, _, hook_file_cache = get_paths(payload)
+                    hook_state_cache = load_json(hook_file_cache)
+                rel_doc = f"plugin:{plugin_rel}" if in_plugin else normalize_rel_path(raw_path, repo)[0]
+                if record_doc_file_edit(hook_state_cache, rel_doc):
+                    save_json(hook_file_cache, hook_state_cache)
 
         allow()
     finally:

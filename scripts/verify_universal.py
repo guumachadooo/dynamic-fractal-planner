@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import ast
+import hashlib
 import json
 import os
 import py_compile
@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -26,20 +27,35 @@ from log_digest import extract_unique_diagnostics  # noqa: E402
 from planner_state import (  # noqa: E402
     DEFAULT_EXTRA_REQUESTS_FILE,
     eval_conditions,
-    extract_symbol_map,
     get_pending_extra_requests,
     is_plugin_path,
     load_project_profile_with_warnings,
     resolve_plugin_root,
     scan_secrets_and_conflicts,
 )
+from verify_wiring import (  # noqa: E402, F401
+    BRACKET_EXTS,
+    GENERIC_ORPHAN_NAMES,
+    ORPHAN_CHECK_EXTS,
+    _SETTING_IGNORE_NAMES,
+    _WIRING_CONTROL_WORDS,
+    _advance_literal_or_comment,
+    _extract_public_symbols,
+    _extract_setting_keys,
+    _find_matching_delim,
+    _get_diff_add_rem,
+    _has_external_code_ref,
+    _is_ident_ch,
+    _is_test_path,
+    _scan_brace_if_else,
+    _skip_ws_comments,
+    _strip_comments_only,
+    check_balanced_brackets,
+    check_forward_wiring,
+    check_orphan_calls,
+)
 
-BRACKET_EXTS = (".cs", ".ts", ".tsx", ".js", ".jsx", ".kt", ".java")
-ORPHAN_CHECK_EXTS = (".py", ".cs", ".ts", ".tsx", ".js", ".jsx", ".kt", ".kts", ".java", ".go", ".rs")
 BINARY_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".ttf", ".otf", ".apk", ".dll", ".exe", ".so", ".zip", ".gz", ".tar", ".mp3", ".flac", ".mp4", ".mkv", ".wav")
-GENERIC_ORPHAN_NAMES = frozenset({
-    "main", "update", "run", "init", "dispose", "tostring", "build", "load", "save", "get", "set", "__init__",
-})
 
 
 def resolve_repo_root(cli_ws: str | None = None) -> Path:
@@ -570,163 +586,6 @@ def run_legacy_verify_command(repo: Path, profile: dict[str, Any], build: bool, 
     return True
 
 
-def check_balanced_brackets(repo: Path, files: list[str], fails: list[str], warns: list[str]) -> None:
-    """Fast lexer checking `{}`, `()`, `[]` balance ignoring strings/char literals/comments."""
-    pairs = {"{": "}", "(": ")", "[": "]"}
-    closers = {"}": "{", ")": "(", "]": "["}
-
-    for rel in files:
-        if not rel.lower().endswith(BRACKET_EXTS):
-            continue
-        full = repo / rel
-        if not full.is_file():
-            continue
-        txt = full.read_text(encoding="utf-8", errors="ignore")
-        is_cs = rel.lower().endswith(".cs")
-        is_js_ts = rel.lower().endswith((".ts", ".tsx", ".js", ".jsx"))
-        has_cs_preproc_branch = is_cs and bool(re.search(r"^\s*#if\b", txt, re.M)) and bool(re.search(r"^\s*#(?:else|elif)\b", txt, re.M))
-
-        stack: list[tuple[str, int]] = []
-        mode: str | None = None  # None | 'line' | 'block' | 'dq' | 'sq' | 'vq' | 'tq' | 'tmpl'
-        tmpl_brace_stack: list[int] = []
-        line_no = 1
-        i = 0
-        n = len(txt)
-        err: str | None = None
-
-        while i < n:
-            ch = txt[i]
-            nxt = txt[i + 1] if i + 1 < n else ""
-            if ch == "\n":
-                line_no += 1
-
-            if mode == "line":
-                if ch == "\n":
-                    mode = None
-                i += 1
-                continue
-            if mode == "block":
-                if ch == "*" and nxt == "/":
-                    mode = None
-                    i += 2
-                    continue
-                i += 1
-                continue
-            if mode == "dq":
-                if ch == "\\":
-                    if nxt == "\n":
-                        line_no += 1
-                    i += 2
-                    continue
-                if ch == '"' or ch == "\n":
-                    mode = None
-                i += 1
-                continue
-            if mode == "sq":
-                if ch == "\\":
-                    if nxt == "\n":
-                        line_no += 1
-                    i += 2
-                    continue
-                if ch == "'" or (not is_js_ts and ch == "\n"):
-                    mode = None
-                i += 1
-                continue
-            if mode == "vq":
-                if ch == '"':
-                    if nxt == '"':
-                        i += 2
-                        continue
-                    mode = None
-                i += 1
-                continue
-            if mode == "tq":
-                if txt[i : i + 3] == '"""':
-                    mode = None
-                    i += 3
-                    continue
-                i += 1
-                continue
-            if mode == "tmpl":
-                if ch == "\\":
-                    if nxt == "\n":
-                        line_no += 1
-                    i += 2
-                    continue
-                if ch == "`":
-                    mode = None
-                    i += 1
-                    continue
-                if ch == "$" and nxt == "{":
-                    tmpl_brace_stack.append(len(stack))
-                    stack.append(("{", line_no))
-                    mode = None
-                    i += 2
-                    continue
-                i += 1
-                continue
-
-            # Normal code mode
-            if ch == "/" and nxt == "/":
-                mode = "line"
-                i += 2
-                continue
-            if ch == "/" and nxt == "*":
-                mode = "block"
-                i += 2
-                continue
-            if txt[i : i + 3] == '"""':
-                mode = "tq"
-                i += 3
-                continue
-            if is_cs and ch == "@" and nxt == '"':
-                mode = "vq"
-                i += 2
-                continue
-            if is_cs and ch == "$" and nxt == "@" and i + 2 < n and txt[i + 2] == '"':
-                mode = "vq"
-                i += 3
-                continue
-            if ch == '"':
-                mode = "dq"
-                i += 1
-                continue
-            if ch == "'":
-                mode = "sq"
-                i += 1
-                continue
-            if is_js_ts and ch == "`":
-                mode = "tmpl"
-                i += 1
-                continue
-
-            if ch in pairs:
-                stack.append((ch, line_no))
-            elif ch in closers:
-                expected_open = closers[ch]
-                if not stack:
-                    err = f"{rel}:{line_no}: Unbalanced closing `{ch}` (no matching `{expected_open}`)."
-                    break
-                top_open, top_ln = stack.pop()
-                if top_open != expected_open:
-                    err = f"{rel}:{line_no}: Mismatched `{ch}` (expected `{pairs[top_open]}` for `{top_open}` opened at L{top_ln})."
-                    break
-                if tmpl_brace_stack and len(stack) == tmpl_brace_stack[-1]:
-                    tmpl_brace_stack.pop()
-                    mode = "tmpl"
-            i += 1
-
-        if err is None and stack:
-            top_open, top_ln = stack[-1]
-            err = f"{rel}:{top_ln}: Unclosed `{top_open}` (missing `{pairs[top_open]}`)."
-
-        if err:
-            if has_cs_preproc_branch:
-                warns.append(f"{err} (#if/#else C# file -> verify manually)")
-            else:
-                fails.append(err)
-
-
 def check_secrets_and_conflicts_files(repo: Path, files: list[str], profile: dict[str, Any], fails: list[str]) -> None:
     sg = profile.get("secret_guard") or {}
     if sg.get("enabled") is False:
@@ -740,578 +599,6 @@ def check_secrets_and_conflicts_files(repo: Path, files: list[str], profile: dic
         txt = full.read_text(encoding="utf-8", errors="ignore")
         for hit in scan_secrets_and_conflicts(txt, rel_path=rel, check_filename=True):
             fails.append(f"{rel}: {hit}")
-
-
-def check_orphan_calls(repo: Path, files: list[str], warns: list[str]) -> None:
-    if not (repo / ".git").exists():
-        return
-    removed_candidates: list[str] = []
-    seen: set[str] = set()
-
-    for rel in files:
-        suf = Path(rel).suffix.lower()
-        if suf not in ORPHAN_CHECK_EXTS:
-            continue
-        res = subprocess.run(
-            ["git", "-C", str(repo), "diff", "-U0", "HEAD", "--", rel],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-        if res.returncode != 0 or not res.stdout.strip():
-            continue
-        rem_lines: list[str] = []
-        add_lines: list[str] = []
-        for ln in res.stdout.splitlines():
-            if ln.startswith("-") and not ln.startswith("---"):
-                rem_lines.append(ln[1:])
-            elif ln.startswith("+") and not ln.startswith("+++"):
-                add_lines.append(ln[1:])
-        if not rem_lines:
-            continue
-
-        def _names(lines: list[str]) -> set[str]:
-            out: set[str] = set()
-            for entry in extract_symbol_map(lines, suf, max_entries=100):
-                sym = entry.split("|", 1)[1] if "|" in entry else entry
-                if sym.startswith("..."):
-                    continue
-                if sym.startswith(("class ", "ns ")):
-                    sym = sym.split(" ", 1)[1]
-                sym = sym.rstrip("()")
-                if sym:
-                    out.add(sym)
-            return out
-
-        deleted_syms = _names(rem_lines) - _names(add_lines)
-        for sym in sorted(deleted_syms):
-            if len(sym) < 4 or sym.lower() in GENERIC_ORPHAN_NAMES:
-                continue
-            if sym not in seen:
-                seen.add(sym)
-                removed_candidates.append(sym)
-                if len(removed_candidates) >= 15:
-                    break
-        if len(removed_candidates) >= 15:
-            break
-
-    for sym in removed_candidates:
-        try:
-            g = subprocess.run(
-                ["git", "-C", str(repo), "grep", "-n", "-w", "--", sym],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            if g.returncode == 0 and g.stdout.strip():
-                hits = [ln.strip() for ln in g.stdout.splitlines() if ln.strip()]
-                if hits:
-                    preview = "; ".join(hits[:2])
-                    warns.append(f"Orphan-call check: deleted/renamed symbol `{sym}` still referenced ({preview[:140]}).")
-        except Exception:
-            continue
-
-
-def _is_ident_ch(ch: str) -> bool:
-    return ch.isalnum() or ch == "_"
-
-
-def _advance_literal_or_comment(
-    txt: str,
-    i: int,
-    is_cs: bool,
-    is_js_ts: bool,
-) -> tuple[int, int, str]:
-    """If `txt[i:]` starts a comment or string/char literal, return `(next_i, newlines, kind)`."""
-    n = len(txt)
-    ch = txt[i]
-    nxt = txt[i + 1] if i + 1 < n else ""
-
-    if ch == "/" and nxt == "/":
-        j = txt.find("\n", i + 2)
-        return (n if j == -1 else j), 0, "comment"
-    if ch == "/" and nxt == "*":
-        end = txt.find("*/", i + 2)
-        j = n if end == -1 else end + 2
-        return j, txt[i:j].count("\n"), "comment"
-    if txt[i : i + 3] == '"""':
-        end = txt.find('"""', i + 3)
-        j = n if end == -1 else end + 3
-        return j, txt[i:j].count("\n"), "string"
-    if is_cs and ((ch == "@" and nxt == '"') or (ch == "$" and nxt == "@" and i + 2 < n and txt[i + 2] == '"')):
-        j = i + (3 if ch == "$" else 2)
-        nl = 0
-        while j < n:
-            if txt[j] == "\n":
-                nl += 1
-            elif txt[j] == '"':
-                if j + 1 < n and txt[j + 1] == '"':
-                    j += 2
-                    continue
-                j += 1
-                break
-            j += 1
-        return j, nl, "string"
-    if ch in ('"', "'"):
-        j = i + 1
-        nl = 0
-        while j < n:
-            c = txt[j]
-            if c == "\\":
-                if j + 1 < n and txt[j + 1] == "\n":
-                    nl += 1
-                j += 2
-                continue
-            if c == "\n":
-                nl += 1
-                if ch == '"' or not is_js_ts:
-                    j += 1
-                    break
-            elif c == ch:
-                j += 1
-                break
-            j += 1
-        return j, nl, "string"
-    if is_js_ts and ch == "`":
-        j = i + 1
-        nl = 0
-        brace_depth = 0
-        while j < n:
-            c = txt[j]
-            if c == "\\":
-                if j + 1 < n and txt[j + 1] == "\n":
-                    nl += 1
-                j += 2
-                continue
-            if c == "\n":
-                nl += 1
-            elif brace_depth == 0 and c == "$" and j + 1 < n and txt[j + 1] == "{":
-                brace_depth = 1
-                j += 2
-                continue
-            elif brace_depth > 0:
-                if c == "{":
-                    brace_depth += 1
-                elif c == "}":
-                    brace_depth -= 1
-            elif c == "`":
-                j += 1
-                break
-            j += 1
-        return j, nl, "string"
-    return i, 0, ""
-
-
-def _strip_comments_only(txt: str, is_cs: bool, is_js_ts: bool, is_py: bool = False) -> str:
-    out: list[str] = []
-    i, n = 0, len(txt)
-    while i < n:
-        if is_py and txt[i] == "#":
-            j = txt.find("\n", i)
-            i = n if j == -1 else j
-            out.append(" ")
-            continue
-        nxt_i, _, kind = _advance_literal_or_comment(txt, i, is_cs, is_js_ts)
-        if kind == "comment":
-            out.append(" ")
-            i = nxt_i
-            continue
-        if kind == "string":
-            out.append(txt[i:nxt_i])
-            i = nxt_i
-            continue
-        out.append(txt[i])
-        i += 1
-    return "".join(out)
-
-
-def _skip_ws_comments(txt: str, i: int, is_cs: bool, is_js_ts: bool, line_no: int) -> tuple[int, int]:
-    n = len(txt)
-    while i < n:
-        if txt[i].isspace():
-            if txt[i] == "\n":
-                line_no += 1
-            i += 1
-            continue
-        if txt[i : i + 2] in ("//", "/*"):
-            nxt_i, nl, _ = _advance_literal_or_comment(txt, i, is_cs, is_js_ts)
-            i = nxt_i
-            line_no += nl
-            continue
-        break
-    return i, line_no
-
-
-def _find_matching_delim(
-    txt: str,
-    open_idx: int,
-    open_ch: str,
-    close_ch: str,
-    is_cs: bool,
-    is_js_ts: bool,
-) -> tuple[int, int] | None:
-    depth = 0
-    i, n = open_idx, len(txt)
-    nl_total = 0
-    while i < n:
-        nxt_i, nl, kind = _advance_literal_or_comment(txt, i, is_cs, is_js_ts)
-        if kind:
-            nl_total += nl
-            i = nxt_i
-            continue
-        c = txt[i]
-        if c == "\n":
-            nl_total += 1
-        elif c == open_ch:
-            depth += 1
-        elif c == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i, nl_total
-        i += 1
-    return None
-
-
-def _scan_brace_if_else(txt: str, rel: str) -> list[tuple[int, int, str, str]]:
-    """Find `(if_line, end_line, norm_a, norm_b)` for `if (...) { A } else { B }` in brace languages."""
-    low = rel.lower()
-    is_cs = low.endswith(".cs")
-    is_js_ts = low.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"))
-    no_paren_ok = low.endswith((".go", ".rs"))
-    out: list[tuple[int, int, str, str]] = []
-    i, n = 0, len(txt)
-    line_no = 1
-
-    while i < n:
-        nxt_i, nl, kind = _advance_literal_or_comment(txt, i, is_cs, is_js_ts)
-        if kind:
-            line_no += nl
-            i = nxt_i
-            continue
-        if txt[i] == "\n":
-            line_no += 1
-            i += 1
-            continue
-        if (
-            txt[i : i + 2] == "if"
-            and (i == 0 or not _is_ident_ch(txt[i - 1]))
-            and (i + 2 == n or not _is_ident_ch(txt[i + 2]))
-        ):
-            if_line = line_no
-            p, ln_p = _skip_ws_comments(txt, i + 2, is_cs, is_js_ts, line_no)
-            if p < n and txt[p] == "(":
-                cond_res = _find_matching_delim(txt, p, "(", ")", is_cs, is_js_ts)
-                if not cond_res:
-                    i += 2
-                    continue
-                p, ln_p = _skip_ws_comments(txt, cond_res[0] + 1, is_cs, is_js_ts, ln_p + cond_res[1])
-            elif no_paren_ok:
-                while p < n and txt[p] not in ("{", ";", "\n"):
-                    ni, nln, k = _advance_literal_or_comment(txt, p, is_cs, is_js_ts)
-                    if k:
-                        ln_p += nln
-                        p = ni
-                    else:
-                        p += 1
-            else:
-                i += 2
-                continue
-
-            if p >= n or txt[p] != "{":
-                i += 2
-                continue
-            res_a = _find_matching_delim(txt, p, "{", "}", is_cs, is_js_ts)
-            if not res_a:
-                i += 2
-                continue
-            body_a_end, dl_a = res_a
-            after_a, ln_after = _skip_ws_comments(txt, body_a_end + 1, is_cs, is_js_ts, ln_p + dl_a)
-            if txt[after_a : after_a + 4] != "else" or (after_a + 4 < n and _is_ident_ch(txt[after_a + 4])):
-                i += 2
-                continue
-            after_else, ln_else = _skip_ws_comments(txt, after_a + 4, is_cs, is_js_ts, ln_after)
-            if (
-                txt[after_else : after_else + 2] == "if"
-                and (after_else + 2 == n or not _is_ident_ch(txt[after_else + 2]))
-            ) or after_else >= n or txt[after_else] != "{":
-                i += 2
-                continue
-            res_b = _find_matching_delim(txt, after_else, "{", "}", is_cs, is_js_ts)
-            if not res_b:
-                i += 2
-                continue
-            body_b_end, dl_b = res_b
-            norm_a = re.sub(r"\s+", " ", _strip_comments_only(txt[p + 1 : body_a_end], is_cs, is_js_ts)).strip()
-            norm_b = re.sub(r"\s+", " ", _strip_comments_only(txt[after_else + 1 : body_b_end], is_cs, is_js_ts)).strip()
-            out.append((if_line, ln_else + dl_b, norm_a, norm_b))
-            i += 2
-            continue
-        i += 1
-    return out
-
-
-_WIRING_CONTROL_WORDS = frozenset({
-    "if", "for", "foreach", "while", "switch", "catch", "using", "lock",
-    "return", "throw", "new", "sizeof", "typeof", "nameof", "await",
-    "else", "when", "try", "finally", "do", "case", "yield", "super", "this",
-})
-_PUB_CS_JAVA_RE = re.compile(
-    r"^\s*public\s+(?:(?:static|virtual|async|sealed|new|unsafe|readonly|extern|synchronized|final|default)\s+)*"
-    r"(?!class\b|struct\b|interface\b|enum\b|record\b|delegate\b|event\b)"
-    r"([\w.<>\[\]?,\s]+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*\("
-)
-_PUB_TS_JS_RE = re.compile(
-    r"^\s*export\s+(?:default\s+)?(?:declare\s+)?(?:async\s+)?(?:function\*?|class|const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)"
-)
-_PUB_PY_RE = re.compile(r"^\s{0,4}(?:async\s+)?def\s+([A-Za-z][A-Za-z0-9_]*)\s*\(")
-_PUB_KT_RE = re.compile(
-    r"^\s*(?:(?:public|open|suspend|inline|operator|tailrec)\s+)*fun\s+(?:<[^>]+>\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\("
-)
-_PUB_RS_RE = re.compile(r"^\s*pub(?:\([^)]*\))?\s+(?:async\s+|unsafe\s+|const\s+)*fn\s+([A-Za-z_][A-Za-z0-9_]*)")
-_PUB_GO_RE = re.compile(r"^\s*func\s+(?:\([^)]+\)\s*)?([A-Z][A-Za-z0-9_]*)\s*\(")
-
-_SET_CS_KT_RE = re.compile(
-    r"^\s*(?:public|internal)\s+(?:(?:static|const|readonly|override|val|var)\s+)*[\w.<>\[\]?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|=>|=|;)"
-)
-_SET_TS_JS_RE = re.compile(r"^\s*(?:export\s+)?(?:const|let|var|readonly)?\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::\s*[^=;]+)?\s*[=:]")
-_SET_PY_RE = re.compile(r'^(?:([A-Za-z][A-Za-z0-9_]*)\s*(?::\s*[^=]+)?=|"([A-Za-z_][A-Za-z0-9_.-]*)"\s*:)')
-_SET_JSON_RE = re.compile(r'^\s*"([A-Za-z_][A-Za-z0-9_.-]*)"\s*:')
-_SETTING_IGNORE_NAMES = frozenset({"true", "false", "null", "none", "default", "version", "name", "type", "enabled", "value", "data"})
-
-
-def _get_diff_add_rem(repo: Path, rel: str) -> tuple[list[tuple[int, str]], list[str]]:
-    if (repo / ".git").exists():
-        for diff_args in (["diff", "-U0", "HEAD", "--", rel], ["diff", "--cached", "-U0", "--", rel]):
-            res = subprocess.run(["git", "-C", str(repo), *diff_args], capture_output=True, text=True, timeout=5, check=False)
-            if res.returncode == 0 and res.stdout.strip():
-                added: list[tuple[int, str]] = []
-                removed: list[str] = []
-                cur_line = 0
-                for ln in res.stdout.splitlines():
-                    if ln.startswith("@@"):
-                        m = re.search(r"\+(\d+)", ln)
-                        cur_line = int(m.group(1)) if m else 0
-                    elif ln.startswith("+") and not ln.startswith("+++"):
-                        added.append((cur_line, ln[1:]))
-                        cur_line += 1
-                    elif ln.startswith("-") and not ln.startswith("---"):
-                        removed.append(ln[1:])
-                return added, removed
-        st = subprocess.run(["git", "-C", str(repo), "ls-files", "--error-unmatch", "--", rel], capture_output=True, text=True, timeout=3, check=False)
-        if st.returncode == 0:
-            return [], []
-    full = repo / rel
-    if full.is_file():
-        return [(i, ln) for i, ln in enumerate(full.read_text(encoding="utf-8", errors="ignore").splitlines(), 1)], []
-    return [], []
-
-
-def _extract_public_symbols(lines: list[tuple[int, str]], suf: str) -> list[tuple[int, str]]:
-    out: list[tuple[int, str]] = []
-    for ln_no, raw in lines:
-        s = raw.strip()
-        if not s or s.startswith(("//", "/*", "*", "#", "[", "@")):
-            continue
-        name = ""
-        if suf in (".cs", ".java"):
-            if re.search(r"\b(?:override|extern)\b", s) or "=" in s.split("(", 1)[0]:
-                continue
-            m = _PUB_CS_JAVA_RE.match(raw)
-            if m:
-                name = m.group(2)
-        elif suf in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
-            m = _PUB_TS_JS_RE.match(raw)
-            if m:
-                name = m.group(1)
-        elif suf == ".py":
-            m = _PUB_PY_RE.match(raw)
-            if m:
-                name = m.group(1)
-        elif suf in (".kt", ".kts"):
-            if re.search(r"\b(?:private|protected|internal|override)\b", s):
-                continue
-            m = _PUB_KT_RE.match(raw)
-            if m:
-                name = m.group(1)
-        elif suf == ".rs":
-            m = _PUB_RS_RE.match(raw)
-            if m:
-                name = m.group(1)
-        elif suf == ".go":
-            m = _PUB_GO_RE.match(raw)
-            if m:
-                name = m.group(1)
-        if name and name not in _WIRING_CONTROL_WORDS:
-            out.append((ln_no, name))
-    return out
-
-
-def _extract_setting_keys(lines: list[tuple[int, str]], suf: str, custom_pat: str = "") -> list[tuple[int, str]]:
-    out: list[tuple[int, str]] = []
-    cre = re.compile(custom_pat) if custom_pat else None
-    for ln_no, raw in lines:
-        s = raw.strip()
-        if not s or s.startswith(("//", "/*", "*", "#")):
-            continue
-        key = ""
-        if cre:
-            m = cre.search(raw)
-            if m:
-                key = m.group(1) if m.groups() else m.group(0)
-        elif suf in (".cs", ".java", ".kt", ".kts"):
-            m = _SET_CS_KT_RE.match(raw)
-            if m and "(" not in raw.split("{", 1)[0].split("=", 1)[0]:
-                key = m.group(1)
-        elif suf in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
-            m = _SET_TS_JS_RE.match(raw)
-            if m:
-                key = m.group(1)
-        elif suf == ".py":
-            m = _SET_PY_RE.match(s)
-            if m:
-                key = m.group(1) or m.group(2) or ""
-        elif suf == ".json":
-            m = _SET_JSON_RE.match(raw)
-            if m:
-                key = m.group(1)
-        if key and key.lower() not in _SETTING_IGNORE_NAMES and key not in _WIRING_CONTROL_WORDS:
-            out.append((ln_no, key))
-    return out
-
-
-def _is_test_path(rel: str, wg: dict[str, Any]) -> bool:
-    low = rel.lower().lstrip("./")
-    test_prefs = tuple(str(p).lower().replace("\\", "/").lstrip("./") for p in (wg.get("ignore_caller_prefixes") or ("tests/", "test/", "__tests__/")))
-    if test_prefs and low.startswith(test_prefs):
-        return True
-    fname = Path(low).name
-    return fname.startswith("test_") or any(
-        tok in fname for tok in (".test.", ".spec.", "_test.", "tests.cs", "test.cs", "test.kt", "test.java", "tests.py")
-    )
-
-
-def _has_external_code_ref(repo: Path, sym: str, defining_rel: str, wg: dict[str, Any]) -> bool:
-    if not (repo / ".git").exists():
-        return True
-    match_flag = "-F" if any(c in sym for c in ".-:") else "-w"
-    try:
-        g = subprocess.run(
-            ["git", "-C", str(repo), "grep", "-n", match_flag, "--untracked", "--", sym],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except Exception:
-        return True
-    if g.returncode != 0 or not g.stdout.strip():
-        return False
-
-    allow_tests = bool(wg.get("allow_test_callers"))
-    sym_re = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(sym)}(?![A-Za-z0-9_])")
-    for raw_hit in g.stdout.splitlines():
-        parts = raw_hit.split(":", 2)
-        if len(parts) < 3:
-            continue
-        hit_rel = parts[0].replace("\\", "/").lstrip("./")
-        content = parts[2]
-        if hit_rel == defining_rel:
-            continue
-        low_h = hit_rel.lower()
-        if low_h.startswith((".agents/", "docs/")) or low_h.endswith((".md", ".txt", ".rst", ".json", ".yml", ".yaml", ".log", ".lock")):
-            continue
-        if not allow_tests and _is_test_path(hit_rel, wg):
-            continue
-        sc = content.lstrip()
-        if sc.startswith(("//", "#", "*", "/*", "<!--")):
-            continue
-        code_only = _strip_comments_only(content, low_h.endswith(".cs"), low_h.endswith((".ts", ".tsx", ".js", ".jsx")), is_py=low_h.endswith(".py"))
-        if sym_re.search(code_only):
-            return True
-    return False
-
-
-def check_forward_wiring(repo: Path, files: list[str], profile: dict[str, Any], fails: list[str], warns: list[str]) -> None:
-    """MOD-WIRING-GATE: audit new public APIs, identical if/else stubs, and settings key readers."""
-    wg = profile.get("wiring_gate") or {}
-    if wg.get("enabled") is False:
-        return
-
-    sev = str(wg.get("severity") or "warn").lower()
-    bucket = fails if sev == "fail" else warns
-    max_syms = int(wg.get("max_symbols") or 20)
-    ignore_pat = wg.get("ignore_symbol_regex") or r"^(?:test_|Test[A-Z]|On[A-Z]|on[A-Z]|Dispose|ToString|Equals|GetHashCode|CompareTo|Clone|Finalize|setUp|tearDown)"
-    ignore_re = re.compile(ignore_pat)
-
-    lib_prefs = tuple(str(p).replace("\\", "/").lstrip("./") for p in (wg.get("library_prefixes") or []) if str(p).strip())
-    settings_files = [str(s).replace("\\", "/").lstrip("./") for s in (wg.get("settings_files") or []) if str(s).strip()]
-    check_branches = wg.get("check_identical_branches", True) is not False
-    has_git = (repo / ".git").exists()
-
-    checked_syms = 0
-    for rel in files:
-        suf = Path(rel).suffix.lower()
-        full = repo / rel
-        if not full.is_file():
-            continue
-
-        added, removed = _get_diff_add_rem(repo, rel)
-        added_line_nos = {ln for ln, _ in added}
-
-        # (a) Zero Orphan New Public APIs
-        if has_git and lib_prefs and suf in ORPHAN_CHECK_EXTS and rel.startswith(lib_prefs) and not _is_test_path(rel, wg) and added:
-            rem_names = {s for _, s in _extract_public_symbols([(0, r) for r in removed], suf)}
-            seen_local: set[str] = set()
-            for ln_no, sym in _extract_public_symbols(added, suf):
-                if checked_syms >= max_syms:
-                    break
-                if len(sym) < 4 or sym.lower() in GENERIC_ORPHAN_NAMES or sym in rem_names or sym in seen_local or ignore_re.search(sym):
-                    continue
-                seen_local.add(sym)
-                checked_syms += 1
-                if not _has_external_code_ref(repo, sym, rel, wg):
-                    bucket.append(f"Wiring-gate (orphan API): {rel}:{ln_no}: new public symbol `{sym}` has 0 external callers.")
-
-        # (b) Identical if/else No-Op Branch Detector
-        if check_branches and suf in ORPHAN_CHECK_EXTS and added_line_nos:
-            txt = full.read_text(encoding="utf-8", errors="ignore")
-            if suf == ".py":
-                try:
-                    tree = ast.parse(txt)
-                    for node in ast.walk(tree):
-                        if not isinstance(node, ast.If) or not node.orelse:
-                            continue
-                        if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
-                            continue
-                        end_ln = getattr(node.orelse[-1], "end_lineno", None) or node.orelse[-1].lineno
-                        if not any(node.lineno <= al <= end_ln for al in added_line_nos):
-                            continue
-                        if [ast.dump(st, include_attributes=False) for st in node.body] == [
-                            ast.dump(st, include_attributes=False) for st in node.orelse
-                        ]:
-                            bucket.append(f"Wiring-gate (identical if/else): {rel}:{node.lineno}: identical if/else branches (no-op stub).")
-                except SyntaxError:
-                    pass
-            elif suf in (".cs", ".ts", ".tsx", ".js", ".jsx", ".kt", ".kts", ".java", ".go", ".rs"):
-                for if_ln, end_ln, norm_a, norm_b in _scan_brace_if_else(txt, rel):
-                    if not any(if_ln <= al <= end_ln for al in added_line_nos):
-                        continue
-                    if norm_a == norm_b and len(norm_a) >= 2:
-                        bucket.append(f"Wiring-gate (identical if/else): {rel}:{if_ln}: identical if/else branches (no-op stub).")
-
-        # (c) Settings / Config Key Wiring
-        if has_git and settings_files and any(rel == sf or rel.endswith("/" + sf) or rel.endswith(sf) for sf in settings_files) and added:
-            custom_pat = str(wg.get("settings_key_regex") or "")
-            rem_keys = {k for _, k in _extract_setting_keys([(0, r) for r in removed], suf, custom_pat)}
-            seen_keys: set[str] = set()
-            for ln_no, key in _extract_setting_keys(added, suf, custom_pat):
-                if len(key) < 3 or key in rem_keys or key in seen_keys or ignore_re.search(key):
-                    continue
-                seen_keys.add(key)
-                if not _has_external_code_ref(repo, key, rel, wg):
-                    bucket.append(f"Wiring-gate (unwired setting): {rel}:{ln_no}: setting/config key `{key}` has 0 readers outside `{rel}`.")
 
 
 def check_memory_weight(repo: Path, profile: dict[str, Any], warns: list[str]) -> None:
@@ -1412,27 +699,185 @@ def check_build_lessons_timelessness(repo: Path, files: list[str], fails: list[s
                 fails.append(f"{rel}: timelessness audit failed -> {e}")
 
 
+_PARITY_PRESERVE_NAMES = frozenset({
+    ".git", ".last_good_backup", ".last_good_backup.tmp", ".metrics.jsonl",
+    ".model_modes.json", ".bypass_gates", ".diagnostics", ".workspaces.json",
+    ".hook_state.json", "__pycache__",
+})
+_PARITY_HOST_EXCLUDES = (
+    ".gitignore", "package.json", "AGENTS.md", ".github", ".agents/preview",
+    ".agents/federation.json", ".agents/bridge_profile.json", ".agents/env_manifest.json",
+    ".agents/host_matrix.json", ".agents/planner_profile.json",
+)
+
+
+def _inline_plugin_tree_sha256(root: Path) -> str:
+    if not root.is_dir():
+        return ""
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        cur = Path(dirpath)
+        rel_dir = "" if cur == root else cur.relative_to(root).as_posix()
+        kept_dirs: list[str] = []
+        for d in sorted(dirnames):
+            d_rel = f"{rel_dir}/{d}" if rel_dir else d
+            if any(p in _PARITY_PRESERVE_NAMES for p in d_rel.split("/")):
+                continue
+            if any(d_rel == ex or d_rel.startswith(ex + "/") for ex in _PARITY_HOST_EXCLUDES):
+                continue
+            kept_dirs.append(d)
+        dirnames[:] = kept_dirs
+        for fn in sorted(filenames):
+            f_rel = f"{rel_dir}/{fn}" if rel_dir else fn
+            if any(p in _PARITY_PRESERVE_NAMES for p in f_rel.split("/")) or f_rel.endswith((".pyc", ".pyo")):
+                continue
+            if any(f_rel == ex or f_rel.startswith(ex + "/") for ex in _PARITY_HOST_EXCLUDES):
+                continue
+            p = cur / fn
+            if p.is_file() and not p.is_symlink():
+                files.append(p)
+    if not files:
+        return ""
+    files.sort(key=lambda p: p.relative_to(root).as_posix())
+    h = hashlib.sha256()
+    for p in files:
+        rel = p.relative_to(root).as_posix()
+        data = p.read_bytes()
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(len(data)).encode("ascii"))
+        h.update(b"\0")
+        h.update(data)
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _compute_plugin_tree_sha256(plugin_dir: Path) -> str:
+    try:
+        import self_evolve  # noqa: E402
+
+        fn = getattr(self_evolve, "compute_plugin_tree_sha256", None)
+        if callable(fn):
+            res = fn(plugin_dir)
+            if isinstance(res, tuple) and len(res) >= 2:
+                return str(res[1] or "")
+            return str(res or "")
+        fp_fn = getattr(self_evolve, "_tree_fingerprint", None)
+        if callable(fp_fn):
+            return str(fp_fn(plugin_dir)[0] or "")
+    except Exception:
+        pass
+    return _inline_plugin_tree_sha256(plugin_dir)
+
+
+def _read_plugin_ver_sha(plugin_dir: Path) -> tuple[str, str]:
+    ver = ""
+    mp = plugin_dir / "plugin.json"
+    if mp.is_file():
+        try:
+            ver = str(json.loads(mp.read_text(encoding="utf-8", errors="ignore")).get("version") or "").strip()
+        except Exception:
+            ver = ""
+    return ver, _compute_plugin_tree_sha256(plugin_dir)
+
+
+def _is_isolated_temp_repo(repo: Path) -> bool:
+    try:
+        rp = repo.resolve()
+        if str(rp).startswith("/tmp/cavern-federation"):
+            return False
+        for t in {Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()}:
+            if rp == t or t in rp.parents:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _collect_mounted_plugin_peers(
+    repo: Path,
+    local_dir: Path,
+    *,
+    global_dir: Path | None = None,
+    sibling_dirs: list[Path] | None = None,
+) -> list[tuple[str, Path]]:
+    peers: list[tuple[str, Path]] = []
+    seen_res: set[Path] = {local_dir.resolve()}
+    is_tmp = _is_isolated_temp_repo(repo)
+
+    def _add(label: str, cand: Path) -> None:
+        if not cand.is_dir():
+            return
+        p_dir = cand if (cand / "plugin.json").is_file() else (cand / ".agents" / "plugins" / "dynamic-fractal-planner")
+        if not (p_dir / "plugin.json").is_file():
+            return
+        try:
+            rp = p_dir.resolve()
+        except Exception:
+            return
+        if rp in seen_res:
+            return
+        seen_res.add(rp)
+        peers.append((label, rp))
+
+    ghome = os.environ.get("GEMINI_HOME", "").strip()
+    if global_dir is not None:
+        _add("global", Path(global_dir))
+    elif ghome:
+        _add("global", Path(ghome).expanduser() / "config" / "plugins" / "dynamic-fractal-planner")
+    elif not is_tmp:
+        _add("global", Path.home() / ".gemini" / "config" / "plugins" / "dynamic-fractal-planner")
+
+    fed_env = os.environ.get("CAVERN_FEDERATION_ROOT", "").strip()
+    if sibling_dirs is not None:
+        for idx, sd in enumerate(sibling_dirs):
+            _add(f"sibling:{sd.name or idx}", Path(sd))
+    elif fed_env or not is_tmp:
+        fed_file = repo / ".agents" / "federation.json"
+        fed_root = Path(fed_env).expanduser() if fed_env else Path("/tmp/cavern-federation")
+        if fed_file.is_file():
+            try:
+                fed = json.loads(fed_file.read_text(encoding="utf-8", errors="ignore"))
+                if not fed_env and fed.get("mountRoot"):
+                    fed_root = Path(str(fed["mountRoot"])).expanduser()
+                for alias, spec in (fed.get("repos") or {}).items():
+                    _add(f"fed:{alias}", fed_root / alias)
+                    if not is_tmp and isinstance(spec, dict) and spec.get("termuxPath"):
+                        _add(f"local:{alias}", Path(str(spec["termuxPath"])).expanduser())
+            except Exception:
+                pass
+        else:
+            for alias in ("fractal", "omniagent", "cavern"):
+                _add(f"fed:{alias}", fed_root / alias)
+
+    return peers
+
+
 def check_plugin_sync_parity(
     repo: Path,
     files: list[str],
     warns: list[str],
     *,
     scan_all: bool = False,
+    global_dir: Path | None = None,
+    sibling_dirs: list[Path] | None = None,
 ) -> None:
-    """Warn if embedded plugin code changed without recording an entry in plugin EXTERNAL_AI_SYNC.md or PROJECT_HISTORY.md."""
+    """Warn if plugin code changed without ledger updates OR `(semver, tree_sha256)` parity drifted vs mounted peers."""
     plug_prefix = ".agents/plugins/dynamic-fractal-planner/"
-    code_touched = [
-        f for f in files
-        if f.startswith(plug_prefix)
-        and (f.endswith(".py") or f.endswith("plugin.json") or f.endswith("hooks.json"))
-    ]
-    if not code_touched:
+    is_standalone = (repo / "plugin.json").is_file()
+    if is_standalone:
+        emb_touched = [f for f in files if f.endswith((".py", "plugin.json", "hooks.json"))]
+    else:
+        emb_touched = [
+            f for f in files
+            if f.startswith(plug_prefix)
+            and (f.endswith(".py") or f.endswith("plugin.json") or f.endswith("hooks.json"))
+        ]
+    if not emb_touched and not scan_all:
         return
     gitless_or_all = scan_all or not (repo / ".git").exists()
     cur_ver = ""
-    if gitless_or_all:
-        # In full-workspace / gitless scans, `files` includes all tracked plugin files regardless of edit state.
-        # Only warn if the current plugin.json version is missing from the ledger.
+    if gitless_or_all and not is_standalone:
         manifest_p = repo / f"{plug_prefix}plugin.json"
         if manifest_p.is_file():
             try:
@@ -1440,18 +885,32 @@ def check_plugin_sync_parity(
             except Exception:
                 cur_ver = ""
 
-    for doc_rel in (
-        f"{plug_prefix}.agents/docs/EXTERNAL_AI_SYNC.md",
-        f"{plug_prefix}.agents/docs/PROJECT_HISTORY.md",
-    ):
-        doc_full = repo / doc_rel
-        if not doc_full.is_file():
-            continue
-        if doc_rel in files:
-            continue
-        if gitless_or_all and cur_ver and f"v{cur_ver}" in doc_full.read_text(encoding="utf-8", errors="ignore"):
-            continue
-        warns.append(f"Plugin code edited ({len(code_touched)} file(s)) without updating `{doc_rel}`.")
+    if emb_touched and not is_standalone:
+        for doc_rel in (
+            f"{plug_prefix}.agents/docs/EXTERNAL_AI_SYNC.md",
+            f"{plug_prefix}.agents/docs/PROJECT_HISTORY.md",
+        ):
+            doc_full = repo / doc_rel
+            if not doc_full.is_file():
+                continue
+            if doc_rel in files:
+                continue
+            if gitless_or_all and cur_ver and f"v{cur_ver}" in doc_full.read_text(encoding="utf-8", errors="ignore"):
+                continue
+            warns.append(f"Plugin code edited ({len(emb_touched)} file(s)) without updating `{doc_rel}`.")
+
+    local_plugin_dir = repo if is_standalone else (repo / plug_prefix.rstrip("/"))
+    if (local_plugin_dir / "plugin.json").is_file():
+        peers = _collect_mounted_plugin_peers(repo, local_plugin_dir, global_dir=global_dir, sibling_dirs=sibling_dirs)
+        if peers:
+            local_ver, local_sha = _read_plugin_ver_sha(local_plugin_dir)
+            for label, p_dir in peers:
+                peer_ver, peer_sha = _read_plugin_ver_sha(p_dir)
+                if local_ver != peer_ver or (local_sha and peer_sha and local_sha != peer_sha):
+                    warns.append(
+                        f"Plugin sync parity mismatch vs `{label}` ({p_dir}): "
+                        f"local=(v{local_ver or '?'}, {local_sha[:12]}) != peer=(v{peer_ver or '?'}, {peer_sha[:12]})."
+                    )
 
 
 def check_file_budget(
@@ -1670,6 +1129,7 @@ def update_hook_verify_stamp(built: bool, plugin_tests_passed: bool = False) -> 
         now = time.time()
         data["last_verify_ts"] = now
         data["needs_verify"] = False
+        data["doc_verify_only"] = False
         if built:
             data["last_build_ts"] = now
             data["needs_build"] = False

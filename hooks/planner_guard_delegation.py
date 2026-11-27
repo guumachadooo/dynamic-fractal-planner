@@ -5,6 +5,7 @@ complexity-tiered model routing and Google/Gemini-only quota protection.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -191,20 +192,84 @@ def _check_swarm(args: dict[str, Any], cfg: dict[str, Any]) -> tuple[str, str] |
     return None
 
 
-def _check_run_workflow(args: dict[str, Any], cfg: dict[str, Any]) -> tuple[str, str] | None:
-    if not cfg.get("enforce_google_only", True):
-        return None
+def _check_define_subagent(args: dict[str, Any], cfg: dict[str, Any]) -> tuple[str, str] | None:
+    sub_cfg = cfg.get("sub_subagent") if isinstance(cfg.get("sub_subagent"), dict) else {}
+    allow_nesting = bool(sub_cfg.get("allow_nesting", True))
+    enable_sub = args.get("EnableSubagentTools")
+    if enable_sub is None:
+        enable_sub = args.get("enableSubagentTools")
+    if bool(enable_sub) and not allow_nesting:
+        return (
+            "DENY|sub_subagent: `define_subagent(EnableSubagentTools=true)` disabled (`allow_nesting=false`).",
+            "DENY:define_sub_disabled",
+        )
+    blocked_patterns = list(cfg.get("blocked_model_patterns") or [])
+    if cfg.get("enforce_google_only", True):
+        model = str(args.get("Model") or args.get("model") or "").strip()
+        if model and (hit := _find_blocked_vendor(model, blocked_patterns)):
+            return (
+                f"DENY|google_only: blocked non-Google model `{model}` (matched `{hit}`).",
+                f"DENY:define_google_only:{hit}",
+            )
+        sys_txt = str(args.get("SystemPrompt") or args.get("systemPrompt") or "")
+        for m in WORKFLOW_MODEL_RE.findall(sys_txt):
+            if (hit := _find_blocked_vendor(m, blocked_patterns)):
+                return (
+                    f"DENY|google_only: `define_subagent` prompt uses blocked model `{m}` (matched `{hit}`).",
+                    f"DENY:define_prompt_google_only:{hit}",
+                )
+    return None
+
+
+def _workflow_has_parallel_heavy_op(script_src: str) -> str | None:
+    heavy_re = re.compile(r"\b(?:dotnet\s+(?:build|test)|git\s+push|run_plugin_tests\.py)\b", re.I)
+    try:
+        tree = ast.parse(script_src)
+        fn_bodies = {n.name: ast.unparse(n) for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "parallel":
+                call_src = ast.unparse(node)
+                for fn_name, fn_src in fn_bodies.items():
+                    if re.search(rf"\b{re.escape(fn_name)}\b", call_src) and (hm := heavy_re.search(fn_src)):
+                        return hm.group(0)
+                if (hm := heavy_re.search(call_src)):
+                    return hm.group(0)
+    except Exception:
+        for blk in re.findall(r"parallel\s*\([^\n]{0,300}\)", script_src):
+            if (hm := heavy_re.search(blk)):
+                return hm.group(0)
+    return None
+
+
+def _check_run_workflow(args: dict[str, Any], cfg: dict[str, Any], repo: Path | None = None) -> tuple[str, str] | None:
     script_src = str(args.get("Script") or args.get("script") or "")
     if not script_src:
+        sp = str(args.get("ScriptPath") or args.get("scriptPath") or "").strip()
+        if sp:
+            p = Path(sp).expanduser()
+            if not p.is_absolute() and repo is not None:
+                p = (repo / p).resolve()
+            if p.is_file():
+                try:
+                    script_src = p.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    script_src = ""
+    if not script_src:
         return None
-    blocked_patterns = list(cfg.get("blocked_model_patterns") or [])
-    for m in WORKFLOW_MODEL_RE.findall(script_src):
-        hit = _find_blocked_vendor(m, blocked_patterns)
-        if hit:
-            return (
-                f"DENY|google_only: workflow script uses non-Google model `{m}` (matched `{hit}`). Use Google/Gemini models only.",
-                f"DENY:workflow_google_only:{hit}",
-            )
+    if cfg.get("enforce_google_only", True):
+        blocked_patterns = list(cfg.get("blocked_model_patterns") or [])
+        for m in WORKFLOW_MODEL_RE.findall(script_src):
+            hit = _find_blocked_vendor(m, blocked_patterns)
+            if hit:
+                return (
+                    f"DENY|google_only: workflow script uses non-Google model `{m}` (matched `{hit}`). Use Google/Gemini models only.",
+                    f"DENY:workflow_google_only:{hit}",
+                )
+    if (heavy := _workflow_has_parallel_heavy_op(script_src)):
+        return (
+            f"DENY|parallel_heavy_op: `run_workflow` runs `{heavy}` inside `parallel(...)` -> move builds/tests/push to sequential Epoch Barrier.",
+            "DENY:workflow_parallel_heavy",
+        )
     return None
 
 
@@ -222,7 +287,7 @@ def main() -> None:
         args = tool.get("args") or {}
         if not isinstance(args, dict):
             args = {}
-        if name not in ("invoke_subagent", "swarm", "run_workflow"):
+        if name not in ("invoke_subagent", "define_subagent", "swarm", "run_workflow"):
             _allow()
             return
 
@@ -240,10 +305,12 @@ def main() -> None:
         hit: tuple[str, str] | None = None
         if name == "invoke_subagent":
             hit = _check_invoke_subagent(args, cfg)
+        elif name == "define_subagent":
+            hit = _check_define_subagent(args, cfg)
         elif name == "swarm":
             hit = _check_swarm(args, cfg)
         elif name == "run_workflow":
-            hit = _check_run_workflow(args, cfg)
+            hit = _check_run_workflow(args, cfg, repo=repo)
 
         if hit:
             _deny(hit[0], payload=payload, repo=repo, rule_sig=hit[1])

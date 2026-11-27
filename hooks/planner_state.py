@@ -594,6 +594,14 @@ def eval_conditions(cond: dict[str, Any] | None, repo: Path | None = None) -> bo
     return True
 
 
+def _strip_rel_prefix(path_str: str) -> str:
+    """Normalize slashes and strip leading `./` or `/` without damaging dotfiles like `.agents/`."""
+    s = str(path_str or "").replace("\\", "/")
+    while s.startswith("./"):
+        s = s[2:]
+    return s.lstrip("/")
+
+
 def normalize_rel_path(path_str: str, repo: Path) -> tuple[str, bool]:
     """Return (repo_relative_path, is_inside_repo)."""
     if not path_str:
@@ -604,10 +612,10 @@ def normalize_rel_path(path_str: str, repo: Path) -> tuple[str, bool]:
         p_norm = path_str.replace("\\", "/")
     repo_norm = str(repo.resolve()).replace("\\", "/").rstrip("/") + "/"
     if p_norm.startswith(repo_norm):
-        return p_norm[len(repo_norm) :].lstrip("./"), True
-    raw = path_str.replace("\\", "/").lstrip("./")
+        return _strip_rel_prefix(p_norm[len(repo_norm) :]), True
+    raw = path_str.replace("\\", "/")
     if not raw.startswith("/"):
-        return raw, True
+        return _strip_rel_prefix(raw), True
     return raw, False
 
 
@@ -624,7 +632,7 @@ def is_app_code_path(path_str: str, repo: Path, profile: dict[str, Any] | None =
     exts = tuple(e.lower() for e in (prof.get("code_extensions") or DEFAULT_CODE_EXTS))
 
     if prefixes:
-        norm_prefixes = tuple(p.replace("\\", "/").lstrip("./") for p in prefixes)
+        norm_prefixes = tuple(_strip_rel_prefix(p) for p in prefixes)
         if not rel.startswith(norm_prefixes):
             return False
         return low.endswith(exts)
@@ -641,17 +649,81 @@ def is_verifiable_path(path_str: str, repo: Path, profile: dict[str, Any] | None
     if not inside or not rel:
         return False
     low = rel.lower()
-    if low.startswith((".agents/", ".github/workflows/")) and low.endswith((".py", ".json", ".sh", ".yml", ".yaml")):
+    parts = low.split("/")
+    if any(p in ("__pycache__", ".git", "node_modules") for p in parts):
+        return False
+    if low.endswith((".pyc", ".pyo")):
+        return False
+    base = Path(low).name
+    if low.startswith(".agents/plugins/"):
+        if (
+            base in (".metrics.jsonl", ".model_modes.json", ".hook_state.json", ".workspaces.json", ".bypass_gates")
+            or "/.diagnostics/" in f"/{low}/"
+            or "/.last_good_backup" in f"/{low}"
+        ):
+            return False
+        return True
+    if low.startswith(".agents/docs/") and low.endswith(".md"):
+        return True
+    if base.startswith("bp_") and low.endswith(".md"):
+        return True
+    if low.startswith(".agents/qa/") and low.endswith(".json"):
+        return True
+    if low.startswith(".github/workflows/") and low.endswith((".yml", ".yaml")):
+        return True
+    if low.startswith(".agents/") and low.endswith((".py", ".json", ".sh", ".yml", ".yaml")):
+        return True
+    if not low.startswith(("dist/", "build/", "target/", "bin/", "obj/", ".venv/", "venv/")):
+        if low.endswith((".mjs", ".js")) or base == "package.json":
+            return True
+    return False
+
+
+def is_doc_verifiable_path(path_str: str, repo: Path) -> bool:
+    """Return True for docs/blueprints/qa-specs verified via fast <=300ms static checks (no heavy build)."""
+    rel, inside = normalize_rel_path(path_str, repo)
+    if not inside or not rel:
+        return False
+    low = rel.lower()
+    base = Path(low).name
+    if low.startswith(".agents/docs/") and low.endswith(".md"):
+        return True
+    if base.startswith("bp_") and low.endswith(".md"):
+        return True
+    if low.startswith(".agents/qa/") and low.endswith(".json"):
+        return True
+    if base in ("changelog.md", "agents.md", "skill.md"):
+        return True
+    if low.startswith(".agents/plugins/") and low.endswith(".md"):
         return True
     return False
 
 
+def record_doc_file_edit(hook_state: dict[str, Any], rel_path: str) -> bool:
+    """Track doc/ledger edits and set fast doc verification flag without triggering `needs_build`."""
+    clean = _strip_rel_prefix(rel_path)
+    if not clean:
+        return False
+    docs = list(hook_state.get("doc_files_edited") or [])
+    if clean not in docs:
+        docs.append(clean)
+    hook_state["doc_files_edited"] = docs
+    hook_state["needs_verify"] = True
+    if not hook_state.get("code_files_edited") and not hook_state.get("needs_build"):
+        hook_state["doc_verify_only"] = True
+    return True
+
+
 def is_build_relevant_path(path_str: str, repo: Path, profile: dict[str, Any] | None = None) -> bool:
+    rel, inside = normalize_rel_path(path_str, repo)
+    low = (rel if inside and rel else path_str.replace("\\", "/")).lower()
+    if low.endswith(".md") or low.startswith((".agents/docs/", ".agents/qa/")):
+        return False
     prof = profile if profile is not None else load_project_profile(repo)
     if not prof.get("verify_command") and not prof.get("build_rules"):
         return False
     exts = tuple(e.lower() for e in (prof.get("build_extensions") or DEFAULT_BUILD_EXTS))
-    return path_str.lower().endswith(exts)
+    return low.endswith(exts)
 
 
 def has_active_turn_plan(payload: dict[str, Any], hook_state: dict[str, Any]) -> bool:
@@ -976,7 +1048,7 @@ def get_managed_project_docs(repo: Path, profile: dict[str, Any] | None = None) 
     def _add_candidate(raw_rel: Any, allow_root_md: bool = False) -> None:
         if not isinstance(raw_rel, str):
             return
-        rel = raw_rel.strip().replace("\\", "/").lstrip("./")
+        rel = _strip_rel_prefix(raw_rel.strip())
         if not rel or rel.startswith("/") or ".." in rel.split("/") or not rel.lower().endswith(".md"):
             return
         if rel.startswith(".agents/docs/archive/"):

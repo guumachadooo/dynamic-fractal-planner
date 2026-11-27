@@ -7,7 +7,7 @@ description: >-
   and deterministic 0-100 Popperian rubric verification (>=85/100).
 ---
 
-# Universal SOTA Blueprint Playbook (`sota-blueprint` / Plugin v2.19.0)
+# Universal SOTA Blueprint Playbook (`sota-blueprint` / Plugin v2.21.0)
 
 > STYLE|lossless symbolic telegraphic EN ONLY (`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`).
 > CLI|`python3 -B ~/.gemini/config/plugins/dynamic-fractal-planner/scripts/plan_tool.py blueprint <cmd>`
@@ -46,7 +46,8 @@ description: >-
 ### Stage 4 — Epistemic Wave-0 Spikes & Rolling-Wave DSM Graph
 - On `1-way`/`full`, rank unknowns by `VoI = P(fail) * BlastRadius` (`SPIKE|S1|...`).
 - Define `BUDGET|` (latency/mem/cost/degraded floor), `PLANES|` (`full`), & `QAS|` 6-tuples (`QAS|id|stim|env|resp|numeric_bound+unit|executable_oracle_cmd` — dummy oracles like `echo ok`/`pass`/`manual` are rejected).
-- **Anti-Waterfall DSM Split:** Detail `### H1 Atomic Slices` (`SLICE|`); keep `### H2+ Outcome Stubs` as **1-line outcome+gate stubs ONLY** (`<=25%` of lines, **ZERO** deep filenames/class signatures).
+- **Anti-Waterfall DSM Split & Dual-Mode Wave DAG:** Detail `### H1 Atomic Slices` (`SLICE|`) plus companion `SLICE_DAG|<id>|deps=<ids|none>|writes=<globs|RO>|reads=<globs|none>|locks=<lks|none>|tier=<L0..L3>` + optional `DAG_POLICY|default_mode=seq|max_width_termux=2|max_width_local=4|barrier=epoch` (NEVER bloat `SLICE|` lines; keep `### H2+ Outcome Stubs` as 1L outcome+gate stubs ONLY `<=25%`).
+- **Dual-Mode Conflict-Free Execution (`blueprint schedule`):** Run `plan_tool.py blueprint schedule <bp> --mode <seq|parallel> [--emit-workflow <artifact>/scratch/wf_<bp>.py|--emit-prompts]` (`seq` = 1 wave/epoch; `parallel` = Coffman-Graham min-epoch packing respecting authoring locks vs barrier-deferred `proot_build`/`ledgers`, Termux `max_width<=2`, `[LEASE:...]` D1/D2 auto-bind, dirty-safe Epoch Barrier rollback, & `O(1)` `<=12L`/epoch root ctx).
 
 ### Stage 5 — Deterministic Anti-Gaming Popperian Rubric Gate (`score >= 85/100`)
 - Run `plan_tool.py blueprint lint .agents/docs/blueprints/BP_<SLUG>.md --strict`.

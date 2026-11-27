@@ -119,6 +119,23 @@ def _run_pre_invocation_inner(t0: float) -> None:
     hook_state = load_json(hook_file)
 
     last_input = payload.get("lastUserInput") or ""
+    conv_id = str(payload.get("conversationId") or "").strip()
+    if last_input and "[LEASE:" in last_input and conv_id:
+        try:
+            from wave_scheduler import bind_lease_conversation, extract_lease_tag  # noqa: E402
+
+            if (ltag := extract_lease_tag(last_input)):
+                bind_lease_conversation(
+                    repo,
+                    conv_id,
+                    ltag["bp_id"],
+                    ltag["epoch_id"],
+                    ltag["wave_id"],
+                    ltag["nonce"],
+                    ltag["sub_globs"] or None,
+                )
+        except Exception:
+            pass
     p_hash = prompt_hash(last_input)
     raw_inv = payload.get("invocationNum")
     inv_num = int(raw_inv) if raw_inv is not None else 1
@@ -228,6 +245,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "blueprint_injected": False,
             "hygiene_injected": False,
             "qa_gate_injected": False,
+            "wave_orch_injected": False,
             "plugin_sync_injected": False,
             "btw_injected": False,
             "task_status_polls": prev_task_polls,
@@ -524,6 +542,19 @@ def _run_pre_invocation_inner(t0: float) -> None:
         )
         if _append_within_budget(qa_line):
             hook_state["qa_gate_injected"] = True
+
+    if (
+        triage.get("wave_exec_mode") == "parallel_max"
+        and not eco_mode
+        and not is_btw_short
+        and not hook_state.get("wave_orch_injected")
+    ):
+        wo_line = (
+            "[WAVE_ORCH|MAX_PAR] Run `plan_tool.py blueprint schedule <BP> --mode parallel --emit-workflow` -> "
+            "exec via 1 `run_workflow` (or D0->D1 Wave-Captain->D2 Leaf w/ `[LEASE:]`) -> O(1) root ctx + 1-verify-owner epoch barrier."
+        )
+        if _append_within_budget(wo_line):
+            hook_state["wave_orch_injected"] = True
 
     # Domain lenses (1-line active-domain critique, suppressed in ECO_MODE & within bloat budget)
     if not is_btw_short and not eco_mode and not plan_ready and not hook_state.get("lens_injected") and tier >= 1:

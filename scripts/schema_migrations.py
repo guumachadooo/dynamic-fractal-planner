@@ -66,6 +66,31 @@ DEFAULT_DELEGATION_CONFIG: dict[str, Any] = {
         "swarm_medium_model": "gemini-4-hydrogen-medium",
         "allow_medium_tier": True,
     },
+    "wave_orchestration": {
+        "enabled": True,
+        "default_mode": "seq",
+        "max_width_termux": 2,
+        "max_width_local": 4,
+        "lease_ttl_secs": 3600,
+        "enable_lease_guard": True,
+        "shared_hotspots": [
+            "**/AndroidStrings*.cs",
+            ".agents/docs/HANDOFF.md",
+            ".agents/docs/PLANS_HUB.md",
+            ".agents/docs/PROJECT_HISTORY.md",
+            ".agents/docs/EXTERNAL_AI_SYNC.md",
+            "**/AppSettingsStore.cs",
+            "*.csproj",
+            "**/AndroidManifest.xml",
+            ".agents/planner_profile.json",
+        ],
+        "barrier_deferred_locks": [
+            "proot_build",
+            "heavy_tests",
+            "verify_all",
+            "ledgers",
+        ],
+    },
 }
 
 DEFAULT_BLUEPRINT_CONFIG: dict[str, Any] = {

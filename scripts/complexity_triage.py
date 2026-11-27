@@ -14,9 +14,33 @@ from typing import Any
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 _HOOKS_DIR = _SCRIPTS_DIR.parent / "hooks"
+_TESTS_DIR = _SCRIPTS_DIR.parent / "tests"
 for _p in (str(_SCRIPTS_DIR), str(_HOOKS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+
+def _discover_plugin_py_stems() -> tuple[str, ...]:
+    """Dynamically discover plugin Python module stems across `scripts/`, `hooks/`, and `tests/`."""
+    stems: set[str] = set()
+    for d in (_SCRIPTS_DIR, _HOOKS_DIR, _TESTS_DIR):
+        if not d.is_dir():
+            continue
+        for p in d.glob("*.py"):
+            if p.name != "__init__.py" and not p.stem.startswith("."):
+                stems.add(p.stem)
+    return tuple(sorted(stems))
+
+
+def _build_plugin_self_keywords() -> tuple[str, ...]:
+    base = ["dynamic-fractal-planner", "planner_profile*", "planner_guard*", "extra_requests*"]
+    seen = set(base)
+    for stem in _discover_plugin_py_stems():
+        tok = f"{stem}*"
+        if tok not in seen:
+            seen.add(tok)
+            base.append(tok)
+    return tuple(base)
 
 from schema_migrations import migrate_profile, resolve_blueprint_config  # noqa: E402
 
@@ -122,13 +146,7 @@ UNIVERSAL_DOMAINS: dict[str, dict[str, Any]] = {
     "plugin-self": {
         "module_id": "MOD-PLUGIN-SELF",
         "module_title": "Plugin Backward Compatibility, Schema & Regression Gate",
-        "keywords": (
-            "dynamic-fractal-planner", "schema_migrations*", "planner_profile*",
-            "planner_state*", "planner_guard*", "planner_post_tool*",
-            "planner_stop*", "planner_session_start*", "planner_pre_invocation*",
-            "complexity_triage*", "plan_tool*", "verify_universal*",
-            "run_plugin_tests*", "extra_requests*",
-        ),
+        "keywords": _build_plugin_self_keywords(),
     },
 }
 
@@ -215,12 +233,37 @@ _READ_ONLY_GUARD_PATTERNS = [
     compile_kw_regex(p)
     for p in (
         "ainda não faz", "ainda nao faz", "não faz isso", "nao faz isso",
-        "não mexe", "nao mexe", "sem alterar", "sem editar", "sem modificar",
+        "não mexe", "nao mexe", "não altere", "nao altere", "não edite", "nao edite",
+        "sem alterar", "sem editar", "sem modificar",
         "somente leitura", "só leitura", "so leitura", "só me situa", "so me situa",
         "me situa", "só analisa", "so analisa", "don't edit", "do not edit",
         "read-only", "read only", "just explain", "without modifying", "without editing",
     )
 ]
+
+_MUTATING_OVERRIDE_PATTERNS = [
+    compile_kw_regex(p)
+    for p in (
+        "implement*", "cria*", "creat*", "adicion*", "acrescent*",
+        "add", "adds", "added", "adding", "corrig*", "arrum*", "consert*",
+        "fix", "fixes", "fixed", "fixing", "repair*", "patch*",
+        "refator*", "refactor*", "reescrev*", "rewrit*", "migra*", "migrat*",
+        "edita*", "edit", "edits", "edited", "editing", "alter*", "chang*", "modif*",
+        "escrev*", "writ*", "constru*", "build", "builds", "building",
+        "aplica*", "apply", "remov*", "delet*",
+    )
+]
+
+_NEGATED_CLAUSE_RE = re.compile(
+    r"\b(?:n[ãa]o|nao|sem|don't|do\s+not|never|without|not)\b[^,.;!?\n]*",
+    re.IGNORECASE,
+)
+
+
+def _has_actual_mutating_intent(scoring_lower: str) -> bool:
+    """Return True ONLY on explicit non-negated edit/implement/fix intent (never bare `audit`/`auditoria`)."""
+    non_negated = _NEGATED_CLAUSE_RE.sub(" ", scoring_lower or "")
+    return any(p.search(non_negated) for p in _MUTATING_OVERRIDE_PATTERNS)
 
 _PLAN_PROPOSAL_PATTERNS = [
     compile_kw_regex(p)
@@ -358,10 +401,13 @@ _BLUEPRINT_AUTHORING_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
 )
-_BLUEPRINT_META_EDIT_RE = re.compile(
-    r"\b(?:blueprint_engine\.py|complexity_triage\.py|planner_pre_invocation\.py|run_plugin_tests\.py|detect_blueprint_intent)\b",
-    re.IGNORECASE,
-)
+def _build_blueprint_meta_edit_re() -> re.Pattern[str]:
+    parts = [f"{re.escape(s)}\\.py" for s in _discover_plugin_py_stems()]
+    parts.extend(("detect_blueprint_intent", "classify_scope_and_tier"))
+    return re.compile(r"\b(?:" + "|".join(parts) + r")\b", re.IGNORECASE)
+
+
+_BLUEPRINT_META_EDIT_RE = _build_blueprint_meta_edit_re()
 _BLUEPRINT_NEGATION_RE = re.compile(
     r"\b(?:n[ãa]o|sem|don't|do\s+not|never|skip|stop|par[ae]\s+de|deixa\s+(?:de|para))\b"
     r"[^\n.;!?]{0,30}\b(?:faz\w*|cri\w*|ger\w*|mont\w*|escrev\w*|creat\w*|writ\w*|draft\w*|generat\w*|build\w*)?"
@@ -385,9 +431,19 @@ _PLUGIN_SYNC_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*(?:sync-plugin|evolve\s+sync-all)\b", re.IGNORECASE),
 )
 _PLUGIN_SYNC_EXCLUDE_RE = re.compile(
-    r"\b(?:cria\w*|creat\w*|implement\w*|adicion\w*|add\b|refator\w*|refactor\w*|architect\w*|arquitet\w*|"
-    r"blueprint|corrig\w*|fix\b|debug\w*|bug\b|erro\w*|error\b|por\s+que|why\b|explic\w*|explain\w*|"
-    r"como\s+funciona|how\s+does|novo\s+recurso|new\s+feature|edita\w*|edit\w*|escrev\w*|write\b|teste\w*|test\w*|revis\w*|review\b)\b",
+    r"\b(?:"
+    r"cria\w*|creat\w*|implement\w*|adicion\w*|acrescent\w*|add(?:s|ed|ing)?|"
+    r"refator\w*|refactor\w*|split\w*|divid\w*|separ\w*|modulariz\w*|extra\w*|extract\w*|"
+    r"architect\w*|arquitet\w*|design\w*|desenh\w*|blueprint\w*|"
+    r"corrig\w*|arrum\w*|consert\w*|fix(?:es|ed|ing)?|repair\w*|patch\w*|"
+    r"debug\w*|bug\w*|erro\w*|error\w*|falha\w*|fail\w*|"
+    r"hook\w*|guard\w*|regra\w*|rule\w*|triage\w*|schema\w*|skill\w*|"
+    r"feature\w*|funcionalidade\w*|recurso\w*|m[oó]dulo\w*|module\w*|"
+    r"melhor\w*|improv\w*|otimiz\w*|optimiz\w*|alter\w*|mud\w*|chang\w*|modif\w*|"
+    r"remov\w*|delet\w*|tir\w*|integr\w*|migr\w*|constru\w*|build\w*|"
+    r"por\s+que|why|explic\w*|explain\w*|como\s+funciona|how\s+does|"
+    r"edita\w*|edit\w*|escrev\w*|writ\w*|teste\w*|test\w*|revis\w*|review\w*|audit\w*|analis\w*|analy[sz]\w*"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -397,7 +453,7 @@ def detect_plugin_sync_intent(text: str) -> bool:
     scoring = _strip_long_quotes(text or "").strip()
     if not scoring or len(scoring) > 220:
         return False
-    if _PLUGIN_SYNC_EXCLUDE_RE.search(scoring):
+    if _PLUGIN_SYNC_EXCLUDE_RE.search(scoring) or _extract_file_refs(scoring):
         return False
     return any(pat.search(scoring) for pat in _PLUGIN_SYNC_PATTERNS)
 
@@ -432,6 +488,29 @@ def detect_blueprint_opt_out(text: str) -> bool:
     if not scoring:
         return False
     return any(pat.search(scoring) for pat in _BLUEPRINT_OPT_OUT_PATTERNS)
+
+
+_WAVE_PAR_MAX_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:menor\s+quantidade|m[ií]nim[ao]s?\s+(?:contextos?|epochs?|ondas?|waves?)|menor\s+n[uú]mero)\b[^\n.;!?]{0,65}\b(?:waves?|ondas?|contextos?|etapas?|epochs?|paralel\w*)\b", re.I),
+    re.compile(r"\b(?:maior\s+quantidade|m[aá]xim[ao]|todas?\s+as)\b[^\n.;!?]{0,45}\b(?:waves?|ondas?)\b[^\n.;!?]{0,45}\b(?:paralel\w*|um\s+(?:[uú]nico\s+)?contexto)\b", re.I),
+    re.compile(r"\b(?:executa\w*|rod\w*|run|dispatch)\b[^\n.;!?]{0,45}\b(?:waves?|ondas?)\b[^\n.;!?]{0,40}\b(?:em\s+paralel\w*|in\s+parallel|sem\s+(?:conflito|concorrer))\b", re.I),
+    re.compile(r"\b(?:max[_\s-]?parallel|min[_\s-]?epochs?|parallel[_\s-]?waves?)\b", re.I),
+)
+_WAVE_SEQ_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:uma\s+(?:wave|onda)\s+(?:por|de\s+cada)\s+vez|one\s+wave\s+at\s+a\s+time|modo\s+sequencial|sequential\s+(?:waves?|mode))\b", re.I),
+)
+
+
+def detect_wave_exec_mode(text: str) -> str:
+    """Detect user preference for max-parallel min-epoch (`parallel_max`) vs 1-by-1 (`sequential`) wave execution."""
+    scoring = _strip_long_quotes(text or "").strip()
+    if not scoring or len(scoring) < 6:
+        return ""
+    if any(p.search(scoring) for p in _WAVE_PAR_MAX_PATTERNS):
+        return "parallel_max"
+    if any(p.search(scoring) for p in _WAVE_SEQ_PATTERNS):
+        return "sequential"
+    return ""
 
 
 def detect_plan_resume_intent(text: str) -> bool:
@@ -858,19 +937,48 @@ def _triage_confidence(tier: int, scoring_len: int, file_refs: list[str], domain
     return "medium"
 
 
-def analyze_prompt(
+def _reconcile_tier_and_format(
+    triage_tier: int,
+    bp_core: dict[str, Any] | None,
+    *,
+    is_read_only: bool,
+    is_t0: bool,
+    bp_cfg: dict[str, Any],
+) -> tuple[int, str]:
+    if is_t0:
+        return 0, "none"
+    if is_read_only:
+        return min(1, max(0, int(triage_tier))), "none"
+    bp = bp_core or {}
+    bp_risk_num = {"T1": 1, "T2": 2, "T3": 3}.get(str(bp.get("risk_tier") or "T1"), 1)
+    tier = max(int(triage_tier), bp_risk_num)
+    if bp.get("door_type") == "1-way" and tier < 2:
+        tier = 2
+    tier = min(3, tier)
+    use_tiered = bool(bp_cfg.get("tiered_formats", True))
+    if not use_tiered or tier >= 3:
+        rec_fmt = "full"
+    elif tier == 2:
+        rec_fmt = "compact"
+    else:
+        rec_fmt = "mini"
+    return tier, rec_fmt
+
+
+def _analyze_prompt_raw(
     prompt: str,
     workspace_root: Path | None = None,
     context: dict[str, Any] | None = None,
     now: float | None = None,
-) -> dict[str, Any]:
-    """Classify prompt breadth, depth, tier (0..3), domains, and recommended modules (w/ multi-turn continuity)."""
+    profile_override: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]], dict[str, Any]]:
+    """Core prompt triage pass prior to blueprint-core reconciliation (no cross-module recursion)."""
     text = (prompt or "").strip()
     lower = text.lower()
     scoring_text = _strip_long_quotes(text)
     scoring_lower = scoring_text.lower()
 
-    profile = load_project_profile(workspace_root)
+    profile = profile_override if isinstance(profile_override, dict) else load_project_profile(workspace_root)
     pace_mode = detect_pace_mode(text, profile)
     domain_specs = _merged_domain_specs(profile)
 
@@ -887,29 +995,37 @@ def analyze_prompt(
     bp_cfg = resolve_blueprint_config(profile)
     bp_opt_out = detect_blueprint_opt_out(text)
     plan_resume = detect_plan_resume_intent(text)
+    wave_exec_mode = detect_wave_exec_mode(text)
     if plugin_sync_intent:
-        return {
-            "tier": 0,
-            "tier_name": "DIRECT",
-            "breadth_est": 0,
-            "depth_level": "low",
-            "depth_signals": [],
-            "detected_domains": domains,
-            "research_strategy": "none",
-            "recommended_modules": [],
-            "doc_lookup_targets": [],
-            "source": "prompt",
-            "intent": "plugin_sync_fastpath",
-            "confidence": "high",
-            "file_refs": file_refs[:12],
-            "btw_queue_intent": False,
-            "blueprint_intent": False,
-            "blueprint_opt_out": bp_opt_out,
-            "blueprint_required_by_policy": False,
-            "plan_resume_intent": False,
-            "plugin_sync_intent": True,
-            "pace_mode": pace_mode,
-        }
+        return (
+            {
+                "tier": 0,
+                "tier_name": "DIRECT",
+                "breadth_est": 0,
+                "depth_level": "low",
+                "depth_signals": [],
+                "detected_domains": domains,
+                "research_strategy": "none",
+                "recommended_modules": [],
+                "doc_lookup_targets": [],
+                "source": "prompt",
+                "intent": "plugin_sync_fastpath",
+                "confidence": "high",
+                "file_refs": file_refs[:12],
+                "btw_queue_intent": False,
+                "blueprint_intent": False,
+                "blueprint_opt_out": bp_opt_out,
+                "blueprint_required_by_policy": False,
+                "recommended_blueprint_format": "none",
+                "plan_resume_intent": False,
+                "plugin_sync_intent": True,
+                "pace_mode": pace_mode,
+                "wave_exec_mode": wave_exec_mode,
+            },
+            profile,
+            domain_specs,
+            bp_cfg,
+        )
     btw_intent = detect_btw_queue_intent(text)
     bp_intent = detect_blueprint_intent(text)
     has_read_only = any(p.search(scoring_lower) for p in _READ_ONLY_GUARD_PATTERNS)
@@ -948,7 +1064,6 @@ def analyze_prompt(
 
     is_pure_q = _is_pure_question_or_greeting(scoring_text, action_clauses, list_items)
 
-    # Check multi-turn context continuity eligibility before early exits
     cur_ts = float(now if now is not None else time.time())
     ctx = context if isinstance(context, dict) else {}
     ctx_tier = int(ctx.get("tier") or 0)
@@ -956,7 +1071,7 @@ def analyze_prompt(
     ctx_ttl = float(ctx.get("ttl_secs") or 1800.0)
     ctx_valid = bool(ctx and ctx_tier >= 2 and ctx_ts > 0.0 and (cur_ts - ctx_ts) <= ctx_ttl)
     ctx_status = str(ctx.get("status") or "")
-    read_only_block = has_read_only and not has_plan_prop
+    read_only_block = has_read_only and not _has_actual_mutating_intent(scoring_lower)
 
     can_inherit = (
         ctx_valid
@@ -973,76 +1088,97 @@ def analyze_prompt(
     )
 
     if not can_inherit and followup == "gratitude_close":
-        return {
-            "tier": 0,
-            "tier_name": "DIRECT",
-            "breadth_est": 0,
-            "depth_level": "low",
-            "depth_signals": [],
-            "detected_domains": domains,
-            "research_strategy": "none",
-            "recommended_modules": [],
-            "doc_lookup_targets": doc_targets,
-            "source": "prompt",
-            "intent": "gratitude_close",
-            "confidence": "high",
-            "file_refs": file_refs[:12],
-            "btw_queue_intent": btw_intent,
-            "blueprint_intent": False,
-            "blueprint_opt_out": bp_opt_out,
-            "blueprint_required_by_policy": False,
-            "plan_resume_intent": False,
-            "plugin_sync_intent": False,
-            "pace_mode": pace_mode,
-        }
+        return (
+            {
+                "tier": 0,
+                "tier_name": "DIRECT",
+                "breadth_est": 0,
+                "depth_level": "low",
+                "depth_signals": [],
+                "detected_domains": domains,
+                "research_strategy": "none",
+                "recommended_modules": [],
+                "doc_lookup_targets": doc_targets,
+                "source": "prompt",
+                "intent": "gratitude_close",
+                "confidence": "high",
+                "file_refs": file_refs[:12],
+                "btw_queue_intent": btw_intent,
+                "blueprint_intent": False,
+                "blueprint_opt_out": bp_opt_out,
+                "blueprint_required_by_policy": False,
+                "recommended_blueprint_format": "none",
+                "plan_resume_intent": False,
+                "plugin_sync_intent": False,
+                "pace_mode": pace_mode,
+                "wave_exec_mode": "",
+            },
+            profile,
+            domain_specs,
+            bp_cfg,
+        )
 
     if not can_inherit and is_pure_q:
-        return {
-            "tier": 0,
-            "tier_name": "DIRECT",
-            "breadth_est": 0,
-            "depth_level": "low",
-            "depth_signals": [],
-            "detected_domains": domains,
-            "research_strategy": "none",
-            "recommended_modules": [],
-            "doc_lookup_targets": doc_targets,
-            "source": "prompt",
-            "intent": "pure_question",
-            "confidence": "high",
-            "file_refs": file_refs[:12],
-            "btw_queue_intent": btw_intent,
-            "blueprint_intent": bp_intent,
-            "blueprint_opt_out": bp_opt_out,
-            "blueprint_required_by_policy": False,
-            "plan_resume_intent": plan_resume,
-            "plugin_sync_intent": False,
-            "pace_mode": pace_mode,
-        }
+        return (
+            {
+                "tier": 0,
+                "tier_name": "DIRECT",
+                "breadth_est": 0,
+                "depth_level": "low",
+                "depth_signals": [],
+                "detected_domains": domains,
+                "research_strategy": "none",
+                "recommended_modules": [],
+                "doc_lookup_targets": doc_targets,
+                "source": "prompt",
+                "intent": "pure_question",
+                "confidence": "high",
+                "file_refs": file_refs[:12],
+                "btw_queue_intent": btw_intent,
+                "blueprint_intent": bp_intent,
+                "blueprint_opt_out": bp_opt_out,
+                "blueprint_required_by_policy": False,
+                "recommended_blueprint_format": "none",
+                "plan_resume_intent": plan_resume,
+                "plugin_sync_intent": False,
+                "pace_mode": pace_mode,
+                "wave_exec_mode": wave_exec_mode,
+            },
+            profile,
+            domain_specs,
+            bp_cfg,
+        )
 
     if is_tiny_fix:
-        return {
-            "tier": 0,
-            "tier_name": "DIRECT",
-            "breadth_est": 1,
-            "depth_level": "low",
-            "depth_signals": [],
-            "detected_domains": domains,
-            "research_strategy": "inline_grep",
-            "recommended_modules": [],
-            "doc_lookup_targets": doc_targets,
-            "source": "prompt",
-            "intent": "tiny_fix",
-            "confidence": "high",
-            "file_refs": file_refs[:12],
-            "btw_queue_intent": btw_intent,
-            "blueprint_intent": False,
-            "blueprint_opt_out": bp_opt_out,
-            "blueprint_required_by_policy": False,
-            "plan_resume_intent": False,
-            "plugin_sync_intent": False,
-            "pace_mode": pace_mode,
-        }
+        return (
+            {
+                "tier": 0,
+                "tier_name": "DIRECT",
+                "breadth_est": 1,
+                "depth_level": "low",
+                "depth_signals": [],
+                "detected_domains": domains,
+                "research_strategy": "inline_grep",
+                "recommended_modules": [],
+                "doc_lookup_targets": doc_targets,
+                "source": "prompt",
+                "intent": "tiny_fix",
+                "confidence": "high",
+                "file_refs": file_refs[:12],
+                "btw_queue_intent": btw_intent,
+                "blueprint_intent": False,
+                "blueprint_opt_out": bp_opt_out,
+                "blueprint_required_by_policy": False,
+                "recommended_blueprint_format": "none",
+                "plan_resume_intent": False,
+                "plugin_sync_intent": False,
+                "pace_mode": pace_mode,
+                "wave_exec_mode": "",
+            },
+            profile,
+            domain_specs,
+            bp_cfg,
+        )
 
     breadth_est = raw_breadth
     depth_level = _compute_depth_level(depth_hits, domains, len(scoring_text), len(file_refs), broad_scope)
@@ -1117,9 +1253,139 @@ def analyze_prompt(
         "plan_resume_intent": plan_resume,
         "plugin_sync_intent": False,
         "pace_mode": pace_mode,
+        "wave_exec_mode": wave_exec_mode,
     }
     if inherited_turn is not None:
         result["inherited_from_turn"] = inherited_turn
+    return result, profile, domain_specs, bp_cfg
+
+
+def classify_scope_and_tier(
+    prompt: str,
+    profile: dict[str, Any] | None = None,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
+    """Unified scope/tier/format classifier uniting `complexity_triage` and `blueprint_engine`."""
+    prof = profile if isinstance(profile, dict) else (load_project_profile(repo_root) if repo_root else {})
+    raw, _, _, bp_cfg = _analyze_prompt_raw(prompt, workspace_root=repo_root, profile_override=prof)
+    try:
+        import blueprint_engine  # noqa: E402
+
+        bp_core = blueprint_engine._classify_blueprint_core(prompt, profile=prof)
+    except Exception:
+        bp_core = {
+            "domain_vector": {"software": 1.0},
+            "active_domains": ["software"],
+            "active_lenses": {},
+            "matched_keywords": {},
+            "door_type": "2-way",
+            "risk_tier": f"T{max(1, int(raw.get('tier') or 1))}",
+            "recommended_format": "mini",
+            "morph_axes": [],
+            "probe_hints": [],
+            "subagent_topology": {},
+        }
+
+    intent = str(raw.get("intent") or "task")
+    is_fastpath = bool(raw.get("plugin_sync_intent"))
+    is_read_only = intent == "read_only_analysis"
+    is_plan_proposal = (intent == "plan_proposal") or bool(raw.get("blueprint_intent"))
+    is_t0 = is_fastpath or intent in ("gratitude_close", "pure_question", "tiny_fix")
+    tier, rec_fmt = _reconcile_tier_and_format(
+        int(raw.get("tier") or 0),
+        bp_core,
+        is_read_only=is_read_only,
+        is_t0=is_t0,
+        bp_cfg=bp_cfg,
+    )
+    risk_tier = f"T{tier}" if tier > 0 else "T0"
+    topo = bp_core.get("subagent_topology") or {}
+    if rec_fmt in ("mini", "compact", "full") and (rec_fmt != bp_core.get("recommended_format") or risk_tier != bp_core.get("risk_tier")):
+        try:
+            import blueprint_engine  # noqa: E402
+
+            topo = blueprint_engine._build_subagent_topology(
+                rec_fmt,
+                str(bp_core.get("door_type") or "2-way"),
+                risk_tier,
+                list(bp_core.get("active_domains") or []),
+                list(bp_core.get("morph_axes") or []),
+            )
+        except Exception:
+            pass
+
+    return {
+        "tier": tier,
+        "tier_name": _TIER_NAMES.get(tier, "DIRECT"),
+        "risk_tier": risk_tier,
+        "door_type": str(bp_core.get("door_type") or "2-way"),
+        "recommended_format": rec_fmt,
+        "domain_vec": dict(bp_core.get("domain_vector") or {}),
+        "domain_vector": dict(bp_core.get("domain_vector") or {}),
+        "domains": list(raw.get("detected_domains") or []),
+        "active_domains": list(bp_core.get("active_domains") or []),
+        "is_read_only": is_read_only,
+        "is_plugin_sync_fastpath": is_fastpath,
+        "plugin_sync_intent": is_fastpath,
+        "is_plan_proposal": is_plan_proposal,
+        "intent": intent,
+        "blueprint_intent": bool(raw.get("blueprint_intent")),
+        "blueprint_opt_out": bool(raw.get("blueprint_opt_out")),
+        "plan_resume_intent": bool(raw.get("plan_resume_intent")),
+        "active_lenses": dict(bp_core.get("active_lenses") or {}),
+        "morph_axes": list(bp_core.get("morph_axes") or []),
+        "probe_hints": list(bp_core.get("probe_hints") or []),
+        "subagent_topology": topo,
+    }
+
+
+def analyze_prompt(
+    prompt: str,
+    workspace_root: Path | None = None,
+    context: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Classify prompt breadth, depth, tier (0..3), domains, and recommended modules (w/ multi-turn continuity)."""
+    result, profile, domain_specs, bp_cfg = _analyze_prompt_raw(
+        prompt,
+        workspace_root=workspace_root,
+        context=context,
+        now=now,
+    )
+    intent = str(result.get("intent") or "task")
+    if int(result.get("tier") or 0) == 0 or intent == "read_only_analysis":
+        return result
+
+    try:
+        import blueprint_engine  # noqa: E402
+
+        bp_core = blueprint_engine._classify_blueprint_core(prompt, profile=profile)
+    except Exception:
+        bp_core = None
+
+    tier, rec_fmt = _reconcile_tier_and_format(
+        int(result.get("tier") or 0),
+        bp_core,
+        is_read_only=False,
+        is_t0=False,
+        bp_cfg=bp_cfg,
+    )
+    if tier != result["tier"]:
+        domains = list(result.get("detected_domains") or [])
+        depth_level = str(result.get("depth_level") or "low")
+        result["tier"] = tier
+        result["tier_name"] = _TIER_NAMES.get(tier, "DIRECT")
+        result["research_strategy"] = _research_strategy_for(tier, domains)
+        result["recommended_modules"] = build_recommended_modules(tier, domains, depth_level, domain_specs)
+        bp_min_tier = int(bp_cfg.get("default_min_tier") or 1)
+        result["blueprint_required_by_policy"] = (
+            bool(bp_cfg.get("require_by_default", False))
+            and not bool(result.get("blueprint_opt_out"))
+            and not bool(result.get("btw_queue_intent"))
+            and intent not in ("read_only_analysis", "gratitude_close", "pure_question", "tiny_fix")
+            and tier >= bp_min_tier
+        )
+    result["recommended_blueprint_format"] = rec_fmt
     return result
 
 

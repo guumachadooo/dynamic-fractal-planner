@@ -66,6 +66,16 @@
         ]
       },
       {
+        "matcher": "define_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ./hooks/planner_guard_delegation.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "schedule|manage_task",
         "hooks": [
           {

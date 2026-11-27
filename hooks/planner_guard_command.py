@@ -63,8 +63,9 @@ def deny(reason: str, payload: dict[str, Any] | None = None, repo: Path | None =
     reply("deny", reason, payload=payload, repo=repo)
 
 
-def split_shell_segments(cmd: str) -> list[str]:
-    segments: list[str] = []
+def _split_shell_parts_with_seps(cmd: str) -> list[tuple[str, str]]:
+    """Split shell command on &&, ||, ;, |, newline outside quotes, preserving exact separators."""
+    parts: list[tuple[str, str]] = []
     buf: list[str] = []
     in_sq = False
     in_dq = False
@@ -94,33 +95,24 @@ def split_shell_segments(cmd: str) -> list[str]:
             i += 1
             continue
         if not in_sq and not in_dq:
-            if ch in ";\n" or ch == "|":
-                if cmd[i : i + 2] == "||":
-                    seg = "".join(buf).strip()
-                    if seg:
-                        segments.append(seg)
-                    buf.clear()
-                    i += 2
-                    continue
-                seg = "".join(buf).strip()
-                if seg:
-                    segments.append(seg)
-                buf.clear()
-                i += 1
-                continue
-            if cmd[i : i + 2] == "&&":
-                seg = "".join(buf).strip()
-                if seg:
-                    segments.append(seg)
+            if cmd[i : i + 2] in ("&&", "||"):
+                parts.append(("".join(buf), cmd[i : i + 2]))
                 buf.clear()
                 i += 2
                 continue
+            if ch in ";\n|":
+                parts.append(("".join(buf), ch))
+                buf.clear()
+                i += 1
+                continue
         buf.append(ch)
         i += 1
-    tail = "".join(buf).strip()
-    if tail:
-        segments.append(tail)
-    return segments
+    parts.append(("".join(buf), ""))
+    return parts
+
+
+def split_shell_segments(cmd: str) -> list[str]:
+    return [seg.strip() for seg, _ in _split_shell_parts_with_seps(cmd) if seg.strip()]
 
 
 def _split_pipelines(cmd: str) -> list[str]:
@@ -190,7 +182,276 @@ def strip_env_prefix(segment: str) -> tuple[dict[str, str], str]:
     return envs, rest
 
 
-def _resolve_target_repo(segments: list[str], default_repo: Path, subcmd_re: str) -> Path:
+_ENV_ASSIGN_TOK_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+_REDIR_STAND_OPS = frozenset({">", ">>", "<", "<<", "<<<", "1>", "1>>", "2>", "2>>", "&>", "&>>"})
+_REDIR_ATTACHED_RE = re.compile(r"^(?:\d*>&\d+|\d*>>?\S+|&>>?\S+|<\S+)$")
+_TRAILING_REDIR_RE = re.compile(
+    r"(?:\s+(?:\d*>&\d+|\d*>>?\s*(?:\"[^\"]*\"|'[^']*'|\S+)|&>>?\s*(?:\"[^\"]*\"|'[^']*'|\S+)|<\s*(?:\"[^\"]*\"|'[^']*'|\S+)))+\s*$"
+)
+_PYTHON_EXE_RE = re.compile(r"python(?:\d+(?:\.\d+)?)?", re.IGNORECASE)
+_PYTHON_SHORT_BUNDLE_RE = re.compile(r"-[BEIOPSqsuvxbd]+")
+
+
+def _shlex_strip_env_and_wrappers(seg: str) -> tuple[dict[str, str], list[str]] | None:
+    """Parse segment with shlex and strip leading K=V assignments and `env` wrappers."""
+    try:
+        tokens = shlex.split(seg)
+    except ValueError:
+        return None
+    envs: dict[str, str] = {}
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        m = _ENV_ASSIGN_TOK_RE.match(tok)
+        if m:
+            envs[m.group(1)] = m.group(2)
+            i += 1
+            continue
+        if Path(tok).name == "env":
+            i += 1
+            while i < n:
+                etok = tokens[i]
+                em = _ENV_ASSIGN_TOK_RE.match(etok)
+                if em:
+                    envs[em.group(1)] = em.group(2)
+                    i += 1
+                elif etok in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string"):
+                    i += 2
+                elif etok.startswith(("--unset=", "--chdir=", "--split-string=")) or etok in ("-i", "-0", "--ignore-environment", "-v", "--debug"):
+                    i += 1
+                elif etok == "--":
+                    i += 1
+                    break
+                else:
+                    break
+            continue
+        break
+    return envs, tokens[i:]
+
+
+def _strip_redirect_tokens(tokens: list[str]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok in _REDIR_STAND_OPS:
+            i += 2
+            continue
+        if _REDIR_ATTACHED_RE.match(tok):
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _parse_python_script_invocation(tokens: list[str]) -> tuple[str, list[str]] | None:
+    """Return `(script_path, script_args)` ONLY when tokens invoke python[3] executing a `.py` file."""
+    if not tokens:
+        return None
+    exe = Path(tokens[0]).name.lower()
+    if not _PYTHON_EXE_RE.fullmatch(exe):
+        return None
+    i = 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in ("-c", "-m", "-h", "--help", "-V", "--version", "--help-env", "--help-xoptions", "--help-all"):
+            return None
+        if tok in ("-W", "-X", "--check-hash-based-pycs"):
+            i += 2
+            continue
+        if tok.startswith(("--check-hash-based-pycs=", "-W", "-X")) and len(tok) > 2:
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            if not _PYTHON_SHORT_BUNDLE_RE.fullmatch(tok):
+                return None
+            i += 1
+            continue
+        break
+    if i >= n:
+        return None
+    return tokens[i], tokens[i + 1 :]
+
+
+_GIT_ARG_FLAGS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"})
+_SHIP_FLAG_WITH_VAL = frozenset({
+    "-C", "--workspace", "--repo", "--dir", "--global-dir", "--plugin-rel",
+    "--commit", "--next", "--owner-repo", "--branch", "--remote", "--via",
+    "--url", "--pair-secret", "--admin-key", "--channel", "--timeout", "--mount-root",
+})
+
+
+def _classify_ship_segment(seg: str) -> dict[str, Any] | None:
+    parsed = _shlex_strip_env_and_wrappers(seg)
+    if parsed is None:
+        return None
+    _, raw_tokens = parsed
+    clean = _strip_redirect_tokens(raw_tokens)
+    if not clean:
+        return None
+    exe = Path(clean[0]).name.lower()
+
+    if exe == "git":
+        if "-h" in clean or "--help" in clean:
+            return None
+        git_dir = ""
+        i = 1
+        while i < len(clean):
+            tok = clean[i]
+            if tok == "-C" and i + 1 < len(clean):
+                git_dir = clean[i + 1]
+                i += 2
+                continue
+            if tok in _GIT_ARG_FLAGS:
+                i += 2
+                continue
+            if tok.startswith("-"):
+                i += 1
+                continue
+            if tok == "commit":
+                return {
+                    "kind": "git_commit",
+                    "is_commit": True,
+                    "is_push": False,
+                    "is_ship": True,
+                    "amend": "--amend" in clean,
+                    "skip_history": "[skip-history]" in seg,
+                    "auto_skip_ci": False,
+                    "no_test": False,
+                    "target_dir": git_dir,
+                }
+            if tok == "push":
+                return {
+                    "kind": "git_push",
+                    "is_commit": False,
+                    "is_push": True,
+                    "is_ship": True,
+                    "amend": False,
+                    "skip_history": False,
+                    "auto_skip_ci": False,
+                    "no_test": False,
+                    "target_dir": git_dir,
+                }
+            return None
+        return None
+
+    py_inv = _parse_python_script_invocation(clean)
+    if py_inv is not None:
+        script_tok, s_args = py_inv
+    elif clean[0].lower().endswith(".py"):
+        script_tok, s_args = clean[0], clean[1:]
+    else:
+        return None
+
+    if "-h" in s_args or "--help" in s_args:
+        return None
+
+    target_dir = ""
+    pos_args: list[str] = []
+    i = 0
+    while i < len(s_args):
+        tok = s_args[i]
+        if tok.startswith("--workspace="):
+            target_dir = tok.split("=", 1)[1]
+            i += 1
+            continue
+        if tok.startswith("--repo=") and not target_dir:
+            cand_r = tok.split("=", 1)[1]
+            if "/" in cand_r or cand_r.startswith((".", "~")):
+                target_dir = cand_r
+            i += 1
+            continue
+        if tok in _SHIP_FLAG_WITH_VAL:
+            if tok in ("--workspace", "--repo") and i + 1 < len(s_args):
+                val = s_args[i + 1]
+                if tok == "--workspace" or not target_dir:
+                    target_dir = val
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        pos_args.append(tok)
+        i += 1
+
+    sname = Path(script_tok).name.lower()
+    if sname in ("omni_agent.py", "omni_agent_client.py") and pos_args and pos_args[0] in ("ship", "push-workspace"):
+        return {
+            "kind": "omni_ship" if pos_args[0] == "ship" else "omni_push_workspace",
+            "is_commit": True,
+            "is_push": True,
+            "is_ship": True,
+            "amend": False,
+            "skip_history": False,
+            "auto_skip_ci": "--auto-skip-ci" in s_args,
+            "no_test": False,
+            "target_dir": target_dir,
+        }
+    if sname == "github_direct.py" and "push" in pos_args:
+        return {
+            "kind": "github_direct_push",
+            "is_commit": True,
+            "is_push": True,
+            "is_ship": True,
+            "amend": False,
+            "skip_history": False,
+            "auto_skip_ci": False,
+            "no_test": False,
+            "target_dir": target_dir,
+        }
+    if sname == "repo_federation.py" and pos_args and pos_args[0] == "push":
+        return {
+            "kind": "repo_federation_push",
+            "is_commit": True,
+            "is_push": True,
+            "is_ship": True,
+            "amend": False,
+            "skip_history": False,
+            "auto_skip_ci": False,
+            "no_test": False,
+            "target_dir": target_dir,
+        }
+    if sname == "plan_tool.py" and len(pos_args) >= 2 and pos_args[0] == "evolve" and pos_args[1] == "sync-all" and "--push" in s_args:
+        return {
+            "kind": "plan_evolve_sync_all_push",
+            "is_commit": True,
+            "is_push": True,
+            "is_ship": True,
+            "amend": False,
+            "skip_history": False,
+            "auto_skip_ci": False,
+            "no_test": "--no-test" in s_args,
+            "target_dir": target_dir,
+        }
+    if sname == "self_evolve.py" and pos_args and pos_args[0] == "sync-all" and "--push" in s_args:
+        return {
+            "kind": "self_evolve_sync_all_push",
+            "is_commit": True,
+            "is_push": True,
+            "is_ship": True,
+            "amend": False,
+            "skip_history": False,
+            "auto_skip_ci": False,
+            "no_test": "--no-test" in s_args,
+            "target_dir": target_dir,
+        }
+    return None
+
+
+def _resolve_ship_target_repo(
+    segments: list[str],
+    default_repo: Path,
+    *,
+    want_push: bool = False,
+    want_commit: bool = False,
+) -> tuple[Path, dict[str, Any] | None]:
     cur_dir = default_repo
     for seg in segments:
         _, rest = strip_env_prefix(seg)
@@ -202,15 +463,27 @@ def _resolve_target_repo(segments: list[str], default_repo: Path, subcmd_re: str
                 if cand.is_dir():
                     cur_dir = cand.resolve()
             continue
-        m_git = re.match(rf"^git\s+(?:-C\s+('[^']+'|\"[^\"]+\"|\S+)\s+)?{subcmd_re}\b", rest)
-        if m_git:
-            if m_git.group(1):
-                g_dir = m_git.group(1).strip("'\"")
-                cand = (cur_dir / g_dir) if not g_dir.startswith(("/", "~")) else Path(g_dir).expanduser()
-                if cand.is_dir():
-                    return cand.resolve()
-            return cur_dir
-    return default_repo
+        info = _classify_ship_segment(seg)
+        if not info:
+            continue
+        if want_push and not info.get("is_push"):
+            continue
+        if want_commit and not info.get("is_commit"):
+            continue
+        tdir = str(info.get("target_dir") or "").strip()
+        if tdir:
+            cand = (cur_dir / tdir) if not tdir.startswith(("/", "~")) else Path(tdir).expanduser()
+            if cand.is_dir():
+                return cand.resolve(), info
+        return cur_dir, info
+    return default_repo, None
+
+
+def _resolve_target_repo(segments: list[str], default_repo: Path, subcmd_re: str) -> Path:
+    want_push = "push" in subcmd_re
+    want_commit = "commit" in subcmd_re and not want_push
+    repo_p, _ = _resolve_ship_target_repo(segments, default_repo, want_push=want_push, want_commit=want_commit)
+    return repo_p
 
 
 def check_raw_cat_log(cmd: str, repo: Path, profile: dict[str, Any]) -> str | None:
@@ -253,15 +526,13 @@ def check_raw_cat_log(cmd: str, repo: Path, profile: dict[str, Any]) -> str | No
 
 
 def check_extra_requests_before_ship(segments: list[str], repo: Path, profile: dict[str, Any]) -> str | None:
-    from planner_state import get_pending_extra_requests  # noqa: E402
+    from planner_state import get_pending_extra_requests, load_project_profile  # noqa: E402
 
-    is_ship_cmd = any(
-        re.match(r"^git(?:\s+-C\s+\S+)?\s+(commit|push)\b", strip_env_prefix(seg)[1])
-        for seg in segments
-    )
-    if not is_ship_cmd:
+    target_repo, ship_info = _resolve_ship_target_repo(segments, repo)
+    if not ship_info:
         return None
-    rel, pending = get_pending_extra_requests(repo, profile)
+    t_profile = profile if target_repo.resolve() == repo.resolve() else load_project_profile(target_repo)
+    rel, pending = get_pending_extra_requests(target_repo, t_profile)
     if not pending:
         return None
     preview = "\n".join(f"  - {line[:120]}" for line in pending[:5])
@@ -277,13 +548,8 @@ def check_extra_requests_before_ship(segments: list[str], repo: Path, profile: d
 def check_plan_before_commit(segments: list[str], payload: dict[str, Any]) -> str | None:
     from planner_state import get_paths, has_active_turn_plan, load_json  # noqa: E402
 
-    commit_seg = None
-    for seg in segments:
-        _, rest = strip_env_prefix(seg)
-        if re.match(r"^git(?:\s+-C\s+\S+)?\s+commit\b", rest):
-            commit_seg = seg
-            break
-    if not commit_seg or "--amend" in commit_seg:
+    _, ship_info = _resolve_ship_target_repo(segments, Path("."), want_commit=True)
+    if not ship_info or ship_info.get("amend"):
         return None
 
     _, _, plan_json, hook_file = get_paths(payload)
@@ -476,16 +742,6 @@ def check_pre_push_flight(
     profile: dict[str, Any],
     hook_state: dict[str, Any],
 ) -> tuple[str, str] | None:
-    push_seg = None
-    for seg in segments:
-        _, rest = strip_env_prefix(seg)
-        if re.match(r"^git(?:\s+-C\s+\S+)?\s+push\b", rest) and "--help" not in rest:
-            push_seg = rest
-            break
-    if not push_seg:
-        return None
-
-    import subprocess  # noqa: E402
     from planner_state import (  # noqa: E402
         is_app_code_path,
         load_project_profile,
@@ -493,11 +749,87 @@ def check_pre_push_flight(
         scan_secrets_and_conflicts,
     )
 
-    target_repo = _resolve_target_repo(segments, ws_repo, "push")
-    if not (target_repo / ".git").exists():
+    target_repo, ship_info = _resolve_ship_target_repo(segments, ws_repo, want_push=True)
+    if not ship_info:
         return None
 
     t_profile = profile if target_repo.resolve() == ws_repo.resolve() else load_project_profile(target_repo)
+    same_ws = target_repo.resolve() == ws_repo.resolve()
+    has_git = (target_repo / ".git").exists()
+
+    # 1. Turn build/verify state (applies BOTH with .git and in gitless AI Studio containers)
+    if same_ws:
+        if hook_state.get("code_files_edited") and (hook_state.get("last_build_failed") or hook_state.get("needs_build")):
+            record_telemetry("guarded_push_blocked", {"why": "needs_build_or_failed"})
+            return (
+                "deny",
+                "PRE-PUSH BLOCKED|Code edited in turn with `needs_build` or `last_build_failed` -> run build/verifier first.",
+            )
+        is_sync_self_test = ship_info["kind"] in ("plan_evolve_sync_all_push", "self_evolve_sync_all_push") and not ship_info.get("no_test")
+        if not has_git:
+            if hook_state.get("needs_verify"):
+                record_telemetry("guarded_push_blocked", {"why": "gitless_needs_verify"})
+                return (
+                    "deny",
+                    "PRE-PUSH BLOCKED|Gitless workspace has unverified changes (`needs_verify=True`) -> run `verify_universal.py` before ship/push.",
+                )
+            if hook_state.get("needs_plugin_tests") and not is_sync_self_test:
+                record_telemetry("guarded_push_blocked", {"why": "gitless_needs_plugin_tests"})
+                return (
+                    "deny",
+                    "PRE-PUSH BLOCKED|Plugin edited without passing tests (`needs_plugin_tests=True`) -> run `verify_universal.py --plugin-tests` before ship/push.",
+                )
+        else:
+            if (hook_state.get("code_files_edited") or hook_state.get("doc_files_edited")) and hook_state.get("needs_verify"):
+                record_telemetry("guarded_push_blocked", {"why": "needs_verify"})
+                return (
+                    "deny",
+                    "PRE-PUSH BLOCKED|Edited files have unverified changes (`needs_verify=True`) -> run `verify_universal.py` before ship/push.",
+                )
+            if hook_state.get("needs_plugin_tests") and not is_sync_self_test:
+                record_telemetry("guarded_push_blocked", {"why": "needs_plugin_tests"})
+                return (
+                    "deny",
+                    "PRE-PUSH BLOCKED|Plugin edited without passing tests (`needs_plugin_tests=True`) -> run `verify_universal.py --plugin-tests` before ship/push.",
+                )
+
+    binary_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".ttf", ".apk", ".dll", ".exe", ".zip")
+    sg = t_profile.get("secret_guard") or {}
+
+    if not has_git:
+        # Gitless AI Studio fallback: scan hook_state edited files + DNS check without calling `git`
+        if same_ws and sg.get("enabled", True):
+            edited_rels: set[str] = set()
+            for k in ("code_files_edited", "doc_files_edited"):
+                for r in hook_state.get(k) or []:
+                    if r:
+                        c = str(r).replace("\\", "/")
+                        while c.startswith("./"):
+                            c = c[2:]
+                        edited_rels.add(c.lstrip("/"))
+            for r in hook_state.get("plugin_files_edited") or []:
+                if r:
+                    edited_rels.add(f".agents/plugins/dynamic-fractal-planner/{str(r).lstrip('/')}")
+            for rel in sorted(edited_rels):
+                if rel.lower().endswith(binary_exts):
+                    continue
+                fp = target_repo / rel
+                if not fp.is_file():
+                    continue
+                txt = fp.read_text(encoding="utf-8", errors="ignore")
+                hits = scan_secrets_and_conflicts(txt, rel_path=rel, check_filename=True)
+                if hits:
+                    record_telemetry("guarded_push_blocked", {"why": "secret_or_conflict_gitless", "file": rel})
+                    return ("deny", f"PRE-PUSH BLOCKED|`{rel}`: {hits[0]}")
+        if not _fast_dns_check("github.com", 443, 2.0):
+            record_telemetry("guarded_push_offline")
+            return (
+                "deny",
+                "PRE-PUSH BLOCKED|Offline/DNS resolution for `github.com` failed (<2s check). Retry once online.",
+            )
+        return None
+
+    import subprocess  # noqa: E402
 
     def _git(gargs: list[str]) -> tuple[int, str]:
         try:
@@ -505,15 +837,6 @@ def check_pre_push_flight(
             return r.returncode, r.stdout
         except Exception:
             return 1, ""
-
-    # 1. Code edited in turn with unbuilt / failed build
-    if target_repo.resolve() == ws_repo.resolve() and hook_state.get("code_files_edited"):
-        if hook_state.get("last_build_failed") or hook_state.get("needs_build"):
-            record_telemetry("guarded_push_blocked", {"why": "needs_build_or_failed"})
-            return (
-                "deny",
-                "PRE-PUSH BLOCKED|Code edited in turn with `needs_build` or `last_build_failed` -> run build/verifier first.",
-            )
 
     # 2. Untracked code files that could break CI
     rc_st, st_out = _git(["status", "--porcelain", "-uall"])
@@ -544,7 +867,6 @@ def check_pre_push_flight(
         )
 
     # 3. Secret & merge-conflict scan on staged/changed/unpushed files
-    sg = t_profile.get("secret_guard") or {}
     if sg.get("enabled", True):
         rc_up, up_files = _git(["diff", "--name-only", "@{u}..HEAD"])
         if rc_up == 0:
@@ -558,7 +880,6 @@ def check_pre_push_flight(
                     if f.strip():
                         scan_candidates.add(f.strip())
 
-        binary_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".ttf", ".apk", ".dll", ".exe", ".zip")
         for rel in sorted(scan_candidates):
             if rel.lower().endswith(binary_exts):
                 continue
@@ -584,7 +905,7 @@ def check_pre_push_flight(
             )
 
     # 5. [skip ci] hint when .github/workflows exists & unpushed commit touches ONLY docs/.agents
-    if (target_repo / ".github" / "workflows").is_dir():
+    if ship_info["kind"] == "git_push" and (target_repo / ".github" / "workflows").is_dir():
         rc_rng, rng_out = _git(["diff", "--name-only", "@{u}..HEAD"])
         if rc_rng != 0:
             rc_rng, rng_out = _git(["show", "--name-only", "--pretty=", "HEAD"])
@@ -648,23 +969,34 @@ def _inject_pytest_quiet(cmd: str) -> str:
 
 
 def _inject_plugin_tests_fast(cmd: str) -> str:
-    """Append `--fast` to bare `run_plugin_tests.py` segments lacking mode/help/Test filter."""
-    def _rewrite_seg(match: re.Match[str]) -> str:
-        seg = match.group(0)
-        tail = match.group(1) or ""
-        if re.search(r"(?<!\S)(?:--fast\b|--full\b|-h\b|--help\b|Test[A-Za-z0-9_.]*)", tail):
-            return seg
-        m_redir = re.search(r"\s+(?:\d*>>?|\&>)\s*\S+(?:\s+2>&1)?\s*$", seg)
-        if m_redir:
-            pos = m_redir.start()
-            return seg[:pos] + " --fast" + seg[pos:]
-        return seg + " --fast"
-
-    return re.sub(
-        r"(?:[^\n;|&]*?)(?<![A-Za-z0-9_])run_plugin_tests\.py([^\n;|&]*)",
-        _rewrite_seg,
-        cmd,
-    )
+    """Append `--fast` ONLY to actual python[3] invocations of `run_plugin_tests.py` lacking mode/help/Test filter."""
+    parts = _split_shell_parts_with_seps(cmd)
+    out: list[str] = []
+    for seg_raw, sep in parts:
+        parsed = _shlex_strip_env_and_wrappers(seg_raw)
+        if parsed is not None:
+            _, raw_tokens = parsed
+            clean_tokens = _strip_redirect_tokens(raw_tokens)
+            py_inv = _parse_python_script_invocation(clean_tokens)
+            if py_inv is not None:
+                script_tok, script_args = py_inv
+                if Path(script_tok).name == "run_plugin_tests.py":
+                    has_mode_or_filter = any(
+                        arg in ("--fast", "--full", "-h", "--help")
+                        or re.fullmatch(r"Test[A-Za-z0-9_.]*", arg) is not None
+                        for arg in script_args
+                    )
+                    if not has_mode_or_filter:
+                        m_redir = _TRAILING_REDIR_RE.search(seg_raw)
+                        if m_redir:
+                            pos = m_redir.start()
+                            seg_raw = seg_raw[:pos] + " --fast" + seg_raw[pos:]
+                        else:
+                            stripped = seg_raw.rstrip()
+                            trail = seg_raw[len(stripped) :]
+                            seg_raw = stripped + " --fast" + trail
+        out.append(seg_raw + sep)
+    return "".join(out)
 
 
 def check_polling_command(cmd: str, hook_file: Path, hook_state: dict[str, Any]) -> str | None:
@@ -711,6 +1043,22 @@ def check_polling_command(cmd: str, hook_file: Path, hook_state: dict[str, Any])
     return None
 
 
+_TOOL_INVOKE_NAMES = frozenset({"plan_tool.py", "verify_universal.py", "verify_changes.py", "run_plugin_tests.py"})
+
+
+def _segment_invokes_planner_tool(seg: str) -> bool:
+    parsed = _shlex_strip_env_and_wrappers(seg)
+    if parsed is None:
+        return False
+    clean = _strip_redirect_tokens(parsed[1])
+    if not clean:
+        return False
+    py_inv = _parse_python_script_invocation(clean)
+    if py_inv is not None:
+        return Path(py_inv[0]).name in _TOOL_INVOKE_NAMES
+    return Path(clean[0]).name in _TOOL_INVOKE_NAMES
+
+
 def maybe_rewrite_command(cmd: str, repo: Path, payload: dict[str, Any]) -> str | None:
     from planner_state import prompt_hash, resolve_artifact_dir  # noqa: E402
 
@@ -721,13 +1069,7 @@ def maybe_rewrite_command(cmd: str, repo: Path, payload: dict[str, Any]) -> str 
     if ".agents/scripts/verify_universal.py" in updated and not (repo / ".agents/scripts/verify_universal.py").exists():
         updated = updated.replace(".agents/scripts/verify_universal.py", str(PLUGIN_ROOT / "scripts/verify_universal.py"))
 
-    invokes_tool = any(
-        re.match(
-            r"^(?:(?:python(?:\d+(?:\.\d+)?)?|/[^\s]+/python(?:\d+(?:\.\d+)?)?)\s+(?:-\S+\s+)*)?(?:\./|\S*/)?(?:plan_tool|verify_universal|verify_changes|run_plugin_tests)\.py(?:\s|$)",
-            strip_env_prefix(seg)[1],
-        )
-        for seg in split_shell_segments(updated)
-    )
+    invokes_tool = any(_segment_invokes_planner_tool(seg) for seg in split_shell_segments(updated))
     if invokes_tool and "PLANNER_ARTIFACT_DIR=" not in updated:
         art_dir = str(resolve_artifact_dir(payload))
         conv_id = str(payload.get("conversationId") or "default")
@@ -784,6 +1126,33 @@ def main() -> None:
 
         _, _, _, hook_file = get_paths(payload)
         hook_state = load_json(hook_file)
+
+        try:
+            from wave_scheduler import is_parallel_wave_worker  # noqa: E402
+
+            conv_id = str(payload.get("conversationId") or "").strip()
+            if (w_info := is_parallel_wave_worker(repo, conv_id)):
+                heavy_pat = re.compile(
+                    r"(?:(?:/root/\.dotnet/)?dotnet\s+(?:build|test|publish|pack|run)\b|"
+                    r"(?:run_plugin_tests|verify_universal|run_w46_unit_tests|run_audio_ground_truth)\.py\b|"
+                    r"git\s+(?:-C\s+\S+\s+)?(?:push|commit)\b)",
+                    re.I,
+                )
+                for seg in segments:
+                    _, rest = strip_env_prefix(seg)
+                    hm = heavy_pat.search(rest)
+                    ship_hit = _classify_ship_segment(seg)
+                    if hm or ship_hit:
+                        what = hm.group(0) if hm else str(ship_hit["kind"])
+                        deny(
+                            f"LEASE CMD DENY|Parallel wave `{w_info[2]}` ({w_info[1]}) cannot run `{what}` directly; "
+                            "Epoch Barrier runs verification & git sequentially ONCE.",
+                            payload=payload,
+                            repo=repo,
+                        )
+                        return
+        except Exception:
+            pass
 
         poll_msg = check_polling_command(cmd, hook_file, hook_state)
         if poll_msg:
