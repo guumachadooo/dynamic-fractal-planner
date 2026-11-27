@@ -749,9 +749,28 @@ def cmd_handoff(args: argparse.Namespace, ws_root: Path) -> int:
     if dirty_preview:
         lines.append(f"files|{dirty_preview[:240]}")
 
+    compound_note = (getattr(args, "compound_note", "") or "").strip().replace("\n", " ")
+    if compound_note:
+        lines.append(f"compound|{compound_note[:240]}")
+
     handoff_file.parent.mkdir(parents=True, exist_ok=True)
     handoff_file.write_text("\n".join(lines[:20]) + "\n", encoding="utf-8")
     print(f"HANDOFF_WRITTEN|{handoff_file}|lines={len(lines[:20])}")
+
+    try:
+        import error_learner  # noqa: E402
+
+        prof = load_project_profile(ws_root)
+        csum = error_learner.summarize_compound_status(ws_root, profile=prof)
+        dom_counts = csum.get("by_domain") or {}
+        dom_str = ",".join(f"{k}:{dom_counts.get(k, 0)}" for k in ("BL", "UI", "ARCH", "DSP", "AI"))
+        t_ok = "OK" if csum.get("timeless_ok", True) else f"FAIL({csum.get('audit_errors', 0)})"
+        print(
+            f"COMPOUND|lessons={csum.get('total_lessons', 0)}({dom_str})|"
+            f"timeless={t_ok}|fitness_rules={csum.get('fitness_rules', 0)}|monoliths={csum.get('monoliths', 0)}"
+        )
+    except Exception:
+        pass
     return 0
 
 
@@ -1149,6 +1168,7 @@ def main() -> None:
     p_ho.add_argument("--roadmap", default="")
     p_ho.add_argument("--wave", default="")
     p_ho.add_argument("--archive", action="append")
+    p_ho.add_argument("--compound-note", default="")
     p_ho.add_argument("--clear", action="store_true")
 
     p_rec = sub.add_parser("recon", help="Toggle or inspect read-only forensic recon mode.")

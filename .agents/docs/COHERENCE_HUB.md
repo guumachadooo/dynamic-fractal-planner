@@ -17,7 +17,7 @@
 DEP|none|TOMBSTONE|cli:none|none|owner=dfp|expires_ver=0.0.0
 
 ## 3. COVERAGE_MATRIX
-COV|plugin=v2.22.5|triage_domains=8|bp_domains=8|verify_checks=20|hooks=9(unwired=0)
+COV|plugin=v2.23.0|triage_domains=8|bp_domains=8|verify_checks=21|hooks=9(unwired=0)
 COV|host_matrix_strict=true|host_entries=6|auto_blocks=2(drifted=0)|deprecated=1
 
 ## 4. CROSS_REPO_PARITY

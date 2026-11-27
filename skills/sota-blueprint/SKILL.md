@@ -12,8 +12,8 @@ description: >-
 > STYLE|lossless symbolic telegraphic EN ONLY (`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`).
 > CLI|`python3 -B ~/.gemini/config/plugins/dynamic-fractal-planner/scripts/plan_tool.py blueprint <cmd>`
 
-<!--AUTO:START:sota-blueprint-domains:sha256=3a1a18c1d468-->
-AUTO_SSOT|plugin=v2.22.5|blueprint_domains=ai-ml,biz-org,data-bi,dsp-hw,infra-ops,security,software,ux-product|formats=mini,compact,full|ssot=scripts/domains.json
+<!--AUTO:START:sota-blueprint-domains:sha256=8a7f1ebdc813-->
+AUTO_SSOT|plugin=v2.23.0|blueprint_domains=ai-ml,biz-org,data-bi,dsp-hw,infra-ops,security,software,ux-product|formats=mini,compact,full|ssot=scripts/domains.json
 <!--AUTO:END:sota-blueprint-domains-->
 
 ## Tiered Blueprint Formats (Right-Sized Ceremony & Token-Diet)

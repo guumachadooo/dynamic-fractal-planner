@@ -643,39 +643,33 @@ def check_code_weight(
     profile: dict[str, Any],
     warns: list[str],
     *,
+    fails: list[str] | None = None,
     scan_all: bool = False,
 ) -> None:
-    """Warn on oversized source files breaching profile `code_weight_limits` (anti-monolith guard)."""
-    cw = profile.get("code_weight_limits")
-    if not isinstance(cw, dict) or not cw.get("enabled", True):
+    """Enforce `code_weight_limits` (legacy warn-only OR hard-blocking Zero-Accumulation Monolith Ratchet)."""
+    try:
+        import fitness_ratchet  # noqa: E402
+    except Exception:
         return
-    limit = int(cw.get("warn_lines_all") or 2000) if scan_all else int(cw.get("warn_lines") or 1500)
-    if limit <= 0:
+    fail_sink = fails if fails is not None else warns
+    fitness_ratchet.check_code_weight_ratchet(repo, files, profile, fail_sink, warns, scan_all=scan_all)
+
+
+def check_fitness_rules(
+    repo: Path,
+    files: list[str],
+    profile: dict[str, Any],
+    fails: list[str],
+    warns: list[str],
+    *,
+    scan_all: bool = False,
+) -> None:
+    """Evaluate declarative multi-domain `profile.fitness_rules` with zero-accumulation baselines."""
+    try:
+        import fitness_ratchet  # noqa: E402
+    except Exception:
         return
-    ignore_prefixes = tuple(
-        str(p).replace("\\", "/").lstrip("./")
-        for p in (cw.get("ignore_path_prefixes") or [".agents/", "Libraries/", "node_modules/"])
-        if str(p).strip()
-    )
-    allowed_exts = {
-        str(e).lower()
-        for e in (cw.get("extensions") or (".cs", ".py", ".ts", ".tsx", ".js", ".jsx", ".kt", ".java", ".rs", ".go", ".c", ".cpp", ".h", ".swift"))
-    }
-    for rel in files:
-        norm = rel.replace("\\", "/").lstrip("./")
-        if any(norm.startswith(pref) for pref in ignore_prefixes):
-            continue
-        if Path(norm).suffix.lower() not in allowed_exts:
-            continue
-        full = repo / norm
-        if not full.is_file():
-            continue
-        try:
-            n_lines = len(full.read_text(encoding="utf-8", errors="ignore").splitlines())
-        except Exception:
-            continue
-        if n_lines > limit:
-            warns.append(f"{norm}: {n_lines}L (>{limit}L) — consider splitting into modular/partial files (`code_weight_limits`).")
+    fitness_ratchet.check_fitness_rules(repo, files, profile, fails, warns, scan_all=scan_all)
 
 
 def check_build_lessons_timelessness(repo: Path, files: list[str], fails: list[str]) -> None:
@@ -1130,7 +1124,26 @@ def _vc_memory_weight(ctx: dict[str, Any]) -> None:
 
 @verify_check("code_weight", scope="static", cost_ms=15)
 def _vc_code_weight(ctx: dict[str, Any]) -> None:
-    check_code_weight(ctx["repo"], ctx["files"], ctx["profile"], ctx["warns"], scan_all=ctx["scan_all"])
+    check_code_weight(
+        ctx["repo"],
+        ctx["files"],
+        ctx["profile"],
+        ctx["warns"],
+        fails=ctx["fails"],
+        scan_all=ctx["scan_all"],
+    )
+
+
+@verify_check("fitness_rules", scope="static", cost_ms=20)
+def _vc_fitness_rules(ctx: dict[str, Any]) -> None:
+    check_fitness_rules(
+        ctx["repo"],
+        ctx["files"],
+        ctx["profile"],
+        ctx["fails"],
+        ctx["warns"],
+        scan_all=ctx["scan_all"],
+    )
 
 
 @verify_check("file_budget", scope="static", cost_ms=20)

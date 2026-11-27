@@ -12,7 +12,29 @@
         "CavernSamples/CavernizeAndroid/CavernizeAndroid.csproj"
       ],
       "termuxPath": "/root/.gemini/antigravity/scratch/Cavern",
-      "ciWorkflow": "BuildAndroid.yml"
+      "ciWorkflow": "BuildAndroid.yml",
+      "packaging": {
+        "applicationId": "hu.sbence.cavern.cavernize",
+        "displayVersionPrefix": "2.9",
+        "minSdk": 26,
+        "targetSdk": 35,
+        "apkAssetName": "Cavernize-Android.apk",
+        "userAgentName": "CavernizeAndroid",
+        "userAgentVersion": "2.9",
+        "requiredNativeLibs": [
+          "libcavernize_proaudio.so",
+          "libffmpeg.so",
+          "libtruehdd.so",
+          "libonnxruntime.so"
+        ],
+        "tabNames": [
+          "player",
+          "room",
+          "studio",
+          "stems",
+          "settings"
+        ]
+      }
     },
     "omniagent": {
       "ownerRepo": "guumachadooo/OmniAgent",

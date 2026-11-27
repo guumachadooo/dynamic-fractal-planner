@@ -34,7 +34,71 @@ DEFAULT_REPO = ""
 DEFAULT_BRANCH = "diagnostics"
 DEFAULT_CI_JSON_PATH = "ci/latest-build-diagnostics.json"
 DEFAULT_LESSONS_REL = ".agents/docs/BUILD_LESSONS.md"
-USER_AGENT = "DynamicFractalPlanner-ErrorLearner/2.6"
+USER_AGENT = "DynamicFractalPlanner-ErrorLearner/2.23"
+
+VALID_DOMAINS: tuple[str, ...] = ("BL", "UI", "ARCH", "DSP", "AI")
+DOMAIN_DEFAULT_CATEGORY: dict[str, str] = {
+    "BL": "build-process",
+    "UI": "ui-ux-contract",
+    "ARCH": "architecture-state",
+    "DSP": "realtime-dsp",
+    "AI": "neural-runtime",
+}
+TRIAGE_TO_LESSON_DOMAINS: dict[str, tuple[str, ...]] = {
+    "ui": ("UI", "ARCH"),
+    "ux": ("UI", "ARCH"),
+    "android": ("UI", "BL", "ARCH"),
+    "frontend": ("UI", "ARCH"),
+    "oneui": ("UI",),
+    "dsp": ("DSP", "ARCH"),
+    "audio": ("DSP", "ARCH"),
+    "spatial": ("DSP", "AI"),
+    "acoustics": ("DSP",),
+    "native": ("DSP", "BL"),
+    "ai": ("AI", "ARCH"),
+    "ml": ("AI", "ARCH"),
+    "neural": ("AI", "DSP"),
+    "onnx": ("AI", "BL"),
+    "arch": ("ARCH",),
+    "architecture": ("ARCH",),
+    "refactor": ("ARCH",),
+    "plugin": ("ARCH", "BL"),
+    "planner": ("ARCH", "BL"),
+    "governance": ("ARCH",),
+    "build": ("BL",),
+    "ci": ("BL",),
+    "packaging": ("BL",),
+    "deploy": ("BL",),
+    "ship": ("BL", "ARCH"),
+    "qa": ("ARCH", "UI", "DSP"),
+    "testing": ("ARCH", "BL"),
+    "general": ("ARCH", "BL"),
+}
+EXECUTABLE_GUARD_TOKENS: tuple[str, ...] = (
+    "diff_rules",
+    "fitness_rules",
+    "regression_contracts",
+    "code_weight_limits",
+    "monolith_ratchet",
+    "verify_universal",
+    "co_evolve",
+    "check_android_cs",
+    "file_guards",
+    "qa_gate",
+    "blueprint",
+    "test_",
+    "unit_test",
+    "reg-",
+    "t50",
+    "v6",
+    "v9",
+    "v11",
+    "v12",
+    "ci",
+    "hot-exec",
+    "run_w46",
+    "run_audio_ground_truth",
+)
 
 AUTO_START_MARKER = "<!-- AUTO-LEARNED-LESSONS:START -->"
 AUTO_END_MARKER = "<!-- AUTO-LEARNED-LESSONS:END -->"
@@ -214,6 +278,17 @@ class Lesson:
     rule: str
     lookup: str
     guard: str = "manual-review"
+    domain: str = ""
+    remediation_hint: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.domain:
+            pref = self.lesson_id.split("-", 1)[0].strip().upper() if "-" in self.lesson_id else "BL"
+            self.domain = pref if pref in VALID_DOMAINS else "BL"
+        else:
+            self.domain = self.domain.strip().upper()
+            if self.domain not in VALID_DOMAINS:
+                self.domain = "BL"
 
 
 @dataclass
@@ -327,10 +402,18 @@ def lint_timelessness(text: str) -> list[str]:
     return violations
 
 
+def has_executable_guard(guard_text: str) -> bool:
+    """Return True if `AutoGuard` references an automated/executable guardrail rather than manual-only review."""
+    g = (guard_text or "").strip().lower()
+    if not g or g in ("manual-review", "manual", "none", "n/a", "-"):
+        return False
+    return any(tok in g for tok in EXECUTABLE_GUARD_TOKENS)
+
+
 def parse_lessons(md_text: str) -> list[Lesson]:
-    r"""Parse all `### \`BL-NNN\` | ...` entries from BUILD_LESSONS.md."""
+    r"""Parse all `### \`(BL|UI|ARCH|DSP|AI)-NNN\` | ...` entries from BUILD_LESSONS.md."""
     lessons: list[Lesson] = []
-    header_re = re.compile(r"^###\s+`(BL-\d{3,})`\s*\|\s*(.+?)\s*$", re.MULTILINE)
+    header_re = re.compile(r"^###\s+`((?:BL|UI|ARCH|DSP|AI)-\d{3,})`\s*\|\s*(.+?)\s*$", re.MULTILINE)
     matches = list(header_re.finditer(md_text))
     for idx, m in enumerate(matches):
         start = m.end()
@@ -345,10 +428,12 @@ def parse_lessons(md_text: str) -> list[Lesson]:
         codes = [c.strip().strip("`").upper() for c in raw_codes.split(",") if c.strip()]
         raw_kws = _field("Keywords").strip("`")
         kws = [k.strip().strip("`").lower() for k in raw_kws.split(",") if k.strip()]
+        lid = m.group(1).strip()
+        dom = lid.split("-", 1)[0].upper()
 
         lessons.append(
             Lesson(
-                lesson_id=m.group(1).strip(),
+                lesson_id=lid,
                 title=m.group(2).strip(),
                 category=_field("Category").strip("`"),
                 codes=codes,
@@ -357,15 +442,21 @@ def parse_lessons(md_text: str) -> list[Lesson]:
                 rule=_field("TimelessRule"),
                 lookup=_field("DynamicLookup"),
                 guard=_field("AutoGuard") or "manual-review",
+                domain=dom,
+                remediation_hint=_field("RemediationHint"),
             )
         )
     return lessons
 
 
-def next_lesson_id(lessons: list[Lesson]) -> int:
+def next_lesson_id(lessons: list[Lesson], domain: str = "BL") -> int:
+    dom = (domain or "BL").strip().upper()
+    if dom not in VALID_DOMAINS:
+        dom = "BL"
+    pat = re.compile(rf"^{re.escape(dom)}-(\d+)$")
     nums = []
     for l in lessons:
-        m = re.match(r"^BL-(\d+)$", l.lesson_id)
+        m = pat.match(l.lesson_id)
         if m:
             nums.append(int(m.group(1)))
     return (max(nums) + 1) if nums else 1
@@ -374,22 +465,23 @@ def next_lesson_id(lessons: list[Lesson]) -> int:
 def format_lesson_markdown(lesson: Lesson) -> str:
     codes_str = ", ".join(lesson.codes) if lesson.codes else "GENERAL"
     kws_str = ", ".join(lesson.keywords) if lesson.keywords else lesson.category
-    return "\n".join(
-        [
-            f"### `{lesson.lesson_id}` | {lesson.title}",
-            f"- `Category`: `{lesson.category}`",
-            f"- `Codes`: `{codes_str}`",
-            f"- `Keywords`: `{kws_str}`",
-            f"- `RootCause`: {lesson.root_cause}",
-            f"- `TimelessRule`: {lesson.rule}",
-            f"- `DynamicLookup`: {lesson.lookup}",
-            f"- `AutoGuard`: {lesson.guard}",
-        ]
-    )
+    lines = [
+        f"### `{lesson.lesson_id}` | {lesson.title}",
+        f"- `Category`: `{lesson.category}`",
+        f"- `Codes`: `{codes_str}`",
+        f"- `Keywords`: `{kws_str}`",
+        f"- `RootCause`: {lesson.root_cause}",
+        f"- `TimelessRule`: {lesson.rule}",
+        f"- `DynamicLookup`: {lesson.lookup}",
+    ]
+    if lesson.remediation_hint:
+        lines.append(f"- `RemediationHint`: {lesson.remediation_hint}")
+    lines.append(f"- `AutoGuard`: {lesson.guard}")
+    return "\n".join(lines)
 
 
 def audit_lessons_file(path: Path) -> tuple[bool, list[str]]:
-    """Validate BUILD_LESSONS.md for duplicates, required fields, and timelessness."""
+    """Validate BUILD_LESSONS.md for duplicates, required fields, executable guards, and timelessness."""
     errors: list[str] = []
     if not path.is_file():
         return False, [f"Missing lessons file: {path}"]
@@ -399,7 +491,7 @@ def audit_lessons_file(path: Path) -> tuple[bool, list[str]]:
 
     lessons = parse_lessons(text)
     if not lessons:
-        errors.append("No `BL-NNN` lessons parsed.")
+        errors.append("No `(BL|UI|ARCH|DSP|AI)-NNN` lessons parsed.")
         return False, errors
 
     seen_ids: set[str] = set()
@@ -416,16 +508,151 @@ def audit_lessons_file(path: Path) -> tuple[bool, list[str]]:
         if not l.lookup:
             errors.append(f"{l.lesson_id}: missing DynamicLookup (dynamic verification guidance required).")
 
+        if l.domain != "BL":
+            if not has_executable_guard(l.guard):
+                errors.append(
+                    f"{l.lesson_id}: non-BL domain `{l.domain}` requires an executable AutoGuard link "
+                    f"(e.g. `fitness_rules`, `diff_rules`, `code_weight_limits`, `regression_contracts`, `co_evolve`), got `{l.guard}`."
+                )
+            if not l.remediation_hint:
+                errors.append(f"{l.lesson_id}: non-BL domain `{l.domain}` requires a concise `RemediationHint`.")
+
         for field_name, val in (
             ("Title", l.title),
             ("RootCause", l.root_cause),
             ("TimelessRule", l.rule),
             ("DynamicLookup", l.lookup),
+            ("RemediationHint", l.remediation_hint),
         ):
             for v in lint_timelessness(val):
                 errors.append(f"{l.lesson_id}.{field_name}: dated/version-pinned content -> {v}")
 
     return len(errors) == 0, errors
+
+
+def select_relevant_lessons(
+    lessons_path: Path,
+    triage_domains: list[str] | tuple[str, ...],
+    *,
+    prompt_text: str = "",
+    max_items: int = 5,
+) -> list[Lesson]:
+    """Select up to `max_items` domain-scoped compounding lessons relevant to active triage domains & prompt."""
+    if not lessons_path.is_file() or max_items <= 0:
+        return []
+    lessons = parse_lessons(lessons_path.read_text(encoding="utf-8", errors="ignore"))
+    if not lessons:
+        return []
+
+    target_domains: set[str] = set()
+    for raw_dom in triage_domains or []:
+        tok = str(raw_dom or "").strip()
+        if not tok:
+            continue
+        up = tok.upper()
+        if up in VALID_DOMAINS:
+            target_domains.add(up)
+        else:
+            low = tok.lower()
+            for mapped in TRIAGE_TO_LESSON_DOMAINS.get(low, ()):
+                target_domains.add(mapped)
+            for key, mapped_list in TRIAGE_TO_LESSON_DOMAINS.items():
+                if key in low:
+                    target_domains.update(mapped_list)
+
+    prompt_low = (prompt_text or "").lower()
+    if not target_domains:
+        if any(k in prompt_low for k in ("ui", "one ui", "theme", "card", "pill", "checkbox", "blur", "tab", "layout")):
+            target_domains.add("UI")
+        if any(k in prompt_low for k in ("dsp", "audio", "aaudio", "oboe", "spatial", "binaural", "xtc", "eq", "loudness")):
+            target_domains.add("DSP")
+        if any(k in prompt_low for k in ("onnx", "neural", "npu", "gpu", "model", "apollo", "demucs", "vocal")):
+            target_domains.add("AI")
+        if any(k in prompt_low for k in ("refactor", "monolith", "split", "state", "architecture", "coherence", "ratchet")):
+            target_domains.add("ARCH")
+        if not target_domains:
+            target_domains.add("ARCH")
+
+    scored: list[tuple[int, int, Lesson]] = []
+    for idx, les in enumerate(lessons):
+        score = 0
+        if les.domain in target_domains:
+            score += 10
+            if les.domain != "BL":
+                score += 3
+        kw_hits = sum(1 for kw in les.keywords if len(kw) >= 3 and kw in prompt_low) if prompt_low else 0
+        score += min(kw_hits * 4, 12)
+        if score <= 0:
+            continue
+        scored.append((score, -idx, les))
+
+    scored.sort(key=lambda t: (-t[0], -t[1]))
+    return [t[2] for t in scored[:max_items]]
+
+
+def format_injected_lessons_line(lessons: list[Lesson], *, max_chars: int = 420) -> str:
+    """Format selected lessons into a single compact symbolic `LESSONS|...` prompt-injection line."""
+    if not lessons:
+        return ""
+    parts: list[str] = []
+    for les in lessons:
+        body = (les.remediation_hint or les.title or les.rule).strip().replace("\n", " ")
+        if len(body) > 78:
+            body = body[:75].rstrip() + "..."
+        parts.append(f"{les.lesson_id}:{body}")
+    line = "LESSONS|" + " ; ".join(parts)
+    if len(line) <= max_chars:
+        return line
+    out = "LESSONS|"
+    kept: list[str] = []
+    for p in parts:
+        cand = out + (" ; ".join(kept + [p]))
+        if len(cand) > max_chars:
+            break
+        kept.append(p)
+    if not kept:
+        return line[: max_chars - 3] + "..."
+    return out + " ; ".join(kept)
+
+
+def summarize_compound_status(repo_root: Path, profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Compute lightweight read-only end-of-wave compound health metrics for `plan_tool.py handoff`."""
+    cfg = load_error_learning_config(repo_root)
+    lessons_path = repo_root / str(cfg.get("lessons_file") or DEFAULT_LESSONS_REL)
+    by_domain = {d: 0 for d in VALID_DOMAINS}
+    total = 0
+    timeless_ok = True
+    audit_errors = 0
+    if lessons_path.is_file():
+        lessons = parse_lessons(lessons_path.read_text(encoding="utf-8", errors="ignore"))
+        total = len(lessons)
+        for les in lessons:
+            by_domain[les.domain] = by_domain.get(les.domain, 0) + 1
+        ok, errs = audit_lessons_file(lessons_path)
+        timeless_ok = ok
+        audit_errors = len(errs)
+
+    prof = profile
+    if prof is None:
+        pf = repo_root / ".agents" / "planner_profile.json"
+        if pf.is_file():
+            try:
+                prof = json.loads(pf.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                prof = {}
+        else:
+            prof = {}
+    cw = prof.get("code_weight_limits") if isinstance(prof.get("code_weight_limits"), dict) else {}
+    baseline = cw.get("monolith_baseline") if isinstance(cw.get("monolith_baseline"), dict) else {}
+    fitness_rules = prof.get("fitness_rules") if isinstance(prof.get("fitness_rules"), list) else []
+    return {
+        "total_lessons": total,
+        "by_domain": by_domain,
+        "timeless_ok": timeless_ok,
+        "audit_errors": audit_errors,
+        "fitness_rules": len(fitness_rules),
+        "monoliths": len(baseline),
+    }
 
 
 def extract_code_from_line(line: str) -> str:
@@ -635,13 +862,14 @@ def apply_new_lessons(lessons_path: Path, new_lessons: list[Lesson]) -> tuple[bo
     existing_ids = {l.lesson_id for l in existing}
 
     to_add: list[Lesson] = []
-    next_num = next_lesson_id(existing)
+    next_nums = {d: next_lesson_id(existing, d) for d in VALID_DOMAINS}
     for cand in new_lessons:
-        if cand.codes and all(c in existing_codes for c in cand.codes):
+        if cand.domain == "BL" and cand.codes and all(c in existing_codes for c in cand.codes):
             continue
         if cand.lesson_id in existing_ids:
+            dom = cand.domain if cand.domain in VALID_DOMAINS else "BL"
             cand = Lesson(
-                lesson_id=f"BL-{next_num:03d}",
+                lesson_id=f"{dom}-{next_nums[dom]:03d}",
                 title=cand.title,
                 category=cand.category,
                 codes=cand.codes,
@@ -650,9 +878,17 @@ def apply_new_lessons(lessons_path: Path, new_lessons: list[Lesson]) -> tuple[bo
                 rule=cand.rule,
                 lookup=cand.lookup,
                 guard=cand.guard,
+                domain=dom,
+                remediation_hint=cand.remediation_hint,
             )
-            next_num += 1
-        for fld_name, val in (("Title", cand.title), ("RootCause", cand.root_cause), ("TimelessRule", cand.rule), ("DynamicLookup", cand.lookup)):
+            next_nums[dom] += 1
+        for fld_name, val in (
+            ("Title", cand.title),
+            ("RootCause", cand.root_cause),
+            ("TimelessRule", cand.rule),
+            ("DynamicLookup", cand.lookup),
+            ("RemediationHint", cand.remediation_hint),
+        ):
             v = lint_timelessness(val)
             if v:
                 raise ValueError(f"Refusing dated lesson `{cand.lesson_id}` ({fld_name}): {'; '.join(v)}")
@@ -742,14 +978,21 @@ def main(
     parser.add_argument("--ci-json-path", default="", help="Path inside diagnostics branch to CI JSON")
     parser.add_argument("--from-log", help="Ingest local compiler/build log file (use '-' for stdin)")
     parser.add_argument("--record", action="store_true", help="Record an explicit timeless structural lesson")
+    parser.add_argument("--domain", choices=list(VALID_DOMAINS), default="BL", help="Lesson domain prefix (BL|UI|ARCH|DSP|AI)")
     parser.add_argument("--title", help="Title for --record")
-    parser.add_argument("--category", default="build-process", help="Category for --record")
+    parser.add_argument("--category", default="", help="Category for --record (defaults by domain)")
     parser.add_argument("--codes", default="", help="Comma-separated diagnostic codes for --record")
     parser.add_argument("--keywords", default="", help="Comma-separated keywords for --record")
     parser.add_argument("--root-cause", help="Timeless root cause for --record")
     parser.add_argument("--rule", help="Timeless rule for --record")
     parser.add_argument("--lookup", help="Dynamic lookup directive for --record")
-    parser.add_argument("--guard", default="manual-review", help="AutoGuard reference for --record")
+    parser.add_argument("--remediation-hint", default="", help="Concise inline FIX hint (required for UI|ARCH|DSP|AI)")
+    parser.add_argument("--guard", default="manual-review", help="AutoGuard reference for --record (executable required for non-BL)")
+    parser.add_argument("--query", action="store_true", help="Query domain-scoped compounding lessons (<=5)")
+    parser.add_argument("--domains", default="", help="Comma-separated domains for --query (e.g. ui,dsp or UI,ARCH)")
+    parser.add_argument("--prompt", default="", help="Optional prompt text for --query relevance scoring")
+    parser.add_argument("--max", dest="max_items", type=int, default=5, help="Max lessons returned by --query")
+    parser.add_argument("--json", dest="as_json", action="store_true", help="JSON output for --query")
     parser.add_argument("--apply", action="store_true", help="Write newly learned timeless lessons into BUILD_LESSONS.md")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without modifying BUILD_LESSONS.md")
     parser.add_argument("--report", help="Optional path to write Markdown learner report")
@@ -767,7 +1010,9 @@ def main(
         ok, errs = audit_lessons_file(lessons_path)
         lessons = parse_lessons(lessons_path.read_text(encoding="utf-8", errors="ignore")) if lessons_path.is_file() else []
         if ok:
-            print(f"[error_learner|AUDIT_PASS|lessons={len(lessons)}|timeless=OK|file={lessons_path.name}]")
+            by_dom = {d: sum(1 for l in lessons if l.domain == d) for d in VALID_DOMAINS}
+            dom_tag = ",".join(f"{d}:{by_dom[d]}" for d in VALID_DOMAINS if by_dom[d] > 0)
+            print(f"[error_learner|AUDIT_PASS|lessons={len(lessons)}({dom_tag})|timeless=OK|file={lessons_path.name}]")
             return 0
         print(f"[error_learner|AUDIT_FAIL|errors={len(errs)}]", file=sys.stderr)
         for e in errs:
@@ -778,18 +1023,62 @@ def main(
         print(f"ERROR: lessons file not found: {lessons_path}", file=sys.stderr)
         return 1
 
+    if args.query:
+        doms = [d.strip() for d in (args.domains or "").split(",") if d.strip()]
+        picked = select_relevant_lessons(
+            lessons_path,
+            doms,
+            prompt_text=args.prompt or "",
+            max_items=max(1, int(args.max_items or 5)),
+        )
+        if args.as_json:
+            print(
+                json.dumps(
+                    [
+                        {
+                            "id": l.lesson_id,
+                            "domain": l.domain,
+                            "title": l.title,
+                            "remediation_hint": l.remediation_hint,
+                            "guard": l.guard,
+                        }
+                        for l in picked
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            line = format_injected_lessons_line(picked, max_chars=600)
+            print(line or "LESSONS|none")
+        return 0
+
     existing = parse_lessons(lessons_path.read_text(encoding="utf-8"))
 
     if args.record:
+        dom = (args.domain or "BL").strip().upper()
+        cat = (args.category or "").strip() or DOMAIN_DEFAULT_CATEGORY.get(dom, "build-process")
         missing = [k for k in ("title", "root_cause", "rule", "lookup") if not getattr(args, k)]
         if missing:
             print(f"ERROR: --record requires --title, --root-cause, --rule, and --lookup (missing: {', '.join(missing)}).", file=sys.stderr)
             return 2
+        if dom != "BL":
+            if not has_executable_guard(args.guard):
+                print(
+                    f"GUARD_REJECT|domain `{dom}` requires an executable --guard link "
+                    f"(e.g. `fitness_rules`, `diff_rules`, `code_weight_limits`, `regression_contracts`), got `{args.guard}`.",
+                    file=sys.stderr,
+                )
+                return 2
+            if not (args.remediation_hint or "").strip():
+                print(f"HINT_REJECT|domain `{dom}` requires --remediation-hint.", file=sys.stderr)
+                return 2
         for fld_name, val in (
             ("title", args.title),
             ("root_cause", args.root_cause),
             ("rule", args.rule),
             ("lookup", args.lookup),
+            ("remediation_hint", args.remediation_hint or ""),
         ):
             v = lint_timelessness(val)
             if v:
@@ -800,15 +1089,17 @@ def main(
                 )
                 return 1
         lesson = Lesson(
-            lesson_id=f"BL-{next_lesson_id(existing):03d}",
+            lesson_id=f"{dom}-{next_lesson_id(existing, dom):03d}",
             title=args.title.strip(),
-            category=args.category.strip(),
-            codes=[c.strip().upper() for c in args.codes.split(",") if c.strip()] or ["STRUCTURAL"],
-            keywords=[k.strip().lower() for k in args.keywords.split(",") if k.strip()] or [args.category.strip().lower()],
+            category=cat,
+            codes=[c.strip().upper() for c in args.codes.split(",") if c.strip()] or [f"{dom}_STRUCTURAL"],
+            keywords=[k.strip().lower() for k in args.keywords.split(",") if k.strip()] or [cat.lower(), dom.lower()],
             root_cause=args.root_cause.strip(),
             rule=args.rule.strip(),
             lookup=args.lookup.strip(),
             guard=args.guard.strip() or "manual-review",
+            domain=dom,
+            remediation_hint=(args.remediation_hint or "").strip(),
         )
         if args.apply and not args.dry_run:
             changed, msg = apply_new_lessons(lessons_path, [lesson])

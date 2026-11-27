@@ -421,6 +421,24 @@ def main() -> None:
             reply("deny", sl_hit, payload=payload, repo=repo)
             return
 
+        # 1d2. Shift-left Zero-Accumulation Monolith Ratchet & declarative fitness_rules
+        try:
+            import fitness_ratchet  # noqa: E402
+
+            mr_hit = fitness_ratchet.check_shift_left_monolith_ratchet(tool_name, args, raw_path, repo, profile)
+            if mr_hit:
+                record_telemetry("monolith_ratchet_deny", {"path": raw_path})
+                reply("deny", mr_hit, payload=payload, repo=repo)
+                return
+
+            fr_hit = fitness_ratchet.check_shift_left_fitness_rules(tool_name, args, raw_path, repo, profile)
+            if fr_hit:
+                record_telemetry("fitness_rule_deny", {"path": raw_path})
+                reply("deny", fr_hit, payload=payload, repo=repo)
+                return
+        except Exception:
+            pass
+
         # 1e. Destructive write_file shield (>150L existing code)
         dw_hit = check_destructive_write(tool_name, args, raw_path, repo, profile, in_plugin, plugin_rel)
         if dw_hit:

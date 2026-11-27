@@ -1,6 +1,6 @@
 {
   "schema_version": 5,
-  "plugin_version": "2.22.5",
+  "plugin_version": "2.23.0",
   "docs_format_version": 1,
   "project_name": "dynamic-fractal-planner",
   "planner_mode": "auto",

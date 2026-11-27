@@ -76,6 +76,7 @@ VERIFY_CHECK_TIERS: dict[str, str] = {
     "blueprint_quality": "T1",
     "build_lessons_timelessness": "T1",
     "forward_wiring": "T1",
+    "fitness_rules": "T1",
     # T2: Heuristic / Style / Weight Rules
     "diff_rules": "T2",
     "orphan_calls": "T2",
@@ -91,6 +92,8 @@ GUARD_RULE_TIERS: dict[str, str] = {
     "ship_pre_flight": "T0",
     "qa_gate_stop": "T0",
     "lease_guard": "T1",
+    "monolith_ratchet": "T1",
+    "fitness_rule_block": "T1",
     "blueprint_first_gate": "T1",
     "plan_gate": "T1",
     "extra_requests_gate": "T1",

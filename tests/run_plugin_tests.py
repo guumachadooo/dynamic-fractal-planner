@@ -7227,8 +7227,9 @@ class TestW56_3_ReflexiveMetaGovernance(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
             (repo / ".agents" / "docs").mkdir(parents=True)
+            live_pver = json.loads((PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8"))["version"]
             (repo / ".agents" / "planner_profile.json").write_text(
-                json.dumps({"schema_version": 5, "plugin_version": "2.22.5"}),
+                json.dumps({"schema_version": 5, "plugin_version": live_pver}),
                 encoding="utf-8",
             )
             metrics_p = repo / ".metrics.jsonl"
@@ -7275,6 +7276,325 @@ class TestW56_3_ReflexiveMetaGovernance(unittest.TestCase):
             r_can = run_script("plan_tool.py", ["--workspace", str(PLUGIN_ROOT), "coherence", "canary"])
             self.assertEqual(r_can.returncode, 0, r_can.stdout + r_can.stderr)
             self.assertIn("T0_CANARY|OK|", r_can.stdout)
+
+
+class TestW55_1b_CompoundingLearnerAndRatchet(unittest.TestCase):
+    """W55.1b (DFP v2.23.0): Monolith Ratchet, 5-Domain Compounding Learner, Fitness Rules, LESSONS| & COMPOUND|."""
+
+    def test_monolith_ratchet_blocks_growth_and_new_monoliths_and_preserves_legacy_compat(self) -> None:
+        import fitness_ratchet  # noqa: E402
+
+        with tempfile.TemporaryDirectory(prefix="dfp_w551b_ratchet_") as td:
+            repo = Path(td)
+            (repo / "src").mkdir(parents=True)
+            big = repo / "src" / "Big.cs"
+            big.write_text("\n".join(f"// line {i}" for i in range(2100)) + "\n", encoding="utf-8")
+            new_big = repo / "src" / "NewBig.cs"
+            new_big.write_text("\n".join(f"// line {i}" for i in range(2005)) + "\n", encoding="utf-8")
+            near = repo / "src" / "NearCap.cs"
+            near.write_text("\n".join(f"// line {i}" for i in range(1650)) + "\n", encoding="utf-8")
+
+            # 1) Legacy compat when ratchet_enabled=False -> warn-only, 0 fails
+            legacy_prof = {"code_weight_limits": {"enabled": True, "warn_lines": 1500, "warn_lines_all": 2000}}
+            fails_l: list[str] = []
+            warns_l: list[str] = []
+            fitness_ratchet.check_code_weight_ratchet(repo, ["src/Big.cs", "src/NewBig.cs"], legacy_prof, fails_l, warns_l)
+            self.assertEqual(fails_l, [])
+            self.assertEqual(len(warns_l), 2)
+
+            # 2) Ratchet enabled -> baseline file at exact baseline passes w/ SPLIT_ON_TOUCH warn; new >2000L FAILS; >1600L NEAR_CAP warn
+            ratchet_prof = {
+                "code_weight_limits": {
+                    "enabled": True,
+                    "ratchet_enabled": True,
+                    "warn_lines": 1600,
+                    "fail_lines": 2000,
+                    "split_target_lines": 1800,
+                    "monolith_baseline": {"src/Big.cs": 2100},
+                }
+            }
+            fails_r: list[str] = []
+            warns_r: list[str] = []
+            fitness_ratchet.check_code_weight_ratchet(
+                repo, ["src/Big.cs", "src/NewBig.cs", "src/NearCap.cs"], ratchet_prof, fails_r, warns_r
+            )
+            self.assertEqual(len(fails_r), 1, f"Expected 1 fail, got {fails_r}")
+            self.assertIn("NEW_MONOLITH", fails_r[0])
+            self.assertTrue(any("SPLIT_ON_TOUCH" in w for w in warns_r), warns_r)
+            self.assertTrue(any("NEAR_CAP" in w for w in warns_r), warns_r)
+
+            # 3) +1L growth on baseline monolith -> hard FAIL
+            big.write_text("\n".join(f"// line {i}" for i in range(2101)) + "\n", encoding="utf-8")
+            fails_g: list[str] = []
+            warns_g: list[str] = []
+            fitness_ratchet.check_code_weight_ratchet(repo, ["src/Big.cs"], ratchet_prof, fails_g, warns_g)
+            self.assertEqual(len(fails_g), 1)
+            self.assertIn("GROWN_MONOLITH", fails_g[0])
+
+            # 4) Shift-left guard via planner_guard_files.py blocks +1L growth pre-disk
+            big.write_text("\n".join(f"// line {i}" for i in range(2100)) + "\n", encoding="utf-8")
+            (repo / ".agents").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, **ratchet_prof}), encoding="utf-8"
+            )
+            art = Path(td) / "art"
+            rc, err, out = run_hook(
+                "planner_guard_files.py",
+                {
+                    "toolCall": {
+                        "name": "replace_file_content",
+                        "args": {
+                            "TargetFile": str(big),
+                            "TargetContent": "// line 0",
+                            "ReplacementContent": "// line 0\n// extra line",
+                        },
+                    },
+                    "workspacePaths": [str(repo)],
+                },
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art)},
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(out.get("decision"), "deny", f"Expected shift-left monolith deny, got out={out} err={err}")
+            self.assertIn("MONOLITH_RATCHET|GROWN_MONOLITH", str(out.get("reason") or ""))
+
+    def test_multi_domain_compounding_learner_enforces_guards_and_queries(self) -> None:
+        import error_learner  # noqa: E402
+
+        with tempfile.TemporaryDirectory(prefix="dfp_w551b_learn_") as td:
+            repo = Path(td)
+            lessons = repo / ".agents" / "docs" / "BUILD_LESSONS.md"
+            lessons.parent.mkdir(parents=True)
+            lessons.write_text(
+                "# Lessons\n\n"
+                "### `BL-001` | Existing Build Lesson\n"
+                "- `Category`: `build-process`\n"
+                "- `Codes`: `CS0103`\n"
+                "- `Keywords`: `cs0103, missing`\n"
+                "- `RootCause`: Missing using directive.\n"
+                "- `TimelessRule`: Keep namespace imports explicit.\n"
+                "- `DynamicLookup`: Check current compiler docs.\n"
+                "- `AutoGuard`: check_android_cs.py\n\n"
+                "<!-- AUTO-LEARNED-LESSONS:START -->\n"
+                "(No new uncatalogued structural lessons pending.)\n"
+                "<!-- AUTO-LEARNED-LESSONS:END -->\n",
+                encoding="utf-8",
+            )
+
+            # 1) Non-BL domain without executable guard MUST be rejected
+            rc_no_guard = error_learner.main(
+                [
+                    "--lessons-file", str(lessons),
+                    "--record", "--domain", "UI",
+                    "--title", "Avoid Legacy CheckBox",
+                    "--root-cause", "Legacy CheckBox breaks unified One UI 9 grammar.",
+                    "--rule", "Use OneUiComponents.CreateSwitch instead of CheckBox.",
+                    "--lookup", "Check ONEUI9_REFERENCE.md.",
+                    "--remediation-hint", "Use OneUiComponents.CreateSwitch.",
+                    "--guard", "manual-review",
+                    "--apply",
+                ]
+            )
+            self.assertNotEqual(rc_no_guard, 0)
+
+            # 2) Non-BL domain without remediation_hint MUST be rejected
+            rc_no_hint = error_learner.main(
+                [
+                    "--lessons-file", str(lessons),
+                    "--record", "--domain", "UI",
+                    "--title", "Avoid Legacy CheckBox",
+                    "--root-cause", "Legacy CheckBox breaks unified One UI 9 grammar.",
+                    "--rule", "Use OneUiComponents.CreateSwitch instead of CheckBox.",
+                    "--lookup", "Check ONEUI9_REFERENCE.md.",
+                    "--guard", "fitness_rules:FIT-UI-LEGACY-CHECKBOX",
+                    "--apply",
+                ]
+            )
+            self.assertNotEqual(rc_no_hint, 0)
+
+            # 3) Valid UI lesson with executable guard + remediation_hint MUST pass & assign UI-001
+            rc_ok = error_learner.main(
+                [
+                    "--lessons-file", str(lessons),
+                    "--record", "--domain", "UI",
+                    "--title", "Avoid Legacy CheckBox",
+                    "--codes", "UI_LEGACY_CHECKBOX",
+                    "--keywords", "checkbox, oneui, switch",
+                    "--root-cause", "Legacy CheckBox breaks unified One UI 9 grammar.",
+                    "--rule", "Use OneUiComponents.CreateSwitch instead of CheckBox.",
+                    "--lookup", "Check ONEUI9_REFERENCE.md.",
+                    "--remediation-hint", "Replace new CheckBox() with OneUiComponents.CreateSwitch.",
+                    "--guard", "fitness_rules:FIT-UI-LEGACY-CHECKBOX",
+                    "--apply",
+                ]
+            )
+            self.assertEqual(rc_ok, 0)
+            ok, errs = error_learner.audit_lessons_file(lessons)
+            self.assertTrue(ok, f"Audit failed: {errs}")
+            parsed = error_learner.parse_lessons(lessons.read_text(encoding="utf-8"))
+            self.assertIn("UI-001", [l.lesson_id for l in parsed])
+
+            # 4) Domain-scoped relevance query returns <=5 UI lessons
+            picked = error_learner.select_relevant_lessons(lessons, ["ui"], prompt_text="fix checkbox layout", max_items=5)
+            self.assertTrue(picked and picked[0].lesson_id == "UI-001")
+            self.assertLessEqual(len(picked), 5)
+
+    def test_declarative_fitness_rules_and_shift_left_and_meta_tier(self) -> None:
+        import fitness_ratchet  # noqa: E402
+        import meta_governance  # noqa: E402
+
+        self.assertEqual(meta_governance.VERIFY_CHECK_TIERS.get("fitness_rules"), "T1")
+        self.assertEqual(meta_governance.GUARD_RULE_TIERS.get("monolith_ratchet"), "T1")
+        self.assertEqual(meta_governance.GUARD_RULE_TIERS.get("fitness_rule_block"), "T1")
+
+        with tempfile.TemporaryDirectory(prefix="dfp_w551b_fit_") as td:
+            repo = Path(td)
+            (repo / "ui").mkdir(parents=True)
+            f1 = repo / "ui" / "ScreenA.cs"
+            f1.write_text(
+                "var c1 = new CheckBox(ctx);\n"
+                "BindSetting(\"foo\");\n"
+                "BindSetting(\"foo\");\n"
+                "var x1 = MakeCtrl();\nvar x2 = MakeCtrl();\nvar x3 = MakeCtrl();\n",
+                encoding="utf-8",
+            )
+            f2 = repo / "ui" / "ScreenB.cs"
+            f2.write_text("BindSetting(\"bar\");\n", encoding="utf-8")
+
+            profile = {
+                "schema_version": 5,
+                "fitness_rules": [
+                    {
+                        "id": "FIT-CB",
+                        "lesson_id": "UI-001",
+                        "severity": "fail",
+                        "path_prefix": "ui/",
+                        "forbid_regex": r"\bnew\s+CheckBox\s*\(",
+                        "baseline_per_file": {"ui/ScreenA.cs": 1},
+                        "message": "Legacy CheckBox forbidden.",
+                        "remediation_hint": "Use OneUiComponents.CreateSwitch.",
+                    },
+                    {
+                        "id": "FIT-MAX",
+                        "lesson_id": "UI-003",
+                        "severity": "fail",
+                        "path_prefix": "ui/",
+                        "match_regex": r"\bMakeCtrl\(",
+                        "max_matches_per_file": 2,
+                        "message": "Too many controls.",
+                        "remediation_hint": "Split card.",
+                    },
+                    {
+                        "id": "FIT-DUP",
+                        "lesson_id": "ARCH-002",
+                        "severity": "fail",
+                        "path_prefix": "ui/",
+                        "duplicate_capture_regex": r'BindSetting\("([^"]+)"\)',
+                        "max_occurrences": 1,
+                        "scope": "per_file",
+                        "message": "Duplicate binding.",
+                        "remediation_hint": "Deduplicate binding.",
+                    },
+                ],
+            }
+            # 1) Baseline passes for FIT-CB (1<=1), fails for FIT-MAX (3>2) & FIT-DUP (2>1)
+            fails: list[str] = []
+            warns: list[str] = []
+            fitness_ratchet.check_fitness_rules(repo, ["ui/ScreenA.cs", "ui/ScreenB.cs"], profile, fails, warns)
+            self.assertFalse(any("FIT-CB" in f for f in fails), fails)
+            self.assertTrue(any("FIT-MAX" in f and "FIX: Split card." in f for f in fails), fails)
+            self.assertTrue(any("FIT-DUP" in f and "duplicate `foo`" in f for f in fails), fails)
+
+            # 2) Adding a 2nd CheckBox breaches baseline_per_file (2>1)
+            f1.write_text(f1.read_text(encoding="utf-8") + "var c2 = new CheckBox(ctx);\n", encoding="utf-8")
+            fails2: list[str] = []
+            fitness_ratchet.check_fitness_rules(repo, ["ui/ScreenA.cs"], profile, fails2, [])
+            self.assertTrue(any("FIT-CB" in f and "FIX: Use OneUiComponents.CreateSwitch." in f for f in fails2), fails2)
+
+            # 3) Shift-left guard blocks adding a new CheckBox line pre-disk
+            (repo / ".agents").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps(profile), encoding="utf-8")
+            art = Path(td) / "art"
+            rc, err, out_fit = run_hook(
+                "planner_guard_files.py",
+                {
+                    "toolCall": {
+                        "name": "replace_file_content",
+                        "args": {
+                            "TargetFile": str(f2),
+                            "TargetContent": "BindSetting(\"bar\");",
+                            "ReplacementContent": "BindSetting(\"bar\");\nvar cb = new CheckBox(ctx);",
+                        },
+                    },
+                    "workspacePaths": [str(repo)],
+                },
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art)},
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(out_fit.get("decision"), "deny", f"Expected shift-left fitness deny, got out={out_fit} err={err}")
+            self.assertIn("FITNESS|FIT-CB", str(out_fit.get("reason") or ""))
+
+    def test_pre_invocation_lessons_injection_and_handoff_compound_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dfp_w551b_hook_") as td:
+            repo = Path(td)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 5,
+                        "plugin_version": "2.23.0",
+                        "error_learning": {"enabled": True, "lessons_file": ".agents/docs/BUILD_LESSONS.md"},
+                        "code_weight_limits": {"enabled": True, "ratchet_enabled": True, "monolith_baseline": {"A.cs": 2100}},
+                        "fitness_rules": [{"id": "FIT-1", "forbid_regex": "BAD_TOKEN"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (repo / ".agents" / "docs" / "BUILD_LESSONS.md").write_text(
+                "# Lessons\n\n"
+                "### `UI-001` | One UI Switch Grammar\n"
+                "- `Category`: `ui-ux-contract`\n"
+                "- `Codes`: `UI_SWITCH`\n"
+                "- `Keywords`: `ui, checkbox, switch, oneui`\n"
+                "- `RootCause`: Legacy checkboxes violate grammar.\n"
+                "- `TimelessRule`: Use OneUiComponents.CreateSwitch.\n"
+                "- `DynamicLookup`: Check ONEUI9_REFERENCE.md.\n"
+                "- `RemediationHint`: Use OneUiComponents.CreateSwitch.\n"
+                "- `AutoGuard`: fitness_rules:FIT-1\n\n"
+                "<!-- AUTO-LEARNED-LESSONS:START -->\n"
+                "(No new uncatalogued structural lessons pending.)\n"
+                "<!-- AUTO-LEARNED-LESSONS:END -->\n",
+                encoding="utf-8",
+            )
+            art = Path(td) / "art"
+            rc, err, out = run_hook(
+                "planner_pre_invocation.py",
+                {"lastUserInput": "Refactor the UI card layout and replace old checkbox widgets cleanly", "workspacePaths": [str(repo)]},
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art)},
+            )
+            self.assertEqual(rc, 0, err)
+            steps = out.get("injectSteps") or []
+            ctx = str(((steps[0].get("systemMessage") or {}).get("systemMessage")) if steps else "")
+            self.assertIn("LESSONS|UI-001:", ctx)
+
+            # Eco mode suppresses LESSONS| injection
+            rc_eco, err_eco, out_eco = run_hook(
+                "planner_pre_invocation.py",
+                {"lastUserInput": "save quota: Refactor the UI card layout and replace old checkbox widgets", "workspacePaths": [str(repo)]},
+                env_extra={"PLANNER_ARTIFACT_DIR": str(Path(td) / "art_eco")},
+            )
+            self.assertEqual(rc_eco, 0, err_eco)
+            steps_eco = out_eco.get("injectSteps") or []
+            ctx_eco = str(((steps_eco[0].get("systemMessage") or {}).get("systemMessage")) if steps_eco else "")
+            self.assertNotIn("LESSONS|", ctx_eco)
+
+            # plan_tool.py handoff emits read-only COMPOUND| gate
+            r_ho = run_script(
+                "plan_tool.py",
+                ["--workspace", str(repo), "handoff", "--summary", "Done wave", "--next", "Next wave", "--compound-note", "UI-001 added"],
+            )
+            self.assertEqual(r_ho.returncode, 0, r_ho.stdout + r_ho.stderr)
+            self.assertIn("COMPOUND|lessons=1(", r_ho.stdout)
+            self.assertIn("timeless=OK|fitness_rules=1|monoliths=1", r_ho.stdout)
 
 
 def _stamp_plugin_tests_passed() -> None:

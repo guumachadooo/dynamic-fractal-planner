@@ -242,6 +242,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "recon": prev_recon,
             "recon_injected": False,
             "lens_injected": False,
+            "lessons_injected": False,
             "blueprint_injected": False,
             "hygiene_injected": False,
             "qa_gate_injected": False,
@@ -583,6 +584,28 @@ def _run_pre_invocation_inner(t0: float) -> None:
         lens_line = _compact_domain_lenses(list(triage.get("detected_domains") or []), profile)
         if lens_line and _append_within_budget(lens_line):
             hook_state["lens_injected"] = True
+
+    # Domain-scoped compounding lessons (<=5 relevant rules, suppressed in ECO_MODE & within bloat budget)
+    if not is_btw_short and not eco_mode and not hook_state.get("lessons_injected") and tier >= 1:
+        try:
+            import error_learner  # noqa: E402
+
+            el_cfg = error_learner.load_error_learning_config(repo)
+            lessons_file = repo / str(el_cfg.get("lessons_file") or ".agents/docs/BUILD_LESSONS.md")
+            if lessons_file.is_file():
+                rel_lessons = error_learner.select_relevant_lessons(
+                    lessons_file,
+                    list(triage.get("detected_domains") or []),
+                    prompt_text=last_input,
+                    max_items=5,
+                )
+                avail_chars = bloat_limit - sum(len(x) + 1 for x in inject_lines)
+                if avail_chars >= 48:
+                    les_line = error_learner.format_injected_lessons_line(rel_lessons, max_chars=min(420, avail_chars))
+                    if les_line and _append_within_budget(les_line):
+                        hook_state["lessons_injected"] = True
+        except Exception:
+            pass
 
     # Direct doc-lookup routing for Tier 0/1 technical queries (once per turn, suppressed in ECO_MODE)
     if not is_btw_short and not eco_mode and doc_hint_line and not hook_state.get("doc_hint_injected"):
