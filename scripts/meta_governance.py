@@ -77,6 +77,7 @@ VERIFY_CHECK_TIERS: dict[str, str] = {
     "build_lessons_timelessness": "T1",
     "forward_wiring": "T1",
     "fitness_rules": "T1",
+    "token_overhead_budget": "T1",
     # T2: Heuristic / Style / Weight Rules
     "diff_rules": "T2",
     "orphan_calls": "T2",
@@ -94,6 +95,7 @@ GUARD_RULE_TIERS: dict[str, str] = {
     "lease_guard": "T1",
     "monolith_ratchet": "T1",
     "fitness_rule_block": "T1",
+    "token_doc_ratchet": "T1",
     "blueprint_first_gate": "T1",
     "plan_gate": "T1",
     "extra_requests_gate": "T1",
@@ -221,12 +223,27 @@ def run_t0_mutation_canary(repo: Path | None = None) -> dict[str, Any]:
         t0_proposed = [p for p in props if p.get("tier") == "T0"]
         return len(t0_proposed) == 0, f"t0_proposed={len(t0_proposed)}"
 
+    def _p_token_budget_guard() -> tuple[bool, str]:
+        import token_governor  # noqa: E402
+
+        synth_prof = {"token_budget": {"enabled": True, "ratchet_enabled": True, "doc_caps": {"AGENTS.md": 100}}}
+        fake_repo = Path("/nonexistent_t0_token_canary")
+        denied = token_governor.check_shift_left_doc_token_ratchet(
+            "write_to_file", {"CodeContent": "x" * 150}, str(fake_repo / "AGENTS.md"), fake_repo, synth_prof
+        )
+        allowed = token_governor.check_shift_left_doc_token_ratchet(
+            "write_to_file", {"CodeContent": "x" * 80}, str(fake_repo / "AGENTS.md"), fake_repo, synth_prof
+        )
+        ok = bool(denied and "TOKEN_RATCHET|DOC_BLOAT" in denied) and (allowed is None)
+        return ok, f"denied={bool(denied)},allowed={allowed is None}"
+
     _run("T0-SECRETS-TOKEN", _p_secret)
     _run("T0-MERGE-CONFLICT", _p_conflict)
     _run("T0-ENV-KEYFILE", _p_env_keyfile)
     _run("T0-SHLEX-SHIP-GUARD", _p_shlex_guard)
     _run("T0-QA-CONTRACT-BLOCK", _p_qa_gate)
     _run("T0-ZERO-HIT-NO-DECAY", _p_t0_no_decay)
+    _run("T0-TOKEN-BUDGET-GUARD", _p_token_budget_guard)
 
     caught_n = sum(1 for p in probes if p["caught"])
     total_n = len(probes)
@@ -684,7 +701,19 @@ def run_gov_audit(
     fails.extend(wf_f)
     warns.extend(wf_w)
 
-    # 7. Plane-2 trigger & weekly budget snapshot
+    # 7. Token-Tax & Overhead Budget (read-only doc ratchet snapshot)
+    doc_tok = 0
+    try:
+        import token_governor  # noqa: E402
+
+        tok_res = token_governor.run_token_audit(repo, profile=prof, include_hooks=False)
+        doc_tok = int((tok_res.get("docs") or {}).get("total_tokens") or 0)
+        fails.extend(f for f in (tok_res.get("fails") or []) if f not in fails)
+        warns.extend(w for w in (tok_res.get("warns") or []) if w not in warns)
+    except Exception:
+        tok_res = {}
+
+    # 8. Plane-2 trigger & weekly budget snapshot
     plane2 = evaluate_plane2_trigger(repo, profile=prof, metrics_file=metrics_p, diag_file=diag_file)
 
     elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
@@ -693,7 +722,7 @@ def run_gov_audit(
         f"GOV_AUDIT|{status}|t0_canary={canary['caught']}/{canary['total']}({canary['kill_rate']:.2f})"
         f"|t0_pruned={t0_pruned}|tiers=T0:{tier_counts['T0']},T1:{tier_counts['T1']},T2:{tier_counts['T2']}"
         f"|anchors={anchors['total_anchors']}(drifted={anchors['drifted_count']})"
-        f"|proposals={len(proposals)}|p2={plane2['used_7d']}/{plane2['max_per_week']}|ms={elapsed_ms}"
+        f"|doc_tok={doc_tok}|proposals={len(proposals)}|p2={plane2['used_7d']}/{plane2['max_per_week']}|ms={elapsed_ms}"
     )
     return {
         "ok": not fails,
@@ -707,6 +736,7 @@ def run_gov_audit(
         "proposals": proposals,
         "living_anchors": anchors,
         "wontfix": wontfix_rows,
+        "token_audit": tok_res,
         "plane2": plane2,
         "fails": fails,
         "warns": warns,

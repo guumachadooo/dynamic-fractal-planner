@@ -27,12 +27,18 @@ def _ensure_paths() -> None:
             sys.path.insert(0, p)
 
 
-def _compact_domain_checklists(domains: list[str], profile: dict[str, Any], max_items: int = 6) -> list[str]:
+def _compact_domain_checklists(
+    domains: list[str],
+    profile: dict[str, Any],
+    max_items: int = 3,
+    max_chars: int = 280,
+) -> list[str]:
     from plan_tool import UNIVERSAL_CHECKLISTS  # noqa: E402
 
     custom_doms = profile.get("domains") if isinstance(profile.get("domains"), dict) else {}
     out: list[str] = []
     seen: set[str] = set()
+    used_chars = 0
     for dom in domains or ["general"]:
         spec = custom_doms.get(dom) if isinstance(custom_doms, dict) else None
         items = spec.get("checklist") if (isinstance(spec, dict) and spec.get("checklist")) else UNIVERSAL_CHECKLISTS.get(dom, [])
@@ -40,7 +46,13 @@ def _compact_domain_checklists(domains: list[str], profile: dict[str, Any], max_
             c_s = str(c).strip()
             if c_s and c_s not in seen:
                 seen.add(c_s)
-                out.append(f"{dom}|{c_s}")
+                if len(c_s) > 110:
+                    c_s = c_s[:107] + "..."
+                entry = f"{dom}|{c_s}"
+                if out and (used_chars + len(entry) + 3) > max_chars:
+                    return out
+                out.append(entry)
+                used_chars += len(entry) + 3
                 if len(out) >= max_items:
                     return out
     return out
@@ -50,7 +62,7 @@ def _compact_domain_lenses(
     domains: list[str],
     profile: dict[str, Any],
     max_lenses: int = 2,
-    max_chars: int = 420,
+    max_chars: int = 260,
 ) -> str:
     custom_doms = profile.get("domains") if isinstance(profile.get("domains"), dict) else {}
     parts: list[str] = []
@@ -170,6 +182,11 @@ def _run_pre_invocation_inner(t0: float) -> None:
         prev_handoff_nudged = bool(hook_state.get("handoff_nudged"))
         prev_post_commit = bool(hook_state.get("post_commit_nudge"))
         prev_recon = hook_state.get("recon") if isinstance(hook_state.get("recon"), dict) else None
+        prev_session_injected = (
+            list(hook_state.get("session_injected_keys") or [])
+            if total_turns <= LONG_CHAT_TURN_NUDGE
+            else []
+        )
         prev_task_polls = (
             {
                 str(k): float(v)
@@ -250,6 +267,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "plane2_audit_injected": False,
             "plugin_sync_injected": False,
             "btw_injected": False,
+            "session_injected_keys": prev_session_injected,
             "task_status_polls": prev_task_polls,
             "ps_polls": prev_ps_polls,
         }
@@ -284,15 +302,38 @@ def _run_pre_invocation_inner(t0: float) -> None:
     doc_mcps = detect_doc_mcps(profile)
     doc_targets = list(triage.get("doc_lookup_targets") or [])
     doc_hint_line = format_doc_mcp_hint(doc_targets, doc_mcps)
-    bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1500)
+    from schema_migrations import resolve_token_budget_config  # noqa: E402
 
-    def _append_within_budget(line: str) -> bool:
+    tb_cfg = resolve_token_budget_config(profile)
+    default_pre_cap = int(tb_cfg.get("pre_invocation_max_chars") or 1250)
+    repeat_pre_cap = int(tb_cfg.get("pre_invocation_repeat_max_chars") or 300)
+    dedup_enabled = bool(tb_cfg.get("session_dedup_enabled", True))
+    repo_key = str(repo.resolve())
+    if hook_state.get("session_repo") and hook_state.get("session_repo") != repo_key:
+        hook_state["session_injected_keys"] = []
+    hook_state["session_repo"] = repo_key
+    session_seen: set[str] = set(str(k) for k in (hook_state.get("session_injected_keys") or [])) if dedup_enabled else set()
+    env_bloat_override = os.environ.get("PLANNER_INJECTION_BLOAT_CHARS")
+    bloat_limit = int(env_bloat_override or default_pre_cap)
+
+    def _is_session_seen(key: str) -> bool:
+        return dedup_enabled and (key in session_seen)
+
+    def _mark_session_seen(key: str) -> None:
+        if dedup_enabled and key:
+            session_seen.add(key)
+
+    def _append_within_budget(line: str, *, session_key: str = "") -> bool:
         if not line:
+            return False
+        if session_key and _is_session_seen(session_key):
             return False
         cur_chars = sum(len(x) + 1 for x in inject_lines)
         if cur_chars + len(line) > bloat_limit:
             return False
         inject_lines.append(line)
+        if session_key:
+            _mark_session_seen(session_key)
         return True
 
     if eco_mode and not hook_state.get("eco_injected"):
@@ -381,16 +422,26 @@ def _run_pre_invocation_inner(t0: float) -> None:
             from complexity_triage import extract_auto_reqs  # noqa: E402
 
             auto_reqs = [] if mode_src == "auto:native_plan_turn" else extract_auto_reqs(last_input, max_reqs=6, structured_only=True)
-            jits = _compact_domain_checklists(domains, profile, max_items=4)
+            proj_doms = set((profile.get("domains") or {}).keys()) if isinstance(profile.get("domains"), dict) else set()
+            if dedup_enabled and bool(session_seen) and proj_doms:
+                unseen_doms = [d for d in domains if d in proj_doms and not _is_session_seen(f"jit:{d}")]
+            else:
+                unseen_doms = [d for d in (domains or ["general"]) if not _is_session_seen(f"jit:{d}")]
+            jits = _compact_domain_checklists(unseen_doms, profile, max_items=3, max_chars=260) if unseen_doms else []
             triage_src = str(triage.get("source") or "prompt")
             src_tag = "(ctx)" if triage_src.startswith("context_") else ("(plan)" if triage_src == "exit_plan_mode" else "")
+            is_delta_turn = dedup_enabled and bool(session_seen) and not unseen_doms
+            if is_delta_turn and not env_bloat_override:
+                bloat_limit = min(bloat_limit, repeat_pre_cap)
+            delta_tag = "|delta" if is_delta_turn else ""
             inject_lines.append(
-                f"[Triage|T{tier}{src_tag}|mode={mode_tag}|dom={dom_str}]"
+                f"[Triage|T{tier}{src_tag}|mode={mode_tag}|dom={dom_str}{delta_tag}]"
             )
             if auto_reqs:
-                inject_lines.append("REQS|" + " | ".join(auto_reqs))
-            if jits:
-                inject_lines.append("JIT|" + " ; ".join(jits))
+                _append_within_budget("REQS|" + " | ".join(auto_reqs))
+            if jits and _append_within_budget("JIT|" + " ; ".join(jits)):
+                for d in unseen_doms:
+                    _mark_session_seen(f"jit:{d}")
         else:
             skill_md = PLUGIN_ROOT / "skills" / "dynamic-planner" / "SKILL.md"
             inject_lines.append(
@@ -399,7 +450,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             )
         if doc_hint_line and not hook_state.get("doc_hint_injected"):
             hook_state["doc_hint_injected"] = True
-            inject_lines.append(doc_hint_line)
+            _append_within_budget(doc_hint_line)
         from schema_migrations import resolve_delegation_config  # noqa: E402
 
         del_cfg = resolve_delegation_config(profile)
@@ -415,18 +466,20 @@ def _run_pre_invocation_inner(t0: float) -> None:
                 f"DELEGATE|pace={triage.get('pace_mode') or 'turbo'}|parallel 1-shot cubicles(!cmd-echo,1-verify-owner,!poll(!schedule/!manage_task-loop))|"
                 f"Google-only(L0:flash_lite|L1-2:flash|L3:pro){sub_cue}|reply<={max_lines}L"
             )
-            _append_within_budget(del_line)
+            _append_within_budget(del_line, session_key="delegate")
         if not eco_mode:
             if tier == 2:
-                _append_within_budget("DISC|AUDIT_EXISTING: grep/inspect partial impls pre-create (!duplicate)")
+                _append_within_budget("DISC|AUDIT_EXISTING: grep/inspect partial impls pre-create (!duplicate)", session_key="disc:T2")
             elif tier >= 3:
                 _append_within_budget(
-                    "DISC|AUDIT_EXISTING: grep/inspect partial impls pre-create (!duplicate) ; "
-                    "CURATE_OSS: evaluate battle-tested OSS libs/standards pre-custom complex algos"
+                    "SOTA_PREFLIGHT|LIVE_SOTA(web/MCP !stale defaults) -> OMNISCIENT_FUSION(reuse owned signals/hw; joint solver > serial chain) "
+                    "-> PLANE_SPLIT(offline | RT hot-path 0-alloc | async control) -> AI_VS_DETERMINISTIC -> GOLDEN_BENCH(offline math test pre-prod)",
+                    session_key="sota_preflight",
                 )
                 _append_within_budget(
-                    "SOTA_PREFLIGHT|LIVE_SOTA(web/MCP !stale defaults) -> OMNISCIENT_FUSION(reuse owned signals/hw; joint solver > serial chain) "
-                    "-> PLANE_SPLIT(offline | RT hot-path 0-alloc | async control) -> AI_VS_DETERMINISTIC -> GOLDEN_BENCH(offline math test pre-prod)"
+                    "DISC|AUDIT_EXISTING: grep/inspect partial impls pre-create (!duplicate) ; "
+                    "CURATE_OSS: evaluate battle-tested OSS libs/standards pre-custom complex algos",
+                    session_key="disc:T3",
                 )
 
     # Runaway read guard (strict mode only)
@@ -495,7 +548,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
         if _append_within_budget(hyg_line):
             hook_state["hygiene_injected"] = True
 
-    # SOTA Blueprint directive (after SOTA_PREFLIGHT|, before LENS|; suppressed in ECO_MODE)
+    # SOTA Blueprint directive (prioritized BEFORE QA_GATE / LENS; session-deduped)
     bp_fmt = str(triage.get("recommended_blueprint_format") or ("mini" if tier <= 1 else ("compact" if tier == 2 else "full")))
     if bp_fmt == "none":
         bp_fmt = "mini" if tier <= 1 else ("compact" if tier == 2 else "full")
@@ -509,8 +562,9 @@ def _run_pre_invocation_inner(t0: float) -> None:
             f"[BLUEPRINT_MODE|SOTA] Follow `skills/sota-blueprint/SKILL.md` (`fmt={bp_fmt}`: "
             f"tiered Blind-Morphogenesis + RedTeam) && run `plan_tool.py blueprint {{match|classify|init --format {bp_fmt}|lint --strict}}` (>=85)."
         )
-        if _append_within_budget(bp_line):
+        if _append_within_budget(bp_line, session_key=f"bp_mode:{bp_fmt}"):
             hook_state["blueprint_injected"] = True
+            _mark_session_seen("bp_first")
     elif (
         triage.get("blueprint_required_by_policy")
         and not triage.get("blueprint_opt_out")
@@ -522,10 +576,39 @@ def _run_pre_invocation_inner(t0: float) -> None:
             f"[BLUEPRINT_FIRST|SOTA] Policy requires `{bp_fmt}` Blueprint (`>=85/100 --strict`) BEFORE edits "
             f"(skip ONLY on user opt-out/eco) -> `plan_tool.py blueprint match` (amend active) OR `init --format {bp_fmt} && lint --strict`."
         )
-        if _append_within_budget(bp_first_line):
+        if _append_within_budget(bp_first_line, session_key="bp_first"):
             hook_state["blueprint_injected"] = True
 
-    # Cold-Context Adversarial QA Gate cue (when enabled in profile on T2+/ship turns; suppressed in ECO_MODE)
+    # Domain-scoped compounding lessons (prioritized BEFORE secondary cues; per-lesson session dedup)
+    if not is_btw_short and not eco_mode and not hook_state.get("lessons_injected") and tier >= 1:
+        try:
+            import error_learner  # noqa: E402
+
+            el_cfg = error_learner.load_error_learning_config(repo)
+            lessons_file = repo / str(el_cfg.get("lessons_file") or ".agents/docs/BUILD_LESSONS.md")
+            if lessons_file.is_file():
+                rel_lessons = error_learner.select_relevant_lessons(
+                    lessons_file,
+                    list(triage.get("detected_domains") or []),
+                    prompt_text=last_input,
+                    max_items=5,
+                )
+                unseen_lessons = [
+                    ls for ls in rel_lessons if not _is_session_seen(f"lesson:{getattr(ls, 'lesson_id', '')}")
+                ]
+                avail_chars = bloat_limit - sum(len(x) + 1 for x in inject_lines)
+                if unseen_lessons and avail_chars >= 48:
+                    les_line = error_learner.format_injected_lessons_line(unseen_lessons, max_chars=min(300, avail_chars))
+                    if les_line and _append_within_budget(les_line):
+                        hook_state["lessons_injected"] = True
+                        for ls in unseen_lessons:
+                            lid = str(getattr(ls, "lesson_id", "") or "").strip()
+                            if lid and lid in les_line:
+                                _mark_session_seen(f"lesson:{lid}")
+        except Exception:
+            pass
+
+    # Cold-Context Adversarial QA Gate cue (session-deduped; suppressed in ECO_MODE)
     from schema_migrations import resolve_adversarial_qa_config  # noqa: E402
 
     qa_cfg = resolve_adversarial_qa_config(profile)
@@ -542,7 +625,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             f"GEOM={int(qa_cfg.get('max_geom', 0))},EXIT={int(qa_cfg.get('max_exit_crash_new', 0))},"
             f"P95<={float(qa_cfg.get('max_frame_p95_ms', 12.0)):.0f}ms."
         )
-        if _append_within_budget(qa_line):
+        if _append_within_budget(qa_line, session_key="qa_gate"):
             hook_state["qa_gate_injected"] = True
 
     if (
@@ -555,7 +638,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "[WAVE_ORCH|MAX_PAR] Run `plan_tool.py blueprint schedule <BP> --mode parallel --emit-workflow` -> "
             "exec via 1 `run_workflow` (or D0->D1 Wave-Captain->D2 Leaf w/ `[LEASE:]`) -> O(1) root ctx + 1-verify-owner epoch barrier."
         )
-        if _append_within_budget(wo_line):
+        if _append_within_budget(wo_line, session_key="wave_orch"):
             hook_state["wave_orch_injected"] = True
 
     # Event-triggered Plane-2 Cold-Context pro[L3] Meta-Governance Auditor (<=4/wk, 0 chars when idle)
@@ -574,16 +657,19 @@ def _run_pre_invocation_inner(t0: float) -> None:
                     f"[PLANE2_META_AUDIT|pro[L3]|triggers={','.join(p2['triggers'][:2])}|budget={p2['used_7d']}/{p2['max_per_week']}] "
                     "Run `plan_tool.py coherence prompt` -> ratchet Plane-1 + T0-T2 or timed WONTFIX(owner+expires_ver)."
                 )
-                if _append_within_budget(p2_line):
+                if _append_within_budget(p2_line, session_key="plane2_audit"):
                     hook_state["plane2_audit_injected"] = True
         except Exception:
             pass
 
-    # Domain lenses (1-line active-domain critique, suppressed in ECO_MODE & within bloat budget)
+    # Domain lenses (1-line active-domain critique, session-deduped & within bloat budget; never spills onto repeat turns)
     if not is_btw_short and not eco_mode and not plan_ready and not hook_state.get("lens_injected") and tier >= 1:
-        lens_line = _compact_domain_lenses(list(triage.get("detected_domains") or []), profile)
+        unseen_lens_doms = [d for d in (triage.get("detected_domains") or []) if not _is_session_seen(f"lens:{d}")]
+        lens_line = _compact_domain_lenses(unseen_lens_doms, profile) if unseen_lens_doms else ""
         if lens_line and _append_within_budget(lens_line):
             hook_state["lens_injected"] = True
+        for d in unseen_lens_doms:
+            _mark_session_seen(f"lens:{d}")
 
     # Domain-scoped compounding lessons (<=5 relevant rules, suppressed in ECO_MODE & within bloat budget)
     if not is_btw_short and not eco_mode and not hook_state.get("lessons_injected") and tier >= 1:
@@ -610,7 +696,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
     # Direct doc-lookup routing for Tier 0/1 technical queries (once per turn, suppressed in ECO_MODE)
     if not is_btw_short and not eco_mode and doc_hint_line and not hook_state.get("doc_hint_injected"):
         hook_state["doc_hint_injected"] = True
-        inject_lines.append(doc_hint_line)
+        _append_within_budget(doc_hint_line)
 
     # Event-driven 1-time classification for unseen models (never on known/cached/seeded models)
     if mode_src == "auto:unseen" and model_name and not eco_mode:
@@ -622,10 +708,12 @@ def _run_pre_invocation_inner(t0: float) -> None:
                 inject_lines.append(cls_prompt)
                 record_telemetry("model_mode_classify_prompt", {"model": mkey})
 
-    # Event-driven auto-migration nudge for outdated project docs (once per turn, Neon-handoff-safe, suppressed in ECO_MODE)
+    # Event-driven auto-migration nudge for outdated project docs (T1+, session-deduped, suppressed in ECO_MODE)
     if (
-        not eco_mode
+        tier >= 1
+        and not eco_mode
         and not hook_state.get("docs_migrate_nudged")
+        and not _is_session_seen("docs_auto_migrate")
         and is_real_project_root(repo)
         and (repo / ".agents" / "planner_profile.json").is_file()
     ):
@@ -636,12 +724,14 @@ def _run_pre_invocation_inner(t0: float) -> None:
             cur_dv = int(up_info.get("current_docs_format") or 0)
             tgt_dv = int(up_info.get("target_docs_format") or 1)
             record_telemetry("docs_auto_migrate_prompt", {"files": len(pending_docs), "from": cur_dv, "to": tgt_dv})
-            inject_lines.append(
+            mig_line = (
                 f"[DOCS_AUTO_MIGRATE|v{cur_dv}->v{tgt_dv}|files={','.join(pending_docs)}]\n"
                 f"ACT|Legacy project docs detected -> BEFORE/WITH this task, read (<=250L slices if >150L) && losslessly convert listed files to symbolic telegraphic EN "
                 f"(`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`, verbatim `path:line`/`symbol()`/dates/invariants, include `STYLE|lossless symbolic telegraphic EN ONLY` header && keep exact `## Pending Extra Requests`/`## Completed Requests` headings), "
                 f"then stamp `python3 {plan_cli} docs-migrated`."
             )
+            inject_lines.append(mig_line)
+            _mark_session_seen("docs_auto_migrate")
 
     # Long-chat quota nudge (~25 turns or post-commit, suppressed in ECO_MODE)
     total_turns = int(hook_state.get("total_turns") or 1)
@@ -656,6 +746,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             f"[QUOTA TIP|turns={total_turns}] Run `python3 {plan_cli} handoff --summary \"...\" --next \"...\"` (symbolic telegraphic EN) && start fresh chat to cut context cost."
         )
 
+    hook_state["session_injected_keys"] = sorted(session_seen)
     save_json(hook_file, hook_state)
 
     if not inject_lines:

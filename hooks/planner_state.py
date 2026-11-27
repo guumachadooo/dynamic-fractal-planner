@@ -527,7 +527,7 @@ def resolve_repo_root(payload: dict[str, Any]) -> Path:
 
 
 def resolve_artifact_dir(payload: dict[str, Any]) -> Path:
-    raw = (payload.get("artifactDirectoryPath") or "").strip()
+    raw = (payload.get("artifactDirectoryPath") or os.environ.get("PLANNER_ARTIFACT_DIR") or "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
     conv_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(payload.get("conversationId") or "default")) or "default"

@@ -1072,6 +1072,44 @@ def cmd_coherence(args: argparse.Namespace, ws_root: Path) -> int:
     return coherence_engine.main(sub_argv)
 
 
+def cmd_token_audit(args: argparse.Namespace, ws_root: Path) -> int:
+    """Delegate to Zero-Accumulation Token-Tax & Overhead Auto-Governor (`token_governor.py audit`)."""
+    import token_governor  # noqa: E402
+
+    sub_argv = ["--workspace", str(ws_root), "audit"]
+    if getattr(args, "no_hooks", False):
+        sub_argv.append("--no-hooks")
+    if getattr(args, "json", False):
+        sub_argv.append("--json")
+    return token_governor.main(sub_argv)
+
+
+def cmd_closeout(args: argparse.Namespace, ws_root: Path) -> int:
+    """Delegate to 1-shot batched post-finish closeout (`token_governor.py closeout`)."""
+    import token_governor  # noqa: E402
+
+    sub_argv = ["--workspace", str(ws_root), "closeout"]
+    for flag, attr in (
+        ("--summary", "summary"),
+        ("--next", "next"),
+        ("--roadmap", "roadmap"),
+        ("--wave", "wave"),
+        ("--compound-note", "compound_note"),
+    ):
+        val = getattr(args, attr, "")
+        if val:
+            sub_argv.extend([flag, str(val)])
+    for arch in getattr(args, "archive", None) or []:
+        sub_argv.extend(["--archive", str(arch)])
+    if getattr(args, "no_sync", False):
+        sub_argv.append("--no-sync")
+    if getattr(args, "no_verify", False):
+        sub_argv.append("--no-verify")
+    if getattr(args, "json", False):
+        sub_argv.append("--json")
+    return token_governor.main(sub_argv)
+
+
 def cmd_host(args: argparse.Namespace, ws_root: Path) -> int:
     """Delegate multi-host boot, status, matrix audit, or tool classification to `host_context.py`."""
     import host_context  # noqa: E402
@@ -1265,6 +1303,21 @@ def main() -> None:
     )
     p_coh.add_argument("extra_args", nargs=argparse.REMAINDER)
 
+    p_tok = sub.add_parser("token-audit", help="Measure hook payload & always-loaded doc token overhead (`--no-hooks`, `--json`).")
+    p_tok.add_argument("--no-hooks", action="store_true")
+    p_tok.add_argument("--json", action="store_true")
+
+    p_cls = sub.add_parser("closeout", help="1-shot batched post-finish closeout: sync + static verify + gov-audit + token-audit + handoff.")
+    p_cls.add_argument("--summary", default="")
+    p_cls.add_argument("--next", default="")
+    p_cls.add_argument("--roadmap", default="")
+    p_cls.add_argument("--wave", default="")
+    p_cls.add_argument("--archive", action="append")
+    p_cls.add_argument("--compound-note", default="")
+    p_cls.add_argument("--no-sync", action="store_true")
+    p_cls.add_argument("--no-verify", action="store_true")
+    p_cls.add_argument("--json", action="store_true")
+
     for h_cmd, h_help in (
         ("host-boot", "Run unified host-aware session boot (Antigravity local vs AI Studio cloud)."),
         ("host-status", "Show detected host capabilities, matrix view, and baton state."),
@@ -1322,6 +1375,10 @@ def main() -> None:
         raise SystemExit(cmd_qa(args, ws_root))
     if args.cmd == "coherence":
         raise SystemExit(cmd_coherence(args, ws_root))
+    if args.cmd == "token-audit":
+        raise SystemExit(cmd_token_audit(args, ws_root))
+    if args.cmd == "closeout":
+        raise SystemExit(cmd_closeout(args, ws_root))
     if args.cmd in ("host-boot", "host-status", "host-audit", "host-classify"):
         raise SystemExit(cmd_host(args, ws_root))
 

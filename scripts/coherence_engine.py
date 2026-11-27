@@ -169,8 +169,8 @@ def _default_deprecated_entries(repo: Path) -> list[dict[str, str]]:
         return []
     return [
         {"id": "legacy-live-phone-bridge", "stage": "TOMBSTONE", "path": ".agents/scripts/live_phone_bridge.py", "replacement": "omni_agent.py cavernize-cmd", "owner": "cavern", "expires_ver": "2.22.0"},
-        {"id": "flight-recorder-recover-alias", "stage": "GRACE", "path": "cli:flight_recorder.py recover", "replacement": "flight_recorder.py resume", "owner": "cavern", "expires_ver": "2.24.0"},
-        {"id": "legacy-error-learner-wrapper", "stage": "WARN", "path": ".agents/scripts/error_learner.py", "replacement": "plan_tool.py learn", "owner": "dfp", "expires_ver": "2.24.0"},
+        {"id": "flight-recorder-recover-alias", "stage": "GRACE", "path": "cli:flight_recorder.py recover", "replacement": "flight_recorder.py resume", "owner": "cavern", "expires_ver": "2.25.0"},
+        {"id": "legacy-error-learner-wrapper", "stage": "WARN", "path": ".agents/scripts/error_learner.py", "replacement": "plan_tool.py learn", "owner": "dfp", "expires_ver": "2.25.0"},
     ]
 
 
@@ -262,7 +262,8 @@ def render_coherence_hub(repo: Path, *, local_only: bool = True, dep_entries: li
         "| Multi-Host Matrix | `.agents/host_matrix.json` (`strict_coverage=true`) | `host_context.py`, `verify_universal.py`, `plan_tool.py host-*` |",
         "| Triad Federation | `.agents/federation.json` | `repo_federation.py`, `self_evolve.py`, `verify_universal.py`, `coherence_engine.py` |",
         "| Profile Schema | `scripts/schema_migrations.py:migrate_profile` | `planner_state.py`, `blueprint_hub.py`, `complexity_triage.py` |",
-        "| Living Docs Parity | `<!--AUTO:START:<id>:sha256=...-->` | `skills/*/SKILL.md`, `.agents/docs/EXTERNAL_AI_ONBOARDING.md` |", "",
+        "| Living Docs Parity | `<!--AUTO:START:<id>:sha256=...-->` | `skills/*/SKILL.md`, `.agents/docs/EXTERNAL_AI_ONBOARDING.md` |",
+        "| Token-Tax Governor | `scripts/token_governor.py` + `token_budget` | `planner_{session_start,pre_invocation,guard_files,stop}.py`, `verify_universal.py`, `plan_tool.py` |", "",
         "## 2. DEPRECATED_REGISTRY (`WARN -> GRACE -> TOMBSTONE`)",
         "<!-- Format: DEP|<id>|<stage>|<path_or_surface>|<replacement>|owner=<owner>|expires_ver=<semver> -->",
     ]
@@ -279,10 +280,9 @@ def render_coherence_hub(repo: Path, *, local_only: bool = True, dep_entries: li
     for alias, info in sorted((fleet.get("repos") or {}).items()):
         if info.get("mounted"):
             lines.append(f"REPO|{alias}|plugin=v{info.get('plugin_ver') or '?'}({info.get('plugin_sha') or '-'})|profile=v{info.get('profile_schema')}/v{info.get('profile_plugin_ver') or '?'}|strict={str(bool(info.get('host_matrix_strict'))).lower()}|fed={info.get('fed_sha') or '-'}")
-    import meta_governance as _mg  # noqa: E402
-    wf_rows = _mg.parse_wontfix_registry(repo / COHERENCE_HUB_REL)
-    anc = _mg.verify_living_anchors(repo)
-    lines.extend(["", "## 5. CONSTITUTION_AND_META_GOV", f"CONSTITUTION|T0=immutable_canary|T1=ssot_parity|T2=observe_telemetry|anchors={anc['total_anchors']}(drifted={anc['drifted_count']})|plane2_cap={_mg.PLANE2_MAX_PER_WEEK}/wk"])
+    import meta_governance as _mg, token_governor as _tg  # noqa: E402
+    wf_rows, anc, tok_cfg = _mg.parse_wontfix_registry(repo / COHERENCE_HUB_REL), _mg.verify_living_anchors(repo), _tg.resolve_token_budget_config(_read_json(repo / ".agents" / "planner_profile.json"))
+    lines.extend(["", "## 5. CONSTITUTION_AND_META_GOV", f"CONSTITUTION|T0=immutable_canary|T1=ssot_parity|T2=observe_telemetry|anchors={anc['total_anchors']}(drifted={anc['drifted_count']})|plane2_cap={_mg.PLANE2_MAX_PER_WEEK}/wk", f"TOKEN_BUDGET|ss<={tok_cfg['session_start_max_chars']}c|pre<={tok_cfg['pre_invocation_max_chars']}c|rep<={tok_cfg['pre_invocation_repeat_max_chars']}c|dedup={str(bool(tok_cfg['session_dedup_enabled'])).lower()}|ratchet={str(bool(tok_cfg['ratchet_enabled'])).lower()}"])
     lines.extend(f"WONTFIX|{r['id']}|{r['reason']}|owner={r['owner']}|expires_ver={r['expires_ver']}" for r in wf_rows)
     return "\n".join(lines[:150]) + "\n"
 
@@ -330,7 +330,7 @@ def run_coherence_check(repo: Path, *, local_only: bool = True, profile: dict[st
     warns.extend(fleet["warns"])
     elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
     stats = {
-        "ssot": 6, "domains": len(dom.get("triage_domains") or {}) + len(dom.get("blueprint_domains") or {}),
+        "ssot": 7, "domains": len(dom.get("triage_domains") or {}) + len(dom.get("blueprint_domains") or {}),
         "verify_checks": len(v_checks), "auto_checked": auto_res["checked"],
         "auto_drifted": len(auto_res["drifted"]), "deprecated": len(deps), "fleet": fleet["status"],
     }

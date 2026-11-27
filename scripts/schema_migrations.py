@@ -175,6 +175,48 @@ def resolve_adversarial_qa_config(profile: dict[str, Any] | None = None) -> dict
             merged[key] = copy.deepcopy(val)
     return merged
 
+
+DEFAULT_TOKEN_BUDGET_CONFIG: dict[str, Any] = {
+    "enabled": True,
+    "ratchet_enabled": False,
+    "session_start_max_chars": 1200,
+    "pre_invocation_max_chars": 1250,
+    "pre_invocation_t0_max_chars": 0,
+    "pre_invocation_repeat_max_chars": 300,
+    "session_dedup_enabled": True,
+    "max_closeout_pass_lines": 6,
+    "doc_caps": {
+        "AGENTS.md": 16000,
+        ".agents/docs/HANDOFF.md": 1400,
+        ".agents/docs/PLANS_HUB.md": 16000,
+        ".agents/docs/COHERENCE_HUB.md": 4500,
+        ".agents/plugins/dynamic-fractal-planner/rules/AGENTS.md": 12000,
+        ".agents/plugins/dynamic-fractal-planner/skills/dynamic-planner/SKILL.md": 9500,
+        ".agents/plugins/dynamic-fractal-planner/skills/sota-blueprint/SKILL.md": 9500,
+    },
+    "doc_baselines": {},
+}
+
+
+def resolve_token_budget_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Merge profile `token_budget` overrides cleanly onto DEFAULT_TOKEN_BUDGET_CONFIG."""
+    merged = copy.deepcopy(DEFAULT_TOKEN_BUDGET_CONFIG)
+    raw_tb = profile.get("token_budget") if isinstance(profile, dict) else None
+    if not isinstance(raw_tb, dict):
+        return merged
+    for key, val in raw_tb.items():
+        if val is None:
+            continue
+        if key in ("doc_caps", "doc_baselines") and isinstance(val, dict):
+            sub = copy.deepcopy(merged.get(key) or {})
+            for sk, sv in val.items():
+                if sv is not None:
+                    sub[str(sk)] = int(sv)
+            merged[key] = sub
+        else:
+            merged[key] = copy.deepcopy(val)
+    return merged
+
 MigratorFn = Callable[[dict[str, Any]], dict[str, Any]]
 
 

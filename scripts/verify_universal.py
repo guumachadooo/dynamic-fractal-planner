@@ -1040,6 +1040,30 @@ def check_meta_gov_t0_anchors(
         warns.append(f"LIVING_ANCHOR_DRIFT|{dr['id']}|missing={','.join(dr['missing'][:4])}")
 
 
+def check_token_overhead_budget(
+    repo: Path,
+    files: list[str],
+    profile: dict[str, Any],
+    fails: list[str],
+    warns: list[str],
+    scan_all: bool = False,
+) -> None:
+    """Enforce zero-accumulation token/char ratchet on always-loaded & boot governance docs."""
+    try:
+        import token_governor  # noqa: E402
+    except Exception:
+        return
+    token_governor.check_token_overhead_budget(
+        repo,
+        profile,
+        fails,
+        warns,
+        files=files,
+        scan_all=scan_all,
+        measure_hooks=False,
+    )
+
+
 VERIFY_CHECKS: list[dict[str, Any]] = []
 
 
@@ -1184,6 +1208,11 @@ def _vc_coherence_local(ctx: dict[str, Any]) -> None:
 @verify_check("meta_gov_t0_anchors", scope="static", cost_ms=20)
 def _vc_meta_gov_t0_anchors(ctx: dict[str, Any]) -> None:
     check_meta_gov_t0_anchors(ctx["repo"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("token_overhead_budget", scope="static", cost_ms=25)
+def _vc_token_overhead_budget(ctx: dict[str, Any]) -> None:
+    check_token_overhead_budget(ctx["repo"], ctx["files"], ctx["profile"], ctx["fails"], ctx["warns"], scan_all=ctx["scan_all"])
 
 
 def run_static_checks(

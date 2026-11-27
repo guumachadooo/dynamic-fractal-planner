@@ -80,14 +80,9 @@ def main() -> None:
                     f"Active plan incomplete ({' | '.join(parts)}) -> run `plan_tool.py finish --evidence \"...\"` or `pause`."
                 )
 
-        if bool(hook_state.get("needs_plugin_tests")):
-            plugin_tests = PLUGIN_ROOT / "tests" / "run_plugin_tests.py"
-            verify_cli = SCRIPTS_DIR / "verify_universal.py"
-            reasons.append(
-                f"Plugin edited without passing tests -> run `python3 {verify_cli} --plugin-tests --git-stat` (runs `{plugin_tests}`)."
-            )
+        needs_pt = bool(hook_state.get("needs_plugin_tests"))
 
-        # Silent in-process static auto-verify (<0.5s, never heavy build/plugin tests)
+        # Silent in-process static auto-verify (<0.5s, 0 LLM tokens, never heavy build/plugin tests)
         if bool(hook_state.get("needs_verify")):
             from verify_universal import run_static_checks  # noqa: E402
 
@@ -99,10 +94,21 @@ def main() -> None:
                 hook_state["last_verify_ts"] = time.time()
                 save_json(hook_file, hook_state)
 
+        verify_cli = SCRIPTS_DIR / "verify_universal.py"
         if bool(hook_state.get("last_build_failed")):
             reasons.append("Last build/test failed -> fix errors && re-run passing build/tests (or inform user).")
+            if needs_pt:
+                reasons.append(f"Plugin edited without passing tests -> include `--plugin-tests` in `python3 {verify_cli} --build --plugin-tests --git-stat`.")
+        elif bool(hook_state.get("needs_build")) and needs_pt:
+            reasons.append(
+                f"Code & plugin modified without build/tests -> run 1 batched cmd: `python3 {verify_cli} --build --plugin-tests --git-stat`."
+            )
+        elif needs_pt:
+            plugin_tests = PLUGIN_ROOT / "tests" / "run_plugin_tests.py"
+            reasons.append(
+                f"Plugin edited without passing tests -> run `python3 {verify_cli} --plugin-tests --git-stat` (runs `{plugin_tests}`)."
+            )
         elif bool(hook_state.get("needs_build")):
-            verify_cli = SCRIPTS_DIR / "verify_universal.py"
             reasons.append(f"Compiled code modified without build -> run `python3 {verify_cli} --build` first.")
 
         if hook_state.get("code_files_edited"):

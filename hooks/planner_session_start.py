@@ -272,15 +272,22 @@ def main() -> None:
                     if archive_refs:
                         bridge += "|archive=" + ",".join(a for a in archive_refs if a)[:120]
                     lines.append(bridge)
-                    compact_body = "\n".join(body_lines)
-                    if len(compact_body) > 450:
-                        compact_body = compact_body[:447] + "..."
+                    actionable = [
+                        ln.strip()
+                        for ln in body_lines
+                        if ln.strip()
+                        and not ln.strip().startswith("#")
+                        and not ln.strip().startswith("ts=")
+                    ]
+                    compact_body = " | ".join(actionable)
+                    if len(compact_body) > 220:
+                        compact_body = compact_body[:217] + "..."
                     if compact_body:
-                        lines.append("HANDOFF|\n" + compact_body)
+                        lines.append("HANDOFF|" + compact_body)
                 else:
                     compact_body = "\n".join(h_lines)
-                    if len(compact_body) > 700:
-                        compact_body = compact_body[:697] + "..."
+                    if len(compact_body) > 420:
+                        compact_body = compact_body[:417] + "..."
                     lines.append("HANDOFF|\n" + compact_body)
 
         hook_state = load_json(hook_file)
@@ -289,6 +296,7 @@ def main() -> None:
             r_scope = str(rec.get("scope") or "full")
             lines.append(f"RECON|ACTIVE|scope={r_scope}|taxonomy=[BUG]|[UNWIRED]|[STRUCTURAL]|[UPGRADE] @ path:line")
 
+        has_agents_md = (repo / "AGENTS.md").is_file()
         mem_candidates = []
         for rel in (
             ".agents/docs/PLANS_HUB.md",
@@ -300,7 +308,7 @@ def main() -> None:
         ):
             if rel not in mem_candidates and (repo / rel).is_file():
                 mem_candidates.append(rel)
-        if mem_candidates:
+        if mem_candidates and not has_agents_md:
             lines.append("DOCS|" + ",".join(f"`{m}`" for m in mem_candidates))
 
         try:
@@ -326,7 +334,7 @@ def main() -> None:
             pass
 
         evo_cfg = profile.get("plugin_evolution") or {}
-        if isinstance(evo_cfg, dict) and evo_cfg.get("enabled"):
+        if isinstance(evo_cfg, dict) and evo_cfg.get("enabled") and not has_agents_md:
             plug_sync_rel = str(evo_cfg.get("plugin_sync_doc") or ".agents/plugins/dynamic-fractal-planner/.agents/docs/EXTERNAL_AI_SYNC.md")
             lines.append(
                 f"EVOLVE|AUTO_DUAL_SCOPE: reusable -> plugin (`{plug_sync_rel}`) && app-only -> host"
@@ -427,9 +435,14 @@ def main() -> None:
         except Exception:
             pass
 
-        lines.append(f"TOOLS|plan=`python3 {plan_ref}`|verify=`python3 {verify_ref}`|board=`{task_md}`")
+        if not has_agents_md:
+            lines.append(f"TOOLS|plan=`python3 {plan_ref}`|verify=`python3 {verify_ref}`|board=`{task_md}`")
 
-        bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1800)
+        from schema_migrations import resolve_token_budget_config  # noqa: E402
+
+        tb_cfg = resolve_token_budget_config(profile)
+        default_ss_cap = int(tb_cfg.get("session_start_max_chars") or 1200)
+        bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or default_ss_cap)
         msg_text = "\n".join(lines)
         if len(msg_text) > bloat_limit:
             trimmed: list[str] = []
@@ -439,12 +452,12 @@ def main() -> None:
                     ln = "COMMITS|" + " ; ".join(parts)
                 elif ln.startswith("DIRTY|") and len(ln) > 80:
                     ln = f"DIRTY|{len(dirty_lines)} dirty file(s)"
-                elif ln.startswith("WAVE_BRIDGE|"):
+                elif ln.startswith("WAVE_BRIDGE|") and len(ln) > 160:
                     rm_s = (roadmap_ref.split("(", 1)[0].strip() or "-")[:60]
                     wv_s = (wave_ref or "-")[:70]
                     ln = f"WAVE_BRIDGE|roadmap={rm_s}|wave={wv_s}"
-                elif ln.startswith("HANDOFF|\n") and len(ln) > 200:
-                    ln = ln[:197] + "..."
+                elif ln.startswith("HANDOFF|") and len(ln) > 170:
+                    ln = ln[:167] + "..."
                 elif ln.startswith("DOCS|") and len(ln) > 95:
                     ln = "DOCS|" + ",".join(Path(m).name for m in mem_candidates)
                 elif ln.startswith("EVOLVE|"):
@@ -455,10 +468,10 @@ def main() -> None:
             if len(msg_text) > bloat_limit:
                 trimmed2: list[str] = []
                 for ln in lines:
-                    if ln.startswith(("ENV|", "WATCH|")) and len(ln) > 110:
-                        ln = ln[:107] + "..."
-                    elif ln.startswith("HANDOFF|\n") and len(ln) > 130:
-                        ln = ln[:127] + "..."
+                    if ln.startswith(("ENV|", "WATCH|")) and len(ln) > 95:
+                        ln = ln[:92] + "..."
+                    elif ln.startswith("HANDOFF|") and len(ln) > 120:
+                        ln = ln[:117] + "..."
                     trimmed2.append(ln)
                 lines = trimmed2
                 msg_text = "\n".join(lines)

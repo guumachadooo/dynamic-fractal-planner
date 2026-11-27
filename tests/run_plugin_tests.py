@@ -7597,6 +7597,310 @@ class TestW55_1b_CompoundingLearnerAndRatchet(unittest.TestCase):
             self.assertIn("timeless=OK|fitness_rules=1|monoliths=1", r_ho.stdout)
 
 
+class TestV224TokenOverheadGovernor(unittest.TestCase):
+    """W56.5 (DFP v2.24.0): Zero-Accumulation Token-Tax & Side-Effect Overhead Auto-Governor."""
+
+    def test_session_start_diet_and_contract_preservation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dfp_v224_ss_") as td:
+            repo = Path(td)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / "AGENTS.md").write_text("# Agents\nRules.\n", encoding="utf-8")
+            (repo / ".agents" / "docs" / "HANDOFF.md").write_text(
+                "# Session Handoff\n"
+                "- ts=2026-11-27T10:00:00Z | host=ai-studio-cloud\n"
+                "- summary: Completed structural coherence wave cleanly.\n"
+                "- next: Run next app reform wave.\n"
+                "ROADMAP|.agents/docs/PLANS_HUB.md\n"
+                "WAVE|W56.5\n",
+                encoding="utf-8",
+            )
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 5,
+                        "plugin_version": "2.24.0",
+                        "token_budget": {"enabled": True, "ratchet_enabled": True, "session_start_max_chars": 1200},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rc, err, out = run_hook(
+                "planner_session_start.py",
+                {"workspacePaths": [str(repo)]},
+                env_extra={"PLANNER_ARTIFACT_DIR": str(Path(td) / "art")},
+            )
+            self.assertEqual(rc, 0, err)
+            steps = out.get("injectSteps") or []
+            msg = str(((steps[0].get("systemMessage") or {}).get("systemMessage")) if steps else "")
+            self.assertLessEqual(len(msg), 1200, f"SessionStart exceeded 1200c: {len(msg)}c\n{msg}")
+            self.assertNotIn("\nDOCS|", msg)
+            self.assertNotIn("\nEVOLVE|", msg)
+            self.assertNotIn("\nTOOLS|", msg)
+            self.assertIn("WAVE_BRIDGE|", msg)
+            self.assertIn("HANDOFF|", msg)
+            self.assertIn("COHERENCE|", msg)
+
+    def test_pre_invocation_session_dedup_priority_and_t0_zero(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dfp_v224_pre_") as td:
+            repo = Path(td)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 5,
+                        "plugin_version": "2.24.0",
+                        "blueprint": {"require_by_default": True, "default_min_tier": 1},
+                        "adversarial_qa": {"enabled": True},
+                        "error_learning": {"enabled": True, "lessons_file": ".agents/docs/BUILD_LESSONS.md"},
+                        "token_budget": {
+                            "enabled": True,
+                            "ratchet_enabled": True,
+                            "pre_invocation_max_chars": 1250,
+                            "pre_invocation_repeat_max_chars": 300,
+                            "session_dedup_enabled": True,
+                        },
+                        "domains": {
+                            "dsp-format": {
+                                "module_id": "MOD-DSP",
+                                "module_title": "Spatial DSP",
+                                "keywords": ["dsp", "spatial", "equalizer"],
+                                "lens": "RT Spatial DSP Architect",
+                                "checklist": [
+                                    "Rule 1: zero-GC real-time audio path strictly enforced across all DSP blocks.",
+                                    "Rule 2: strict C# 8.0 compatibility across Cavern core.",
+                                    "Rule 3: pure ISO/ITU/EBU physics only, zero fake EQ curves.",
+                                    "Rule 4: extra verbose line that must be trimmed by compact checklist cap.",
+                                ],
+                            },
+                            "ui-oneui9": {
+                                "module_id": "MOD-UI",
+                                "module_title": "One UI 9",
+                                "keywords": ["ui", "settings", "button"],
+                                "lens": "One UI 9 Designer",
+                                "checklist": ["Use OneUiModalDialog and OneUiSwitch only."],
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (repo / ".agents" / "docs" / "BUILD_LESSONS.md").write_text(
+                "# Lessons\n\n"
+                "### `DSP-001` | Zero-GC RT Audio\n"
+                "- `Category`: `dsp-rt`\n"
+                "- `Codes`: `RT_GC`\n"
+                "- `Keywords`: `dsp, spatial, equalizer`\n"
+                "- `RootCause`: Allocations cause audio glitches.\n"
+                "- `TimelessRule`: Preallocate buffers.\n"
+                "- `DynamicLookup`: Check DSP guide.\n"
+                "- `RemediationHint`: Preallocate buffers.\n"
+                "- `AutoGuard`: fitness_rules:FIT-DSP\n",
+                encoding="utf-8",
+            )
+            art = Path(td) / "art"
+            art_t0 = Path(td) / "art_t0"
+            # T0 Q&A stays strictly 0 chars
+            rc0, err0, out0 = run_hook(
+                "planner_pre_invocation.py",
+                {
+                    "lastUserInput": "what is the current app version?",
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": str(art_t0),
+                    "conversationId": "c-t0",
+                },
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art_t0)},
+            )
+            self.assertEqual(rc0, 0, err0)
+            self.assertEqual(out0.get("injectSteps") or [], [])
+
+            # Turn 1 (T3 DSP): <= 1250c and retains SOTA_PREFLIGHT + BLUEPRINT_FIRST + LESSONS (never starved by JIT)
+            rc1, err1, out1 = run_hook(
+                "planner_pre_invocation.py",
+                {
+                    "lastUserInput": "design a complete multi-wave spatial equalizer dsp architecture with sota blueprint",
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": str(art),
+                    "conversationId": "c-dedup",
+                },
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art)},
+            )
+            self.assertEqual(rc1, 0, err1)
+            msg1 = str((((out1.get("injectSteps") or [{}])[0].get("systemMessage") or {}).get("systemMessage")) or "")
+            self.assertGreater(len(msg1), 0)
+            self.assertLessEqual(len(msg1), 1250, f"Turn 1 exceeded 1250c: {len(msg1)}c\n{msg1}")
+            self.assertIn("SOTA_PREFLIGHT|", msg1)
+            self.assertIn("LESSONS|DSP-001:", msg1)
+
+            # Turn 2 (same domain follow-up): session dedup slashes injection <= 300c (>= 70% savings)
+            rc2, err2, out2 = run_hook(
+                "planner_pre_invocation.py",
+                {
+                    "lastUserInput": "continue implementing the spatial equalizer dsp architecture refactor",
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": str(art),
+                    "conversationId": "c-dedup",
+                },
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art)},
+            )
+            self.assertEqual(rc2, 0, err2)
+            steps2 = out2.get("injectSteps") or []
+            msg2 = str(((steps2[0].get("systemMessage") or {}).get("systemMessage")) if steps2 else "")
+            self.assertLessEqual(len(msg2), 300, f"Turn 2 repeat exceeded 300c: {len(msg2)}c\n{msg2}")
+            self.assertLessEqual(len(msg2), int(len(msg1) * 0.30), f"Expected >=70% dedup savings: t1={len(msg1)}, t2={len(msg2)}")
+
+            # Turn 3 (NEW domain ui-oneui9): injects only the new UI delta, NOT duplicate DELEGATE/DSP
+            rc3, err3, out3 = run_hook(
+                "planner_pre_invocation.py",
+                {
+                    "lastUserInput": "now add the settings button to the ui screen",
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": str(art),
+                    "conversationId": "c-dedup",
+                },
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art)},
+            )
+            self.assertEqual(rc3, 0, err3)
+            steps3 = out3.get("injectSteps") or []
+            msg3 = str(((steps3[0].get("systemMessage") or {}).get("systemMessage")) if steps3 else "")
+            self.assertIn("ui-oneui9", msg3)
+            self.assertNotIn("DELEGATE|", msg3)
+
+    def test_doc_token_ratchet_shift_left_guard_and_stop_batching(self) -> None:
+        import token_governor
+
+        with tempfile.TemporaryDirectory(prefix="dfp_v224_ratchet_") as td:
+            repo = Path(td)
+            (repo / ".agents").mkdir(parents=True)
+            agents_f = repo / "AGENTS.md"
+            agents_f.write_text("A" * 200, encoding="utf-8")
+            prof = {
+                "schema_version": 5,
+                "plugin_version": "2.24.0",
+                "token_budget": {
+                    "enabled": True,
+                    "ratchet_enabled": True,
+                    "doc_caps": {"AGENTS.md": 150},
+                    "doc_baselines": {"AGENTS.md": 200},
+                },
+            }
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps(prof), encoding="utf-8")
+
+            # Baseline exact match passes
+            fails: list[str] = []
+            warns: list[str] = []
+            token_governor.check_doc_token_ratchet(repo, prof, fails, warns, scan_all=True)
+            self.assertEqual(fails, [])
+
+            # Shift-left guard DENIES +1 char growth above baseline
+            art = Path(td) / "art"
+            rc, err, out_deny = run_hook(
+                "planner_guard_files.py",
+                {
+                    "toolCall": {
+                        "name": "write_to_file",
+                        "args": {"TargetFile": str(agents_f), "CodeContent": "A" * 205},
+                    },
+                    "workspacePaths": [str(repo)],
+                },
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art)},
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(out_deny.get("decision"), "deny", out_deny)
+            self.assertIn("TOKEN_RATCHET|DOC_BLOAT", str(out_deny.get("reason") or ""))
+
+            # Shift-left guard ALLOWS shrinking edit
+            rc2, err2, out_ok = run_hook(
+                "planner_guard_files.py",
+                {
+                    "toolCall": {
+                        "name": "write_to_file",
+                        "args": {"TargetFile": str(agents_f), "CodeContent": "A" * 180},
+                    },
+                    "workspacePaths": [str(repo)],
+                },
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art)},
+            )
+            self.assertEqual(rc2, 0, err2)
+            self.assertNotEqual(out_ok.get("decision"), "deny", out_ok)
+
+            # Stop hook collapses needs_build + needs_plugin_tests into 1 batched command
+            art_stop = Path(td) / "art_stop"
+            scratch = art_stop / "scratch"
+            scratch.mkdir(parents=True)
+            (scratch / ".hook_state.json").write_text(
+                json.dumps({"needs_build": True, "needs_plugin_tests": True, "stop_block_streak": 0}),
+                encoding="utf-8",
+            )
+            rc_s, err_s, out_s = run_hook(
+                "planner_stop.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": str(art_stop),
+                    "fullyIdle": True,
+                    "continuationActive": False,
+                    "terminationReason": "NO_TOOL_CALL",
+                },
+                env_extra={"PLANNER_ARTIFACT_DIR": str(art_stop)},
+            )
+            self.assertEqual(rc_s, 0, err_s)
+            self.assertEqual(out_s.get("decision"), "continue", out_s)
+            reason = str(out_s.get("reason") or "")
+            self.assertIn("--build --plugin-tests --git-stat", reason)
+
+    def test_closeout_token_audit_t0_canary_and_verify_check_tier(self) -> None:
+        import coherence_engine
+        import meta_governance
+
+        # 7-probe T0 canary includes T0-TOKEN-BUDGET-GUARD & 100% kill rate
+        canary = meta_governance.run_t0_mutation_canary()
+        self.assertTrue(canary["ok"], canary)
+        self.assertEqual(canary["kill_rate"], 1.0)
+        self.assertIn("T0-TOKEN-BUDGET-GUARD", [p["id"] for p in canary["probes"]])
+        self.assertEqual(meta_governance.VERIFY_CHECK_TIERS.get("token_overhead_budget"), "T1")
+        v_checks = coherence_engine._introspect_verify_checks(PLUGIN_ROOT)
+        unclassified = [c for c in v_checks if c not in meta_governance.VERIFY_CHECK_TIERS]
+        self.assertEqual(unclassified, [], f"Unclassified @verify_check(s): {unclassified}")
+
+        # 1-shot closeout & token-audit on a synthetic repo
+        with tempfile.TemporaryDirectory(prefix="dfp_v224_closeout_") as td:
+            repo = Path(td)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / "AGENTS.md").write_text("# Agents\n> STYLE|lossless symbolic telegraphic EN ONLY.\nShort.\n", encoding="utf-8")
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 5,
+                        "plugin_version": "2.24.0",
+                        "docs_format_version": 1,
+                        "token_budget": {"enabled": True, "ratchet_enabled": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            r_aud = run_script("plan_tool.py", ["--workspace", str(repo), "token-audit"])
+            self.assertEqual(r_aud.returncode, 0, r_aud.stdout + r_aud.stderr)
+            self.assertIn("TOKEN_AUDIT|OK|", r_aud.stdout)
+            self.assertIn("dedup=", r_aud.stdout)
+
+            r_cls = run_script(
+                "plan_tool.py",
+                [
+                    "--workspace",
+                    str(repo),
+                    "closeout",
+                    "--summary",
+                    "Shipped v2.24.0 token governor",
+                    "--next",
+                    "Proceed to W55.2",
+                ],
+            )
+            self.assertEqual(r_cls.returncode, 0, r_cls.stdout + r_cls.stderr)
+            lines = [ln for ln in r_cls.stdout.splitlines() if ln.strip()]
+            self.assertLessEqual(len(lines), 6, f"Expected <=6L closeout receipt, got:\n{r_cls.stdout}")
+            self.assertIn("CLOSEOUT|OK|", r_cls.stdout)
+            self.assertTrue((repo / ".agents" / "docs" / "HANDOFF.md").is_file())
+
+
 def _stamp_plugin_tests_passed() -> None:
     art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
     if not art_dir or os.environ.get("PLANNER_NO_HOOK_STAMP"):

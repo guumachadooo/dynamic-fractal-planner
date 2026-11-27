@@ -439,6 +439,18 @@ def main() -> None:
         except Exception:
             pass
 
+        # 1d3. Shift-left Zero-Accumulation Always-Loaded Doc Token Ratchet
+        try:
+            import token_governor  # noqa: E402
+
+            tk_hit = token_governor.check_shift_left_doc_token_ratchet(tool_name, args, raw_path, repo, profile)
+            if tk_hit:
+                record_telemetry("token_doc_ratchet_deny", {"path": raw_path})
+                reply("deny", tk_hit, payload=payload, repo=repo)
+                return
+        except Exception:
+            pass
+
         # 1e. Destructive write_file shield (>150L existing code)
         dw_hit = check_destructive_write(tool_name, args, raw_path, repo, profile, in_plugin, plugin_rel)
         if dw_hit:

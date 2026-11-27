@@ -10,9 +10,9 @@ description: >-
 
 Scripts (`~/.gemini/config/plugins/dynamic-fractal-planner/scripts/`): `plan_tool.py` | `coherence_engine.py` | `meta_governance.py` | `fitness_ratchet.py` | `blueprint_engine.py` | `wave_scheduler.py` | `verify_universal.py` | `log_digest.py` | `repo_map.py`
 
-<!--AUTO:START:dfp-cli-domains:sha256=40724b172d15-->
-AUTO_SSOT|plugin=v2.23.0|triage_domains=agent-infra,api-backend,build-ci,core-logic,plugin-self,runtime-infra,tests-qa,ui-frontend|verify_checks=21
-AUTO_CLI|`plan_tool.py`: `triage|bootstrap|migrate|docs-migrated|init|add-module|expand-step|start|done|req-verify|pause|status|next|audit|finish|handoff|recon|undo-turn|stats|diagnostics|model-mode|evolve|learn|live-diag|blueprint|wave|qa|coherence|host-classify|host-boot|host-status|host-audit`
+<!--AUTO:START:dfp-cli-domains:sha256=1940332422f8-->
+AUTO_SSOT|plugin=v2.24.0|triage_domains=agent-infra,api-backend,build-ci,core-logic,plugin-self,runtime-infra,tests-qa,ui-frontend|verify_checks=22
+AUTO_CLI|`plan_tool.py`: `triage|bootstrap|migrate|docs-migrated|init|add-module|expand-step|start|done|req-verify|pause|status|next|audit|finish|handoff|recon|undo-turn|stats|diagnostics|model-mode|evolve|learn|live-diag|blueprint|wave|qa|coherence|token-audit|closeout|host-classify|host-boot|host-status|host-audit`
 <!--AUTO:END:dfp-cli-domains-->
 
 ## Modes
