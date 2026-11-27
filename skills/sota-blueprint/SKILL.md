@@ -7,10 +7,14 @@ description: >-
   and deterministic 0-100 Popperian rubric verification (>=85/100).
 ---
 
-# Universal SOTA Blueprint Playbook (`sota-blueprint` / Plugin v2.21.0)
+# Universal SOTA Blueprint Playbook (`sota-blueprint` / Plugin v2.22.0)
 
 > STYLE|lossless symbolic telegraphic EN ONLY (`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`).
 > CLI|`python3 -B ~/.gemini/config/plugins/dynamic-fractal-planner/scripts/plan_tool.py blueprint <cmd>`
+
+<!--AUTO:START:sota-blueprint-domains:sha256=f2d593d2da95-->
+AUTO_SSOT|plugin=v2.22.0|blueprint_domains=ai-ml,biz-org,data-bi,dsp-hw,infra-ops,security,software,ux-product|formats=mini,compact,full|ssot=scripts/domains.json
+<!--AUTO:END:sota-blueprint-domains-->
 
 ## Tiered Blueprint Formats (Right-Sized Ceremony & Token-Diet)
 - **`mini` (`T1/2-way`, `<=35L`, `<=4 KB`, `0` subagents):** 4 sections (`Meta`, `Value & Non-Goals`, `Decision & Kill`, `Invariants & H1 Slices`), `>=1 REJECTED_BECAUSE|`, `>=1 KILL|`, `>=1 QAS|`. Zero subagent overhead.

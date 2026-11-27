@@ -6806,6 +6806,314 @@ class TestW56_1_FoundationSafety(unittest.TestCase):
             self.assertIn("XA9998", lessons_file.read_text(encoding="utf-8"))
 
 
+class TestW56_2_ZeroStaticCoherence(unittest.TestCase):
+    """Regression suite for W56.2 (DFP v2.22.0): Coherence Engine, domains.json, @verify_check, safe hooks."""
+
+    def test_coherence_engine_read_only_latency_sync_and_deprecations(self) -> None:
+        import coherence_engine  # noqa: E402
+
+        eng_lines = len((PLUGIN_ROOT / "scripts" / "coherence_engine.py").read_text(encoding="utf-8").splitlines())
+        self.assertLessEqual(eng_lines, 450, f"coherence_engine.py exceeds 450L cap: {eng_lines}L")
+        self.assertLess(len((PLUGIN_ROOT / "scripts" / "verify_universal.py").read_text(encoding="utf-8").splitlines()), 1500)
+        self.assertLess(len((PLUGIN_ROOT / "scripts" / "blueprint_engine.py").read_text(encoding="utf-8").splitlines()), 1500)
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "scripts").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "plugin_version": "2.22.0"}),
+                encoding="utf-8",
+            )
+            (repo / ".agents" / "host_matrix.json").write_text(
+                json.dumps({"schema": 1, "strict_coverage": True, "entries": []}),
+                encoding="utf-8",
+            )
+            onb = repo / ".agents" / "docs" / "EXTERNAL_AI_ONBOARDING.md"
+            onb.write_text(
+                "# Onboarding\n<!--AUTO:START:cavern-ecosystem-ssot:sha256=000000000000-->\nstale\n<!--AUTO:END:cavern-ecosystem-ssot-->\n",
+                encoding="utf-8",
+            )
+
+            # 1) Read-only check detects AUTO drift without mutating any files
+            before_mtimes = {str(p): p.stat().st_mtime_ns for p in repo.rglob("*") if p.is_file()}
+            chk_drift = coherence_engine.run_coherence_check(repo, local_only=True)
+            after_mtimes = {str(p): p.stat().st_mtime_ns for p in repo.rglob("*") if p.is_file()}
+            self.assertEqual(before_mtimes, after_mtimes, "run_coherence_check MUST be strictly read-only")
+            self.assertFalse(chk_drift["ok"])
+            self.assertTrue(any("AUTO doc drift" in f for f in chk_drift["fails"]), chk_drift["fails"])
+            self.assertLess(chk_drift["elapsed_ms"], 200.0)
+
+            # 2) sync stamps SHA-256 on AUTO block & generates <=150L COHERENCE_HUB.md
+            s_res = coherence_engine.sync_coherence(repo, docs=True, hub=True, local_only=True)
+            self.assertTrue(s_res["ok"])
+            self.assertIn(".agents/docs/COHERENCE_HUB.md", s_res["touched"])
+            hub_path = repo / ".agents" / "docs" / "COHERENCE_HUB.md"
+            self.assertTrue(hub_path.is_file())
+            self.assertLessEqual(len(hub_path.read_text(encoding="utf-8").splitlines()), 150)
+
+            chk_ok = coherence_engine.run_coherence_check(repo, local_only=True)
+            self.assertTrue(chk_ok["ok"], chk_ok)
+            self.assertLess(chk_ok["elapsed_ms"], 200.0)
+
+            # 3) TOMBSTONE file presence fails coherence check
+            zombie = repo / ".agents" / "scripts" / "live_phone_bridge.py"
+            zombie.write_text("# legacy\n", encoding="utf-8")
+            chk_tomb = coherence_engine.run_coherence_check(repo, local_only=True)
+            self.assertFalse(chk_tomb["ok"])
+            self.assertTrue(any("TOMBSTONE" in f for f in chk_tomb["fails"]), chk_tomb["fails"])
+            zombie.unlink()
+
+            # 4) deprecate_surface enforces owner + expires_ver + valid stage & expired WARN surfaces warning
+            with self.assertRaises(ValueError):
+                coherence_engine.deprecate_surface(
+                    repo, dep_id="x", stage="WARN", path="cli:old", replacement="cli:new", owner="", expires_ver="2.24.0"
+                )
+            with self.assertRaises(ValueError):
+                coherence_engine.deprecate_surface(
+                    repo, dep_id="x", stage="BAD", path="cli:old", replacement="cli:new", owner="dfp", expires_ver="2.24.0"
+                )
+            dep_res = coherence_engine.deprecate_surface(
+                repo,
+                dep_id="expired-cli",
+                stage="WARN",
+                path="cli:old_cmd",
+                replacement="cli:new_cmd",
+                owner="dfp",
+                expires_ver="2.20.0",
+                apply=True,
+            )
+            self.assertTrue(dep_res["applied"])
+            chk_exp = coherence_engine.run_coherence_check(repo, local_only=True)
+            self.assertTrue(chk_exp["ok"])
+            self.assertTrue(any("expired-cli" in w for w in chk_exp["warns"]), chk_exp["warns"])
+
+            # 5) SessionStart digest <= 40 chars
+            digest = coherence_engine.format_session_start_digest(repo)
+            self.assertLessEqual(len(digest), 40, digest)
+            self.assertTrue(digest.startswith("COHERENCE|"), digest)
+
+    def test_domains_json_ssot_and_verify_check_decorator_registry(self) -> None:
+        import plan_tool  # noqa: E402
+
+        dom_path = PLUGIN_ROOT / "scripts" / "domains.json"
+        self.assertTrue(dom_path.is_file())
+        dom_data = json.loads(dom_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(dom_data["triage_domains"].keys()), set(complexity_triage.UNIVERSAL_DOMAINS.keys()))
+        self.assertEqual(set(dom_data["blueprint_domains"].keys()), set(blueprint_engine.DOMAIN_PROFILES.keys()))
+        for dk in dom_data["triage_domains"]:
+            self.assertIn(dk, plan_tool.UNIVERSAL_CHECKLISTS)
+        for mod_id in dom_data["default_module_steps"]:
+            self.assertIn(mod_id, plan_tool.DEFAULT_MODULE_STEPS)
+
+        # @verify_check decorator registry replaces hardcoded calls (>=19 checks incl. coherence_local)
+        self.assertGreaterEqual(len(verify_universal.VERIFY_CHECKS), 19)
+        v_ids = {c["id"] for c in verify_universal.VERIFY_CHECKS}
+        self.assertIn("coherence_local", v_ids)
+        self.assertIn("host_matrix_coverage", v_ids)
+        self.assertIn("adversarial_qa_contracts", v_ids)
+
+    def test_pure_migrate_profile_wiring_and_host_live_probing(self) -> None:
+        import blueprint_hub  # noqa: E402
+        import host_context  # noqa: E402
+        import planner_state  # noqa: E402
+        import schema_migrations  # noqa: E402
+
+        # 1) Pure migrate_profile across all v1..v4 fixtures (never mutates input dict)
+        fixtures_dir = PLUGIN_ROOT / "tests" / "fixtures"
+        for fx in sorted(fixtures_dir.glob("profile_v*.json")):
+            raw = json.loads(fx.read_text(encoding="utf-8"))
+            snap = json.dumps(raw, sort_keys=True)
+            migrated, ver, _warns = schema_migrations.migrate_profile(raw)
+            self.assertEqual(json.dumps(raw, sort_keys=True), snap, f"migrate_profile mutated input for {fx.name}")
+            self.assertEqual(ver, schema_migrations.CURRENT_SCHEMA_VERSION)
+            self.assertEqual(migrated["schema_version"], schema_migrations.CURRENT_SCHEMA_VERSION)
+
+        # 2) blueprint_hub._load_profile_if_none migrates legacy v1 profile cleanly
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / ".agents").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 1, "project_name": "legacy-app"}),
+                encoding="utf-8",
+            )
+            loaded = blueprint_hub._load_profile_if_none(repo, None)
+            self.assertEqual(loaded.get("schema_version"), schema_migrations.CURRENT_SCHEMA_VERSION)
+            self.assertIn("delegation", loaded)
+
+            # 3) bootstrap_workspace produces schema_version=5 profile and strict_coverage host_matrix
+            repo2 = repo / "boot_repo"
+            repo2.mkdir()
+            created_boot, _skipped_boot = planner_state.bootstrap_workspace(repo2, embed_plugin=False)
+            self.assertIn(".agents/planner_profile.json", created_boot)
+            prof2 = json.loads((repo2 / ".agents" / "planner_profile.json").read_text(encoding="utf-8"))
+            self.assertEqual(prof2.get("schema_version"), schema_migrations.CURRENT_SCHEMA_VERSION)
+
+            # 4) host_context live capability probing & strict_coverage template
+            h_info = host_context.detect_host(repo2, env={})
+            self.assertIn("has_git_cli", h_info["capabilities"])
+            self.assertIn("has_gh_cli", h_info["capabilities"])
+            reg = host_context.register_tool_entry(repo2, ".agents/scripts/demo.py", apply=True)
+            self.assertTrue(reg["applied"])
+            hm = json.loads((repo2 / ".agents" / "host_matrix.json").read_text(encoding="utf-8"))
+            self.assertTrue(hm.get("strict_coverage"))
+            self.assertNotIn("recover", json.dumps(hm))
+
+    def test_safe_blueprint_first_and_qa_stop_hook_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            (repo / ".agents" / "docs" / "blueprints").mkdir(parents=True)
+            (repo / ".agents" / "qa").mkdir(parents=True)
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 5,
+                        "planner_mode": "lean",
+                        "blueprint": {
+                            "dir": ".agents/docs/blueprints",
+                            "require_by_default": True,
+                            "default_min_tier": 1,
+                            "enforce_hook": "force_ask",
+                        },
+                        "adversarial_qa": {
+                            "enabled": True,
+                            "contracts_file": ".agents/qa/regression_contracts.json",
+                            "enforce_stop_contracts": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hook_state_p = Path(art) / "scratch" / ".hook_state.json"
+            hook_state_p.parent.mkdir(parents=True, exist_ok=True)
+            hook_state_p.write_text(
+                json.dumps({"eco_mode": False, "triage": {"tier": 2, "blueprint_opt_out": False, "intent": "code"}}),
+                encoding="utf-8",
+            )
+
+            # 1) Non-exempt T2 code edit w/ 0 active blueprints triggers force_ask once
+            rc1, err1, res1 = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "replace_file_content", "args": {"TargetFile": str(repo / "src" / "app.py"), "ReplacementContent": "x = 2\n"}},
+                },
+            )
+            self.assertEqual(rc1, 0, err1)
+            self.assertEqual(res1["decision"], "force_ask")
+            self.assertIn("BLUEPRINT_FIRST", res1["reason"])
+
+            # 2) Docs edit is always exempt (even with fresh hook_state)
+            hook_state_p.write_text(json.dumps({"eco_mode": False, "triage": {"tier": 2}}), encoding="utf-8")
+            rc2, err2, res2 = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "write_to_file", "args": {"TargetFile": str(repo / ".agents" / "docs" / "NOTES.md"), "CodeContent": "# note\n"}},
+                },
+            )
+            self.assertEqual(rc2, 0, err2)
+            self.assertEqual(res2["decision"], "allow")
+
+            # 3) T0, eco_mode, blueprint_opt_out, & plugin_sync_fastpath all stay allow
+            for st_case in (
+                {"triage": {"tier": 0}},
+                {"eco_mode": True, "triage": {"tier": 2}},
+                {"triage": {"tier": 2, "blueprint_opt_out": True}},
+                {"triage": {"tier": 2, "is_plugin_sync_fastpath": True}},
+            ):
+                hook_state_p.write_text(json.dumps(st_case), encoding="utf-8")
+                rc_ex, err_ex, res_ex = run_hook(
+                    "planner_guard_files.py",
+                    {
+                        "workspacePaths": [str(repo)],
+                        "artifactDirectoryPath": art,
+                        "toolCall": {"name": "replace_file_content", "args": {"TargetFile": str(repo / "src" / "app.py"), "ReplacementContent": "x = 3\n"}},
+                    },
+                )
+                self.assertEqual(rc_ex, 0, err_ex)
+                self.assertEqual(res_ex["decision"], "allow", st_case)
+
+            # 4) Active blueprint present -> allow
+            (repo / ".agents" / "docs" / "blueprints" / "BP_TEST.md").write_text(
+                "# Test\nBP_META|id=BP_TEST|status=ACTIVE|tier=T2|door=2-way\n",
+                encoding="utf-8",
+            )
+            hook_state_p.write_text(json.dumps({"eco_mode": False, "triage": {"tier": 2}}), encoding="utf-8")
+            rc_bp, err_bp, res_bp = run_hook(
+                "planner_guard_files.py",
+                {
+                    "workspacePaths": [str(repo)],
+                    "artifactDirectoryPath": art,
+                    "toolCall": {"name": "replace_file_content", "args": {"TargetFile": str(repo / "src" / "app.py"), "ReplacementContent": "x = 4\n"}},
+                },
+            )
+            self.assertEqual(rc_bp, 0, err_bp)
+            self.assertEqual(res_bp["decision"], "allow")
+
+            # 5) QA_GATE stop hook catches failing offline frozen contract on edited code (and skips in eco_mode)
+            (repo / ".agents" / "qa" / "regression_contracts.json").write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "contracts": [
+                            {
+                                "id": "REG-TEST-001",
+                                "status": "frozen",
+                                "bug_ref": "BUG-1",
+                                "title": "Must contain sentinel",
+                                "severity": "critical",
+                                "offline_checks": [
+                                    {
+                                        "type": "file_contains_regex",
+                                        "path": "src/app.py",
+                                        "regex": "SENTINEL_REQUIRED",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hook_state_p.write_text(
+                json.dumps({"code_files_edited": ["src/app.py"], "eco_mode": False}),
+                encoding="utf-8",
+            )
+            rc_stop, err_stop, res_stop = run_hook(
+                "planner_stop.py",
+                {"workspacePaths": [str(repo)], "artifactDirectoryPath": art},
+            )
+            self.assertEqual(rc_stop, 0, err_stop)
+            self.assertEqual(res_stop.get("decision"), "continue", res_stop)
+            self.assertIn("QA_GATE", res_stop.get("reason", ""))
+
+            hook_state_p.write_text(
+                json.dumps({"code_files_edited": ["src/app.py"], "eco_mode": True}),
+                encoding="utf-8",
+            )
+            rc_eco, err_eco, res_eco = run_hook(
+                "planner_stop.py",
+                {"workspacePaths": [str(repo)], "artifactDirectoryPath": art},
+            )
+            self.assertEqual(rc_eco, 0, err_eco)
+            self.assertEqual(res_eco, {})
+
+            # SessionStart includes <=40c COHERENCE| digest and stays <1800c
+            rc_ss, err_ss, res_ss = run_hook(
+                "planner_session_start.py",
+                {"workspacePaths": [str(repo)], "artifactDirectoryPath": art},
+            )
+            self.assertEqual(rc_ss, 0, err_ss)
+            ss_msg = res_ss["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("COHERENCE|", ss_msg)
+            self.assertLess(len(ss_msg), 1800)
+
+
 def _stamp_plugin_tests_passed() -> None:
     art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
     if not art_dir or os.environ.get("PLANNER_NO_HOOK_STAMP"):

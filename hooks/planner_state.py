@@ -1361,6 +1361,7 @@ def bootstrap_workspace(
             "build_rules": _detect_starter_build_rules(repo),
             "domains": {},
         }
+        profile, _, _ = migrate_profile(profile)
         profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         created.append(profile_path.relative_to(repo).as_posix())
 
@@ -1385,7 +1386,7 @@ def bootstrap_workspace(
 
         host_matrix_template = {
             "schema": 1,
-            "strict_coverage": False,
+            "strict_coverage": True,
             "note": (
                 "Declarative multi-host tool & integration matrix (`antigravity-termux` <-> `antigravity-local` "
                 "<-> `ai-studio-cloud` <-> `ci-runner` <-> `local-ide`). Audited by `verify_universal.py` & `plan_tool.py host-audit`."

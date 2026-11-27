@@ -555,12 +555,7 @@ def run_build_rules(
         l_parts = [f"{lbl}:{st}({cnt})" if cnt else f"{lbl}:{st}" for lbl, st, cnt in layer_statuses]
         print(f"BUILD_SUMMARY|layers={','.join(l_parts)}|unique_errors={len(global_seen)}|deduped={total_dups}")
         if upstream_failed:
-            local_el = repo / ".agents" / "scripts" / "error_learner.py"
-            el_cmd = (
-                "python3 -B .agents/scripts/error_learner.py --from-log - --apply"
-                if local_el.is_file()
-                else f"python3 -B {SCRIPTS_DIR / 'error_learner.py'} --workspace {repo} --from-log - --apply"
-            )
+            el_cmd = f"python3 -B {SCRIPTS_DIR / 'plan_tool.py'} --workspace {repo} learn --from-log - --apply"
             print(f"LEARN_HINT|new recurring build error? pipe output -> `{el_cmd}`")
     return ran_any
 
@@ -846,9 +841,13 @@ def _collect_mounted_plugin_peers(
                         _add(f"local:{alias}", Path(str(spec["termuxPath"])).expanduser())
             except Exception:
                 pass
-        else:
-            for alias in ("fractal", "omniagent", "cavern"):
-                _add(f"fed:{alias}", fed_root / alias)
+        elif fed_root.is_dir():
+            try:
+                for child in sorted(fed_root.iterdir()):
+                    if child.is_dir() and not child.name.startswith("."):
+                        _add(f"fed:{child.name}", child)
+            except OSError:
+                pass
 
     return peers
 
@@ -1012,35 +1011,170 @@ def check_adversarial_qa_contracts(
     qa_gate.check_adversarial_qa_contracts(repo, profile, fails, warns)
 
 
+def check_coherence_local(
+    repo: Path,
+    profile: dict[str, Any],
+    fails: list[str],
+    warns: list[str],
+) -> None:
+    """Run read-only local ecosystem coherence checks (SSOT domains, AUTO doc blocks, tombstones)."""
+    try:
+        import coherence_engine  # noqa: E402
+    except Exception:
+        return
+    res = coherence_engine.run_coherence_check(repo, local_only=True, profile=profile)
+    fails.extend(res.get("fails") or [])
+    warns.extend(res.get("warns") or [])
+
+
+VERIFY_CHECKS: list[dict[str, Any]] = []
+
+
+def verify_check(
+    check_id: str,
+    *,
+    scope: str = "static",
+    cost_ms: int = 10,
+    hosts: tuple[str, ...] = ("all",),
+):
+    """Declarative decorator registering a static check in `VERIFY_CHECKS`."""
+
+    def _decorator(fn):
+        VERIFY_CHECKS.append(
+            {
+                "id": check_id,
+                "scope": scope,
+                "cost_ms": cost_ms,
+                "hosts": hosts,
+                "fn": fn,
+            }
+        )
+        return fn
+
+    return _decorator
+
+
+@verify_check("universal_syntax", scope="static", cost_ms=25)
+def _vc_universal_syntax(ctx: dict[str, Any]) -> None:
+    check_universal_syntax(ctx["repo"], ctx["files"], ctx["fails"])
+
+
+@verify_check("csharp_syntax_deep", scope="static", cost_ms=30)
+def _vc_csharp_syntax_deep(ctx: dict[str, Any]) -> None:
+    check_csharp_syntax_deep(ctx["repo"], ctx["files"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("file_guards_state", scope="static", cost_ms=5)
+def _vc_file_guards_state(ctx: dict[str, Any]) -> None:
+    check_file_guards_state(ctx["repo"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("version_sync", scope="static", cost_ms=5)
+def _vc_version_sync(ctx: dict[str, Any]) -> None:
+    check_version_sync(ctx["repo"], ctx["profile"], ctx["warns"])
+
+
+@verify_check("diff_rules", scope="static", cost_ms=15)
+def _vc_diff_rules(ctx: dict[str, Any]) -> None:
+    check_diff_rules(ctx["repo"], ctx["files"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("key_parity_rules", scope="static", cost_ms=15)
+def _vc_key_parity_rules(ctx: dict[str, Any]) -> None:
+    check_key_parity_rules(ctx["repo"], ctx["files"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("balanced_brackets", scope="static", cost_ms=20)
+def _vc_balanced_brackets(ctx: dict[str, Any]) -> None:
+    check_balanced_brackets(ctx["repo"], ctx["files"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("secrets_and_conflicts", scope="static", cost_ms=15)
+def _vc_secrets_and_conflicts(ctx: dict[str, Any]) -> None:
+    check_secrets_and_conflicts_files(ctx["repo"], ctx["files"], ctx["profile"], ctx["fails"])
+
+
+@verify_check("orphan_calls", scope="static", cost_ms=15)
+def _vc_orphan_calls(ctx: dict[str, Any]) -> None:
+    check_orphan_calls(ctx["repo"], ctx["files"], ctx["warns"])
+
+
+@verify_check("forward_wiring", scope="static", cost_ms=20)
+def _vc_forward_wiring(ctx: dict[str, Any]) -> None:
+    check_forward_wiring(ctx["repo"], ctx["files"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("memory_weight", scope="static", cost_ms=5)
+def _vc_memory_weight(ctx: dict[str, Any]) -> None:
+    check_memory_weight(ctx["repo"], ctx["profile"], ctx["warns"])
+
+
+@verify_check("code_weight", scope="static", cost_ms=15)
+def _vc_code_weight(ctx: dict[str, Any]) -> None:
+    check_code_weight(ctx["repo"], ctx["files"], ctx["profile"], ctx["warns"], scan_all=ctx["scan_all"])
+
+
+@verify_check("file_budget", scope="static", cost_ms=20)
+def _vc_file_budget(ctx: dict[str, Any]) -> None:
+    check_file_budget(ctx["repo"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("host_matrix_coverage", scope="static", cost_ms=15)
+def _vc_host_matrix_coverage(ctx: dict[str, Any]) -> None:
+    check_host_matrix_coverage(ctx["repo"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("build_lessons_timelessness", scope="static", cost_ms=10)
+def _vc_build_lessons_timelessness(ctx: dict[str, Any]) -> None:
+    check_build_lessons_timelessness(ctx["repo"], ctx["files"], ctx["fails"])
+
+
+@verify_check("blueprint_quality", scope="static", cost_ms=25)
+def _vc_blueprint_quality(ctx: dict[str, Any]) -> None:
+    check_blueprint_quality(ctx["repo"], ctx["files"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("adversarial_qa_contracts", scope="static", cost_ms=20)
+def _vc_adversarial_qa_contracts(ctx: dict[str, Any]) -> None:
+    check_adversarial_qa_contracts(ctx["repo"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("plugin_sync_parity", scope="static", cost_ms=25)
+def _vc_plugin_sync_parity(ctx: dict[str, Any]) -> None:
+    check_plugin_sync_parity(ctx["repo"], ctx["files"], ctx["warns"], scan_all=ctx["scan_all"])
+
+
+@verify_check("coherence_local", scope="static", cost_ms=20)
+def _vc_coherence_local(ctx: dict[str, Any]) -> None:
+    check_coherence_local(ctx["repo"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
 def run_static_checks(
     repo: Path,
     profile: dict[str, Any],
     changed: list[str] | None = None,
     scan_all: bool = False,
+    host_id: str = "all",
 ) -> tuple[list[str], list[str], list[str]]:
-    """Run all fast static guardrails (<0.5s; safe for Stop hook auto-verify)."""
+    """Run all registered `@verify_check` static guardrails (<0.5s; safe for Stop hook auto-verify)."""
     files = list(changed) if changed is not None else get_changed_files(repo, profile, scan_all=scan_all)
     fails: list[str] = []
     warns: list[str] = []
-
-    check_universal_syntax(repo, files, fails)
-    check_csharp_syntax_deep(repo, files, fails, warns)
-    check_file_guards_state(repo, profile, fails, warns)
-    check_version_sync(repo, profile, warns)
-    check_diff_rules(repo, files, profile, fails, warns)
-    check_key_parity_rules(repo, files, profile, fails, warns)
-    check_balanced_brackets(repo, files, fails, warns)
-    check_secrets_and_conflicts_files(repo, files, profile, fails)
-    check_orphan_calls(repo, files, warns)
-    check_forward_wiring(repo, files, profile, fails, warns)
-    check_memory_weight(repo, profile, warns)
-    check_code_weight(repo, files, profile, warns, scan_all=scan_all)
-    check_file_budget(repo, profile, fails, warns)
-    check_host_matrix_coverage(repo, fails, warns)
-    check_build_lessons_timelessness(repo, files, fails)
-    check_blueprint_quality(repo, files, profile, fails, warns)
-    check_adversarial_qa_contracts(repo, profile, fails, warns)
-    check_plugin_sync_parity(repo, files, warns, scan_all=scan_all)
+    ctx: dict[str, Any] = {
+        "repo": repo,
+        "profile": profile,
+        "files": files,
+        "fails": fails,
+        "warns": warns,
+        "scan_all": scan_all,
+    }
+    for entry in VERIFY_CHECKS:
+        if entry["scope"] != "static":
+            continue
+        allowed_hosts = entry.get("hosts") or ("all",)
+        if "all" not in allowed_hosts and host_id not in allowed_hosts:
+            continue
+        entry["fn"](ctx)
 
     extra_rel, pending_extra = get_pending_extra_requests(repo, profile)
     if pending_extra:

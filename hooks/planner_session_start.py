@@ -418,6 +418,15 @@ def main() -> None:
                     f"DIAGNOSTICS|{diag_total} anomaly(ies) ({diag_unique} unique) in `.diagnostics/anomalies.jsonl` -> run `python3 {plan_ref} diag` to inspect"
                 )
 
+        try:
+            import coherence_engine  # noqa: E402
+
+            coh_digest = coherence_engine.format_session_start_digest(repo, profile=profile)
+            if coh_digest:
+                lines.append(coh_digest[:40])
+        except Exception:
+            pass
+
         lines.append(f"TOOLS|plan=`python3 {plan_ref}`|verify=`python3 {verify_ref}`|board=`{task_md}`")
 
         bloat_limit = int(os.environ.get("PLANNER_INJECTION_BLOAT_CHARS") or 1800)

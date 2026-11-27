@@ -22,6 +22,8 @@ jobs:
 
       - name: Run plugin test suite
         run: python3 -B tests/run_plugin_tests.py --fast
+      - name: Zero-Static Coherence Gate (--local)
+        run: python3 -B scripts/plan_tool.py coherence check --local
 
       - name: Read plugin version & publish GitHub Release if new
         env:

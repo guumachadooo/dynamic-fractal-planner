@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "strict_coverage": false,
+  "strict_coverage": true,
   "note": "Declarative multi-host tool & integration matrix (`antigravity-termux` <-> `ai-studio-cloud` <-> `ci-runner` <-> `local-ide`). Audited by `verify_universal.py` & `plan_tool.py host-audit`.",
   "hosts": {
     "antigravity-termux": {

@@ -23,7 +23,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from schema_migrations import resolve_blueprint_config  # noqa: E402
+from schema_migrations import migrate_profile, resolve_blueprint_config  # noqa: E402
 
 HUB_AUTO_START = "<!-- HUB:AUTO_START -->"
 HUB_AUTO_END = "<!-- HUB:AUTO_END -->"
@@ -92,13 +92,13 @@ def _norm_rel(raw: str) -> str:
 
 def _load_profile_if_none(repo: Path, profile: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(profile, dict):
-        return profile
+        return migrate_profile(profile)[0] if profile else {}
     p = repo / ".agents" / "planner_profile.json"
     if p.is_file():
         try:
             loaded = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
             if isinstance(loaded, dict):
-                return loaded
+                return migrate_profile(loaded)[0]
         except Exception:
             pass
     return {}
@@ -246,6 +246,8 @@ def render_hub_auto_block(
         ])
         for m in monoliths:
             lines.append(f"| `{m['rel_path']}` | `{m['lines']}` | `{m['limit']}` |")
+    if (repo / ".agents" / "docs" / "COHERENCE_HUB.md").is_file():
+        lines.append("COHERENCE_HUB|.agents/docs/COHERENCE_HUB.md")
     lines.append(HUB_AUTO_END)
     return "\n".join(lines), stats
 

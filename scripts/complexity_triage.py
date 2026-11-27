@@ -65,90 +65,31 @@ ACTION_VERBS = (
     "convert*", "packag*", "migrat*",
 )
 
-UNIVERSAL_DOMAINS: dict[str, dict[str, Any]] = {
-    "ui-frontend": {
-        "module_id": "MOD-UI-FRONTEND",
-        "module_title": "UI Components, Layout, Motion & Localization",
-        "keywords": (
-            "ui", "ux", "frontend", "front-end", "layout", "css", "tailwind",
-            "react", "vue", "svelte", "next.js", "nextjs", "compose", "swiftui",
-            "html", "dom", "canvas", "shader*", "animat*", "animaç*", "animac*",
-            "botão", "botoes", "botões", "button*", "tela", "telas", "screen*",
-            "aba", "abas", "tab", "tabs", "modal", "dialog*", "seekbar", "slider*",
-            "switch*", "ícone*", "icone*", "icon*", "fonte*", "font*", "tema", "temas",
-            "theme*", "cor", "cores", "color*", "traduç*", "traduc*", "i18n", "l10n",
-            "pt-br", "en-us", "responsive", "responsiv*", "clipping",
-        ),
-    },
-    "api-backend": {
-        "module_id": "MOD-BACKEND",
-        "module_title": "API Endpoints, Services, Auth & Data Layer",
-        "keywords": (
-            "api", "rest", "graphql", "grpc", "endpoint*", "route*", "rota", "rotas",
-            "backend", "back-end", "server", "servidor", "auth*", "oauth", "jwt",
-            "database", "banco de dados", "sql", "postgres*", "sqlite", "mysql",
-            "prisma", "orm", "schema*", "migrat*", "migraç*", "migrac*", "cache*",
-            "webhook*", "scraper*", "http", "fetch", "middleware*",
-        ),
-    },
-    "core-logic": {
-        "module_id": "MOD-CORE-LOGIC",
-        "module_title": "Core Algorithms, Parsers & State Machine",
-        "keywords": (
-            "algorithm*", "algoritmo*", "parser*", "lexer", "ast", "codec*",
-            "decoder*", "encoder*", "demux*", "remux*", "state machine",
-            "máquina de estados", "maquina de estados", "pipeline*", "engine",
-            "motor", "dsp", "math", "physics", "física", "fisica", "interpolat*",
-            "stream", "streams", "streaming", "buffer*", "queue", "fila",
-            "convert*", "transform*", "extract*",
-        ),
-    },
-    "runtime-infra": {
-        "module_id": "MOD-RUNTIME",
-        "module_title": "Concurrency, Process IPC, Filesystem & Runtime Safety",
-        "keywords": (
-            "thread*", "concorrên*", "concorren*", "concurrency", "async", "await",
-            "deadlock*", "race condition*", "mutex", "lock*", "process*", "subprocess*",
-            "pipe*", "ipc", "selinux", "permiss*", "filesystem", "docker", "container*",
-            "memory", "memória", "memoria", "leak*", "dispose*", "crash*", "erro*",
-            "bug*", "falha*",
-        ),
-    },
-    "tests-qa": {
-        "module_id": "MOD-TESTS",
-        "module_title": "Automated Tests, Fixtures & Regression Verification",
-        "keywords": (
-            "test", "tests", "teste", "testes", "testar", "pytest", "jest", "vitest",
-            "playwright", "cypress", "xunit", "nunit", "junit", "coverage",
-            "cobertura", "benchmark*", "fixture*", "mock*", "e2e", "unit test*",
-        ),
-    },
-    "build-ci": {
-        "module_id": "MOD-BUILD-CI",
-        "module_title": "Build, Packaging, Release & CI/CD",
-        "is_ship": True,
-        "keywords": (
-            "build", "builds", "compil*", "ci", "cd", "github actions", "workflow*",
-            "release*", "deploy*", "publish*", "publica*", "docker*", "apk", "npm",
-            "cargo", "maven", "gradle", "dotnet", "commit", "push", "versão", "versao",
-            "version*", "entreg*", "deliver*",
-        ),
-    },
-    "agent-infra": {
-        "module_id": "MOD-AGENT-INFRA",
-        "module_title": "Agent Rules, Planner Engine & Lifecycle Hooks",
-        "keywords": (
-            "agents.md", "gemini.md", ".agents", "hook", "hooks", "skill", "skills",
-            "plugin", "plugins", "planej*", "plan", "plano", "planos", "subagent*",
-            "guardrail*", "anti-drift", "antigravity", "triage", "triagem",
-        ),
-    },
-    "plugin-self": {
-        "module_id": "MOD-PLUGIN-SELF",
-        "module_title": "Plugin Backward Compatibility, Schema & Regression Gate",
-        "keywords": _build_plugin_self_keywords(),
-    },
-}
+def _load_universal_domains() -> dict[str, dict[str, Any]]:
+    raw = json.loads((_SCRIPTS_DIR / "domains.json").read_text(encoding="utf-8"))
+    out: dict[str, dict[str, Any]] = {}
+    for key, spec in (raw.get("triage_domains") or {}).items():
+        entry: dict[str, Any] = {
+            "module_id": str(spec["module_id"]),
+            "module_title": str(spec["module_title"]),
+        }
+        if spec.get("is_ship"):
+            entry["is_ship"] = True
+        if spec.get("dynamic_plugin_stems"):
+            base = list(spec.get("keywords") or [])
+            seen = set(base)
+            for kw in _build_plugin_self_keywords():
+                if kw not in seen:
+                    seen.add(kw)
+                    base.append(kw)
+            entry["keywords"] = tuple(base)
+        else:
+            entry["keywords"] = tuple(spec.get("keywords") or ())
+        out[str(key)] = entry
+    return out
+
+
+UNIVERSAL_DOMAINS: dict[str, dict[str, Any]] = _load_universal_domains()
 
 HIGH_DEPTH_SIGNALS = (
     "arquitetura", "architecture", "refator*", "refactor*", "reescrev*", "rewrit*",

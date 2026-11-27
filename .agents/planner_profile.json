@@ -1,6 +1,6 @@
 {
   "schema_version": 5,
-  "plugin_version": "2.14.0",
+  "plugin_version": "2.22.0",
   "docs_format_version": 1,
   "project_name": "dynamic-fractal-planner",
   "planner_mode": "auto",
@@ -30,6 +30,18 @@
     "fail_files": 920,
     "hard_platform_cap": 999
   },
+  "blueprint": {
+    "dir": ".agents/docs/blueprints",
+    "hub_file": ".agents/docs/PLANS_HUB.md",
+    "require_by_default": false,
+    "default_min_tier": 2,
+    "require_pre_resume_hygiene": true
+  },
+  "adversarial_qa": {
+    "enabled": false,
+    "contracts_file": ".agents/qa/regression_contracts.json",
+    "strict_verify": true
+  },
   "extra_requests_file": ".agents/docs/EXTRA_REQUESTS.md",
   "memory_feedback": {
     "enabled": true,
@@ -37,22 +49,9 @@
     "docs": [
       ".agents/docs/PROJECT_HISTORY.md",
       ".agents/docs/SAVED_IDEAS.md",
-      ".agents/docs/BUILD_LESSONS.md",
       "AGENTS.md"
     ]
   },
-  "build_rules": [
-    {
-      "label": "Plugin Fast Test Suite",
-      "command": "python3 -B tests/run_plugin_tests.py --fast",
-      "trigger_extensions": [
-        ".py",
-        ".json"
-      ],
-      "run_on_force": true
-    }
-  ],
-  "domains": {},
   "plugin_evolution": {
     "enabled": true,
     "auto_sync_higher_version": true,
@@ -99,6 +98,23 @@
       "dotnet_build",
       "heavy_tests",
       "git_push"
-    ]
-  }
+    ],
+    "sub_subagent": {
+      "allow_nesting": true,
+      "default_model": "flash_lite",
+      "swarm_medium_model": "gemini-4-hydrogen-medium",
+      "allow_medium_tier": true
+    }
+  },
+  "build_rules": [
+    {
+      "label": "plugin-tests",
+      "command": "python3 -B tests/run_plugin_tests.py --fast",
+      "trigger_extensions": [
+        ".py"
+      ],
+      "run_on_force": true
+    }
+  ],
+  "domains": {}
 }

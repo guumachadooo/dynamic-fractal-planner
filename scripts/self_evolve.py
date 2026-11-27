@@ -57,6 +57,7 @@ STANDALONE_HOST_EXCLUDES: tuple[str, ...] = (
     ".agents/env_manifest.json",
     ".agents/host_matrix.json",
     ".agents/planner_profile.json",
+    ".agents/docs/COHERENCE_HUB.md",
 )
 
 _DOC_DATA_EXTS: tuple[str, ...] = (

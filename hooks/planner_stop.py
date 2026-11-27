@@ -109,6 +109,21 @@ def main() -> None:
             extra_rel, pending_extra = get_pending_extra_requests(repo, profile)
             if pending_extra:
                 reasons.append(f"`{extra_rel}` has {len(pending_extra)} pending item(s) -> resolve before finishing.")
+            if not hook_state.get("eco_mode") and not hook_state.get("needs_verify"):
+                from schema_migrations import resolve_adversarial_qa_config  # noqa: E402
+
+                qa_cfg = resolve_adversarial_qa_config(profile)
+                if qa_cfg.get("enabled") and qa_cfg.get("enforce_stop_contracts"):
+                    try:
+                        import qa_gate  # noqa: E402
+
+                        qa_fails: list[str] = []
+                        qa_warns: list[str] = []
+                        qa_gate.check_adversarial_qa_contracts(repo, profile, qa_fails, qa_warns)
+                        if qa_fails:
+                            reasons.append("QA_GATE frozen contract failure:\n  " + "\n  ".join(qa_fails[:5]))
+                    except Exception:
+                        pass
 
         if not reasons:
             if hook_state.get("stop_block_streak") or hook_state.get("stop_block_sig"):

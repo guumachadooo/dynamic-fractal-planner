@@ -504,6 +504,50 @@ def main() -> None:
                             save_json(hook_file, hook_state)
                             record_telemetry("blast_radius_warn", {"edited": len(edited)})
 
+            # Safe BLUEPRINT_FIRST enforcement (opt-in via blueprint.enforce_hook or env; strict exemptions)
+            from schema_migrations import resolve_blueprint_config  # noqa: E402
+
+            bp_cfg = resolve_blueprint_config(profile)
+            bp_enforce = bp_cfg.get("enforce_hook") or os.environ.get("PLANNER_ENFORCE_BLUEPRINT_HOOK", "").strip()
+            min_bp_tier = max(2, int(bp_cfg.get("default_min_tier") or 1))
+            if (
+                bp_cfg.get("require_by_default")
+                and bp_enforce
+                and str(bp_enforce).lower() not in ("0", "false", "off")
+                and is_app
+                and not in_plugin
+                and tier >= min_bp_tier
+                and not hook_state.get("eco_mode")
+                and not hook_state.get("blueprint_gate_warned")
+                and not triage.get("blueprint_opt_out")
+                and not triage.get("is_plugin_sync_fastpath")
+                and not triage.get("is_btw_short")
+                and triage.get("intent") != "tiny_fix"
+            ):
+                bp_dir = repo / str(bp_cfg.get("dir") or bp_cfg.get("blueprints_dir") or ".agents/docs/blueprints")
+                has_active_bp = False
+                if bp_dir.is_dir():
+                    for bp_file in bp_dir.glob("BP_*.md"):
+                        head = bp_file.read_text(encoding="utf-8", errors="ignore")[:800].upper()
+                        if any(st in head for st in ("ACTIVE", "PARTIAL", "IN_PROGRESS", "DRAFT")):
+                            has_active_bp = True
+                            break
+                if not has_active_bp:
+                    from planner_state import save_json  # noqa: E402
+
+                    hook_state["blueprint_gate_warned"] = True
+                    save_json(hook_file, hook_state)
+                    decision = "deny" if str(bp_enforce).lower() == "deny" else "force_ask"
+                    record_telemetry("blueprint_first_gate", {"tier": tier, "decision": decision})
+                    reply(
+                        decision,
+                        f"BLUEPRINT_FIRST|T{tier} code edit (`{edit_key}`) w/ zero ACTIVE/PARTIAL blueprint -> "
+                        "run `plan_tool.py blueprint init --format compact` (or opt out w/ `sem blueprint`).",
+                        payload=payload,
+                        repo=repo,
+                    )
+                    return
+
             skip_snap = False
             try:
                 from wave_scheduler import has_active_parallel_leases  # noqa: E402

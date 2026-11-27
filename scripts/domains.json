@@ -1,0 +1,260 @@
+{
+  "schema": 1,
+  "triage_domains": {
+    "ui-frontend": {
+      "module_id": "MOD-UI-FRONTEND",
+      "module_title": "UI Components, Layout, Motion & Localization",
+      "checklist": [
+        "Guard responsive layout, !overflow/clipping, a11y && locale/i18n parity."
+      ],
+      "keywords": [
+        "ui", "ux", "frontend", "front-end", "layout", "css", "tailwind",
+        "react", "vue", "svelte", "next.js", "nextjs", "compose", "swiftui",
+        "html", "dom", "canvas", "shader*", "animat*", "animaç*", "animac*",
+        "botão", "botoes", "botões", "button*", "tela", "telas", "screen*",
+        "aba", "abas", "tab", "tabs", "modal", "dialog*", "seekbar", "slider*",
+        "switch*", "ícone*", "icone*", "icon*", "fonte*", "font*", "tema", "temas",
+        "theme*", "cor", "cores", "color*", "traduç*", "traduc*", "i18n", "l10n",
+        "pt-br", "en-us", "responsive", "responsiv*", "clipping"
+      ]
+    },
+    "api-backend": {
+      "module_id": "MOD-BACKEND",
+      "module_title": "API Endpoints, Services, Auth & Data Layer",
+      "checklist": [
+        "Validate inputs, auth/perm boundaries, error responses && schema/contract backward-compat."
+      ],
+      "keywords": [
+        "api", "rest", "graphql", "grpc", "endpoint*", "route*", "rota", "rotas",
+        "backend", "back-end", "server", "servidor", "auth*", "oauth", "jwt",
+        "database", "banco de dados", "sql", "postgres*", "sqlite", "mysql",
+        "prisma", "orm", "schema*", "migrat*", "migraç*", "migrac*", "cache*",
+        "webhook*", "scraper*", "http", "fetch", "middleware*"
+      ]
+    },
+    "core-logic": {
+      "module_id": "MOD-CORE-LOGIC",
+      "module_title": "Core Algorithms, Parsers & State Machine",
+      "checklist": [
+        "Guard boundary cases (empty/null/EOF/overflow), state invariants && determinism."
+      ],
+      "keywords": [
+        "algorithm*", "algoritmo*", "parser*", "lexer", "ast", "codec*",
+        "decoder*", "encoder*", "demux*", "remux*", "state machine",
+        "máquina de estados", "maquina de estados", "pipeline*", "engine",
+        "motor", "dsp", "math", "physics", "física", "fisica", "interpolat*",
+        "stream", "streams", "streaming", "buffer*", "queue", "fila",
+        "convert*", "transform*", "extract*"
+      ]
+    },
+    "runtime-infra": {
+      "module_id": "MOD-RUNTIME",
+      "module_title": "Concurrency, Process IPC, Filesystem & Runtime Safety",
+      "checklist": [
+        "Audit concurrency/races, resource disposal/cleanup, exit codes && error logging."
+      ],
+      "keywords": [
+        "thread*", "concorrên*", "concorren*", "concurrency", "async", "await",
+        "deadlock*", "race condition*", "mutex", "lock*", "process*", "subprocess*",
+        "pipe*", "ipc", "selinux", "permiss*", "filesystem", "docker", "container*",
+        "memory", "memória", "memoria", "leak*", "dispose*", "crash*", "erro*",
+        "bug*", "falha*"
+      ]
+    },
+    "tests-qa": {
+      "module_id": "MOD-TESTS",
+      "module_title": "Automated Tests, Fixtures & Regression Verification",
+      "checklist": [
+        "Run real tests post-final-edit -> verify happy-path && edge/failure cases."
+      ],
+      "keywords": [
+        "test", "tests", "teste", "testes", "testar", "pytest", "jest", "vitest",
+        "playwright", "cypress", "xunit", "nunit", "junit", "coverage",
+        "cobertura", "benchmark*", "fixture*", "mock*", "e2e", "unit test*"
+      ]
+    },
+    "build-ci": {
+      "module_id": "MOD-BUILD-CI",
+      "module_title": "Build, Packaging, Release & CI/CD",
+      "is_ship": true,
+      "checklist": [
+        "Clear `.agents/docs/EXTRA_REQUESTS.md` first && pass build/packaging/CI checks."
+      ],
+      "keywords": [
+        "build", "builds", "compil*", "ci", "cd", "github actions", "workflow*",
+        "release*", "deploy*", "publish*", "publica*", "docker*", "apk", "npm",
+        "cargo", "maven", "gradle", "dotnet", "commit", "push", "versão", "versao",
+        "version*", "entreg*", "deliver*"
+      ]
+    },
+    "agent-infra": {
+      "module_id": "MOD-AGENT-INFRA",
+      "module_title": "Agent Rules, Planner Engine & Lifecycle Hooks",
+      "checklist": [
+        "Write agent docs in symbolic telegraphic EN; verify JSON/script syntax && run hook sim tests."
+      ],
+      "keywords": [
+        "agents.md", "gemini.md", ".agents", "hook", "hooks", "skill", "skills",
+        "plugin", "plugins", "planej*", "plan", "plano", "planos", "subagent*",
+        "guardrail*", "anti-drift", "antigravity", "triage", "triagem"
+      ]
+    },
+    "plugin-self": {
+      "module_id": "MOD-PLUGIN-SELF",
+      "module_title": "Plugin Backward Compatibility, Schema & Regression Gate",
+      "dynamic_plugin_stems": true,
+      "checklist": [
+        "!break older `schema_version` -> add deterministic migrator in `scripts/schema_migrations.py`.",
+        "Preserve frozen `tests/fixtures/` && run `tests/run_plugin_tests.py` post-final-edit."
+      ],
+      "keywords": [
+        "dynamic-fractal-planner", "planner_profile*", "planner_guard*", "extra_requests*"
+      ]
+    }
+  },
+  "universal_checklists_extra": {
+    "discovery": [
+      "grep/git grep first -> <=150L slices (`research` subagent if >=3 subsystems).",
+      "Check `AGENTS.md`, `GEMINI.md`, `.agents/docs/PROJECT_HISTORY.md`, README -> local invariants."
+    ],
+    "contract": [
+      "Lock affected files, interfaces/signatures, state ownership && failure modes pre-edit."
+    ],
+    "harden": [
+      "Audit null/empty inputs, error msgs, cleanup && zero regression."
+    ],
+    "audit": [
+      "Run `verify_universal.py` (`--build` on compiled code) && inspect `git diff` post-final-edit.",
+      "Verify `REQ-01..REQ-N` item-by-item vs observed files/outputs -> mark via `req-verify`."
+    ],
+    "general": [
+      "Match repo coding style, naming && modular structure."
+    ]
+  },
+  "default_module_steps": {
+    "discovery": [
+      "Map affected files, symbols && call sites via grep/scoped slices (or `research` subagent).",
+      "Check conventions, pitfalls (`PROJECT_HISTORY.md`) && touched-area constraints."
+    ],
+    "contract": [
+      "Specify exact file list, interfaces, state flow && failure/fallback behavior."
+    ],
+    "harden": [
+      "Audit edge cases, error handling, cleanup && backward-compat."
+    ],
+    "audit": [
+      "Run `verify_universal.py` (+ build/tests if applicable) && inspect `git diff --stat`.",
+      "Verify every `REQ-XX` vs observed files/outputs -> record `req-verify` evidence."
+    ]
+  },
+  "blueprint_domains": {
+    "software": {
+      "keywords": [
+        "api", "backend", "frontend", "microservice", "monolith", "sdk", "cli", "plugin",
+        "database", "schema", "cache", "queue", "event", "webhook", "graphql", "rest",
+        "parser", "compiler", "state machine", "concurrency", "idempoten", "architecture",
+        "refactor", "modular", "split", "partial", "linter", "rubric", "blueprint"
+      ],
+      "lens": "Enforce explicit contracts, idempotency, bounded latency (p95/p99), backward-compatible schema migration & failure isolation.",
+      "zwicky_axes": [
+        ["Stateless/Edge vs Stateful/Centralized", "Stateless Edge", "Centralized State"],
+        ["OSS/Commodity vs Custom Core", "Battle-Tested OSS", "Custom Differentiator"]
+      ],
+      "probe_hint": "pytest / unit contract tests + schema compat fixture"
+    },
+    "dsp-hw": {
+      "keywords": [
+        "audio", "dsp", "spatial", "atmos", "iamf", "ambisonic", "binaural", "hrtf", "brir",
+        "vocal", "stft", "fft", "filter", "kalman", "wpe", "acoustic", "feedback", "howling",
+        "scarlett", "duplex", "usb", "uac2", "aaudio", "alsa", "rt ", "real-time", "tempo real",
+        "latency", "wcet", "hardware", "fpga", "embedded", "neon", "simd", "npu", "gpu", "vulkan", "therm"
+      ],
+      "lens": "Split Offline / RT 0-alloc 0-lock hot-path (<1ms/block) / Async control; fuse owned signals/hw; prove math in offline golden bench first.",
+      "zwicky_axes": [
+        ["Physics/Analytical Math vs Learned Neural", "Analytical Physics/DSP", "Invariant Neural Model"],
+        ["Offline Precompute vs Real-Time Control", "Offline Track/Prep Plane", "Hard-RT Zero-Alloc Plane"]
+      ],
+      "probe_hint": "Offline synthetic golden-bench SNR/ERLE/WCET + 0-alloc static audit"
+    },
+    "ai-ml": {
+      "keywords": [
+        "ai", "ia", "ml", "llm", "slm", "model", "modelo", "neural", "onnx", "int4", "fp16",
+        "quantiz", "lora", "fine-tune", "rag", "embedding", "vector", "agent", "agente",
+        "multi-agent", "onisciente", "omniscient", "classifier", "classificador", "semantic",
+        "semântic", "training", "treino", "eval", "benchmark", "inference", "prompt"
+      ],
+      "lens": "Use AI ONLY where problem invariants generalize (0 per-song/user retraining); bound tokens/VRAM/latency; prove delta vs deterministic heuristic.",
+      "zwicky_axes": [
+        ["Deterministic Rules vs Compact LLM/ONNX", "Deterministic Rule/Classifier", "Compact Constrained AI Director"],
+        ["On-Device Quantized vs Cloud Hybrid", "Local INT4/ONNX Offline", "Optional Cloud API Fallback"]
+      ],
+      "probe_hint": "Offline eval set vs deterministic baseline + JSON schema/latency gate"
+    },
+    "security": {
+      "keywords": [
+        "auth", "oauth", "oidc", "jwt", "hmac", "aes", "crypto", "encrypt", "secret", "key",
+        "keystore", "tee", "strongbox", "biometric", "permission", "selinux", "w^x", "sandbox",
+        "zero-trust", "stride", "threat", "abuse", "rate-limit", "isolation", "ipc", "token"
+      ],
+      "lens": "Apply STRIDE across trust boundaries, fail-closed auth/crypto, least privilege, secret redaction & attacker cost-asymmetry.",
+      "zwicky_axes": [
+        ["Capability/Zero-Trust vs Perimeter Trust", "Zero-Trust Capability Token", "Local IPC Signature Gate"],
+        ["Fail-Closed Strict vs Graceful Degraded", "Strict Fail-Closed", "Bounded Safe Fallback"]
+      ],
+      "probe_hint": "Adversarial tamper/spoof/replay test + secret-scan static gate"
+    },
+    "ux-product": {
+      "keywords": [
+        "ui", "ux", "oneui", "screen", "tab", "button", "botão", "botao", "modal", "dialog",
+        "slider", "toggle", "switch", "settings", "configura", "canvas", "animation", "3d",
+        "visual", "blur", "lyrics", "karaoke", "studio", "player", "workflow", "label",
+        "onboarding", "accessibility", "l10n", "i18n", "localization", "progressive disclosure"
+      ],
+      "lens": "Progressive disclosure (single primary CTA, zero jargon), offline/error clarity, <=3 taps to value, 60/120Hz zero-jank & 100% l10n parity.",
+      "zwicky_axes": [
+        ["Zero-Config Auto vs Pro Manual Control", "1-CTA Zero-Jargon Mode", "Collapsible Pro X-Ray"],
+        ["Live Preview First vs Offline Wizard", "Immediate Live Feedback", "Guided Batch Builder"]
+      ],
+      "probe_hint": "L10n key-parity check + interaction step/jank budget test"
+    },
+    "infra-ops": {
+      "keywords": [
+        "ci", "cd", "github actions", "docker", "kubernetes", "cloudflare", "worker", "deploy",
+        "release", "ota", "observability", "telemetry", "logging", "monitoring", "alert",
+        "backup", "rollback", "daemon", "service", "foreground", "oom", "ram", "memory"
+      ],
+      "lens": "Design for unattended recovery, idempotent deploy/rollback, OOM/quota ceilings, zero-blind-retry backoff & structured observability.",
+      "zwicky_axes": [
+        ["Push/Webhook Event vs Pull/ETag Poll", "Event-Driven Wake", "Low-Cost ETag 304 Poll"],
+        ["Ephemeral Stateless vs Durable Checkpoint", "Stateless Worker", "Atomic WAL/Checkpoint"]
+      ],
+      "probe_hint": "Fault-injection / OOM kill recovery + CI parity dry-run"
+    },
+    "data-bi": {
+      "keywords": [
+        "etl", "elt", "pipeline", "warehouse", "lake", "parquet", "sql", "sqlite", "postgres",
+        "timeseries", "analytics", "lineage", "retention", "dedup", "index", "cache", "manifest",
+        "bpm", "metadata", "lyrics", "corpus", "dataset", "ground truth", "forensic"
+      ],
+      "lens": "Guarantee schema lineage, deterministic replay, idempotent ingestion, bounded storage growth & anti-leakage ground-truth splits.",
+      "zwicky_axes": [
+        ["Batch Snapshot vs Streaming Incremental", "Immutable Batch Snapshot", "Incremental Delta Stream"],
+        ["Raw Audio/Source Derived vs External Lookup", "100% Source-Derived Physics", "Verified External Prior Merge"]
+      ],
+      "probe_hint": "Idempotent replay + data-integrity checksum / golden corpus check"
+    },
+    "biz-org": {
+      "keywords": [
+        "roadmap", "strategy", "pricing", "unit econ", "quota", "budget", "cost", "roi",
+        "wardley", "build vs buy", "team", "org", "conway", "onboarding", "governance",
+        "compliance", "sla", "slo", "kpi", "okr", "gtm", "adoption", "friction"
+      ],
+      "lens": "Anchor on Wardley build-vs-commodity, unit economics, Conway slice boundaries, reversibility (1-way vs 2-way) & objective kill KPIs.",
+      "zwicky_axes": [
+        ["Build Differentiator vs Buy/Reuse Commodity", "Custom Core IP", "Standard Commodity/OSS"],
+        ["Big-Bang Launch vs Rolling Thin Wedge", "Thin Wedge Wave-0", "Platform Generalization"]
+      ],
+      "probe_hint": "KPI / cost-per-unit threshold gate + Wave-0 VoI validation"
+    }
+  }
+}

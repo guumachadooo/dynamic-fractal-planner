@@ -177,6 +177,8 @@ def detect_host(
         host_id = "local-ide"
         reason = "fallback:local-ide"
 
+    has_git_cli = bool(shutil.which("git"))
+    has_gh_cli = bool(shutil.which("gh"))
     return {
         "host_id": host_id,
         "reason": reason,
@@ -184,6 +186,8 @@ def detect_host(
         "is_antigravity": host_id.startswith("antigravity"),
         "capabilities": {
             "has_git": has_git,
+            "has_git_cli": has_git_cli,
+            "has_gh_cli": has_gh_cli,
             "has_gh_auth": has_gh_auth,
             "has_local_dotnet": has_local_dotnet,
             "has_sdcard": has_sdcard,
@@ -464,7 +468,6 @@ def infer_tool_classification(repo: Path, rel_path: str) -> dict[str, Any]:
         "github_direct",
         "deploy_worker",
         "hot_probe",
-        "live_phone_bridge",
     )
     dual_body = (
         "inspect_capabilities",
@@ -662,10 +665,10 @@ def register_tool_entry(
     if data is None:
         data = {
             "schema": 1,
-            "strict_coverage": False,
+            "strict_coverage": True,
             "hosts": {
                 "antigravity-termux": {"ignore_cloud_env_alerts": True, "boot_steps": ["plan_tool.py host-boot"]},
-                "ai-studio-cloud": {"ignore_cloud_env_alerts": False, "boot_steps": ["flight_recorder.py recover", "plan_tool.py host-boot"]},
+                "ai-studio-cloud": {"ignore_cloud_env_alerts": False, "boot_steps": ["flight_recorder.py resume", "plan_tool.py host-boot"]},
                 "ci-runner": {"ignore_cloud_env_alerts": True, "boot_steps": ["verify_universal.py --all"]},
                 "local-ide": {"ignore_cloud_env_alerts": True, "boot_steps": ["plan_tool.py host-boot"]},
             },

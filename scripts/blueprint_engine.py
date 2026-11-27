@@ -39,116 +39,20 @@ from blueprint_hub import (  # noqa: E402, F401
     transition_blueprint,
 )
 
-DOMAIN_PROFILES: dict[str, dict[str, Any]] = {
-    "software": {
-        "keywords": (
-            "api", "backend", "frontend", "microservice", "monolith", "sdk", "cli", "plugin",
-            "database", "schema", "cache", "queue", "event", "webhook", "graphql", "rest",
-            "parser", "compiler", "state machine", "concurrency", "idempoten", "architecture",
-            "refactor", "modular", "split", "partial", "linter", "rubric", "blueprint",
-        ),
-        "lens": "Enforce explicit contracts, idempotency, bounded latency (p95/p99), backward-compatible schema migration & failure isolation.",
-        "zwicky_axes": [
-            ("Stateless/Edge vs Stateful/Centralized", "Stateless Edge", "Centralized State"),
-            ("OSS/Commodity vs Custom Core", "Battle-Tested OSS", "Custom Differentiator"),
-        ],
-        "probe_hint": "pytest / unit contract tests + schema compat fixture",
-    },
-    "dsp-hw": {
-        "keywords": (
-            "audio", "dsp", "spatial", "atmos", "iamf", "ambisonic", "binaural", "hrtf", "brir",
-            "vocal", "stft", "fft", "filter", "kalman", "wpe", "acoustic", "feedback", "howling",
-            "scarlett", "duplex", "usb", "uac2", "aaudio", "alsa", "rt ", "real-time", "tempo real",
-            "latency", "wcet", "hardware", "fpga", "embedded", "neon", "simd", "npu", "gpu", "vulkan", "therm",
-        ),
-        "lens": "Split Offline / RT 0-alloc 0-lock hot-path (<1ms/block) / Async control; fuse owned signals/hw; prove math in offline golden bench first.",
-        "zwicky_axes": [
-            ("Physics/Analytical Math vs Learned Neural", "Analytical Physics/DSP", "Invariant Neural Model"),
-            ("Offline Precompute vs Real-Time Control", "Offline Track/Prep Plane", "Hard-RT Zero-Alloc Plane"),
-        ],
-        "probe_hint": "Offline synthetic golden-bench SNR/ERLE/WCET + 0-alloc static audit",
-    },
-    "ai-ml": {
-        "keywords": (
-            "ai", "ia", "ml", "llm", "slm", "model", "modelo", "neural", "onnx", "int4", "fp16",
-            "quantiz", "lora", "fine-tune", "rag", "embedding", "vector", "agent", "agente",
-            "multi-agent", "onisciente", "omniscient", "classifier", "classificador", "semantic",
-            "semântic", "training", "treino", "eval", "benchmark", "inference", "prompt",
-        ),
-        "lens": "Use AI ONLY where problem invariants generalize (0 per-song/user retraining); bound tokens/VRAM/latency; prove delta vs deterministic heuristic.",
-        "zwicky_axes": [
-            ("Deterministic Rules vs Compact LLM/ONNX", "Deterministic Rule/Classifier", "Compact Constrained AI Director"),
-            ("On-Device Quantized vs Cloud Hybrid", "Local INT4/ONNX Offline", "Optional Cloud API Fallback"),
-        ],
-        "probe_hint": "Offline eval set vs deterministic baseline + JSON schema/latency gate",
-    },
-    "security": {
-        "keywords": (
-            "auth", "oauth", "oidc", "jwt", "hmac", "aes", "crypto", "encrypt", "secret", "key",
-            "keystore", "tee", "strongbox", "biometric", "permission", "selinux", "w^x", "sandbox",
-            "zero-trust", "stride", "threat", "abuse", "rate-limit", "isolation", "ipc", "token",
-        ),
-        "lens": "Apply STRIDE across trust boundaries, fail-closed auth/crypto, least privilege, secret redaction & attacker cost-asymmetry.",
-        "zwicky_axes": [
-            ("Capability/Zero-Trust vs Perimeter Trust", "Zero-Trust Capability Token", "Local IPC Signature Gate"),
-            ("Fail-Closed Strict vs Graceful Degraded", "Strict Fail-Closed", "Bounded Safe Fallback"),
-        ],
-        "probe_hint": "Adversarial tamper/spoof/replay test + secret-scan static gate",
-    },
-    "ux-product": {
-        "keywords": (
-            "ui", "ux", "oneui", "screen", "tab", "button", "botão", "botao", "modal", "dialog",
-            "slider", "toggle", "switch", "settings", "configura", "canvas", "animation", "3d",
-            "visual", "blur", "lyrics", "karaoke", "studio", "player", "workflow", "label",
-            "onboarding", "accessibility", "l10n", "i18n", "localization", "progressive disclosure",
-        ),
-        "lens": "Progressive disclosure (single primary CTA, zero jargon), offline/error clarity, <=3 taps to value, 60/120Hz zero-jank & 100% l10n parity.",
-        "zwicky_axes": [
-            ("Zero-Config Auto vs Pro Manual Control", "1-CTA Zero-Jargon Mode", "Collapsible Pro X-Ray"),
-            ("Live Preview First vs Offline Wizard", "Immediate Live Feedback", "Guided Batch Builder"),
-        ],
-        "probe_hint": "L10n key-parity check + interaction step/jank budget test",
-    },
-    "infra-ops": {
-        "keywords": (
-            "ci", "cd", "github actions", "docker", "kubernetes", "cloudflare", "worker", "deploy",
-            "release", "ota", "observability", "telemetry", "logging", "monitoring", "alert",
-            "backup", "rollback", "daemon", "service", "foreground", "oom", "ram", "memory",
-        ),
-        "lens": "Design for unattended recovery, idempotent deploy/rollback, OOM/quota ceilings, zero-blind-retry backoff & structured observability.",
-        "zwicky_axes": [
-            ("Push/Webhook Event vs Pull/ETag Poll", "Event-Driven Wake", "Low-Cost ETag 304 Poll"),
-            ("Ephemeral Stateless vs Durable Checkpoint", "Stateless Worker", "Atomic WAL/Checkpoint"),
-        ],
-        "probe_hint": "Fault-injection / OOM kill recovery + CI parity dry-run",
-    },
-    "data-bi": {
-        "keywords": (
-            "etl", "elt", "pipeline", "warehouse", "lake", "parquet", "sql", "sqlite", "postgres",
-            "timeseries", "analytics", "lineage", "retention", "dedup", "index", "cache", "manifest",
-            "bpm", "metadata", "lyrics", "corpus", "dataset", "ground truth", "forensic",
-        ),
-        "lens": "Guarantee schema lineage, deterministic replay, idempotent ingestion, bounded storage growth & anti-leakage ground-truth splits.",
-        "zwicky_axes": [
-            ("Batch Snapshot vs Streaming Incremental", "Immutable Batch Snapshot", "Incremental Delta Stream"),
-            ("Raw Audio/Source Derived vs External Lookup", "100% Source-Derived Physics", "Verified External Prior Merge"),
-        ],
-        "probe_hint": "Idempotent replay + data-integrity checksum / golden corpus check",
-    },
-    "biz-org": {
-        "keywords": (
-            "roadmap", "strategy", "pricing", "unit econ", "quota", "budget", "cost", "roi",
-            "wardley", "build vs buy", "team", "org", "conway", "onboarding", "governance",
-            "compliance", "sla", "slo", "kpi", "okr", "gtm", "adoption", "friction",
-        ),
-        "lens": "Anchor on Wardley build-vs-commodity, unit economics, Conway slice boundaries, reversibility (1-way vs 2-way) & objective kill KPIs.",
-        "zwicky_axes": [
-            ("Build Differentiator vs Buy/Reuse Commodity", "Custom Core IP", "Standard Commodity/OSS"),
-            ("Big-Bang Launch vs Rolling Thin Wedge", "Thin Wedge Wave-0", "Platform Generalization"),
-        ],
-        "probe_hint": "KPI / cost-per-unit threshold gate + Wave-0 VoI validation",
-    },
-}
+def _load_blueprint_domain_profiles() -> dict[str, dict[str, Any]]:
+    raw = json.loads((_SCRIPTS_DIR / "domains.json").read_text(encoding="utf-8"))
+    out: dict[str, dict[str, Any]] = {}
+    for key, spec in (raw.get("blueprint_domains") or {}).items():
+        out[str(key)] = {
+            "keywords": tuple(spec.get("keywords") or ()),
+            "lens": str(spec.get("lens") or ""),
+            "zwicky_axes": [tuple(ax) for ax in (spec.get("zwicky_axes") or [])],
+            "probe_hint": str(spec.get("probe_hint") or ""),
+        }
+    return out
+
+
+DOMAIN_PROFILES: dict[str, dict[str, Any]] = _load_blueprint_domain_profiles()
 
 _ONE_WAY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:architect|schema|protocol|wire\s+format|file\s+format|crypto|migration|breaking|public\s+api|abi|selinux|hardware|firmware|kernel|persistent\s+storage|onisciente|omniscient|duplex)\b", re.I),
