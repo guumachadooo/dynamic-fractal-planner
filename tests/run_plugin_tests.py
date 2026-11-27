@@ -1396,7 +1396,11 @@ class TestCavernV1V2V3Parity(unittest.TestCase):
         self.assertEqual(v2_cavern.get("schema_version"), 2)
         self._assert_parity_for_profile("v2_cavern_fixture", v2_cavern)
 
-        if self.LIVE_CAVERN_PROFILE.is_file():
+        try:
+            has_live_cavern_profile = self.LIVE_CAVERN_PROFILE.is_file()
+        except OSError:
+            has_live_cavern_profile = False
+        if has_live_cavern_profile:
             live_cavern = json.loads(self.LIVE_CAVERN_PROFILE.read_text(encoding="utf-8"))
             self.assertIn(live_cavern.get("schema_version"), (2, 3, 4, 5))
             self._assert_parity_for_profile(f"live_v{live_cavern.get('schema_version')}_cavern", live_cavern)
@@ -3905,9 +3909,36 @@ class TestV260UniversalEfficiencyAndSelfEvolution(unittest.TestCase):
             self.assertTrue(any(ln.startswith("HOST|") for ln in ss_lines), ss_lines)
             self.assertTrue(any("BATON_SWITCH|" in ln and "BRIDGE_AHEAD|" in ln for ln in ss_lines), ss_lines)
 
+            # 5b. PermissionError (EACCES on /root/.dotnet on non-root CI runners) must never crash detect_host
+            class _EaccesPath(type(Path())):
+                def is_file(self) -> bool:
+                    raise PermissionError(13, "Permission denied", str(self))
+
+                def is_dir(self) -> bool:
+                    raise PermissionError(13, "Permission denied", str(self))
+
+                def exists(self) -> bool:
+                    raise PermissionError(13, "Permission denied", str(self))
+
+            eacces_probes = {
+                "termux_dir": _EaccesPath("/root/restricted_termux"),
+                "sdcard_dir": _EaccesPath("/root/restricted_sdcard"),
+                "local_dotnet_bin": _EaccesPath("/root/.dotnet/dotnet"),
+                "gh_hosts_file": _EaccesPath("/root/.config/gh/hosts.yml"),
+                "omni_local_config": _EaccesPath("/root/.omni_agent/config.json"),
+                "runtime_env_bridge": _EaccesPath("/root/runtime_env.json"),
+            }
+            ci_host = host_context.detect_host(repo, env={"GITHUB_ACTIONS": "true"}, probe_paths=eacces_probes)
+            self.assertEqual(ci_host["host_id"], "ci-runner")
+            self.assertFalse(ci_host["capabilities"]["has_sdcard"])
+
             # 6. Real Cavern SessionStart char budget (<1800) when host_matrix.json present
             live_cavern = Path("/root/.gemini/antigravity/scratch/Cavern")
-            if live_cavern.is_dir() and (live_cavern / ".agents" / "host_matrix.json").is_file():
+            try:
+                has_live_cavern = live_cavern.is_dir() and (live_cavern / ".agents" / "host_matrix.json").is_file()
+            except OSError:
+                has_live_cavern = False
+            if has_live_cavern:
                 rc_ss, err_ss, ss_live = run_hook(
                     "planner_session_start.py",
                     {"workspacePaths": [str(live_cavern)], "artifactDirectoryPath": art},

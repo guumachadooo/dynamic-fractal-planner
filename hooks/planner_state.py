@@ -567,17 +567,29 @@ def eval_conditions(cond: dict[str, Any] | None, repo: Path | None = None) -> bo
             return str(repo / p)
         return str(Path(p).expanduser())
 
+    def _safe_exists(p_str: str) -> bool:
+        try:
+            return Path(p_str).exists()
+        except OSError:
+            return False
+
+    def _safe_glob(pattern: str) -> list[str]:
+        try:
+            return glob.glob(pattern)
+        except OSError:
+            return []
+
     if "exists_path" in cond:
-        if not Path(_expand(str(cond["exists_path"]))).exists():
+        if not _safe_exists(_expand(str(cond["exists_path"]))):
             return False
     if "not_exists_path" in cond:
-        if Path(_expand(str(cond["not_exists_path"]))).exists():
+        if _safe_exists(_expand(str(cond["not_exists_path"]))):
             return False
     if "exists_glob" in cond:
-        if not glob.glob(_expand(str(cond["exists_glob"]))):
+        if not _safe_glob(_expand(str(cond["exists_glob"]))):
             return False
     if "not_exists_glob" in cond:
-        if glob.glob(_expand(str(cond["not_exists_glob"]))):
+        if _safe_glob(_expand(str(cond["not_exists_glob"]))):
             return False
     return True
 
@@ -926,7 +938,11 @@ def _detect_starter_build_rules(repo: Path) -> list[dict[str, Any]]:
         })
     if any(repo.glob("*.sln")) or any(repo.glob("*.csproj")) or any(repo.glob("*/*.csproj")) or any(repo.glob("*/*/*.csproj")):
         termux_dotnet = Path("/root/.dotnet/dotnet")
-        if termux_dotnet.is_file():
+        try:
+            has_termux_dotnet = termux_dotnet.is_file()
+        except OSError:
+            has_termux_dotnet = False
+        if has_termux_dotnet:
             rules.append({
                 "label": "dotnet build",
                 "command": "/root/.dotnet/dotnet build -m:1 /p:UseSharedCompilation=false --nologo -v:minimal",

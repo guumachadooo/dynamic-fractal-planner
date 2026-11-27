@@ -74,6 +74,34 @@ def _default_probe_paths(probe_paths: dict[str, Path] | None = None) -> dict[str
     return p_map
 
 
+def _safe_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _safe_file_nonempty(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def detect_host(
     repo: Path,
     env: Mapping[str, str] | None = None,
@@ -90,18 +118,19 @@ def detect_host(
     except OSError:
         repo_resolved = repo_path
 
-    has_git = (repo_path / ".git").exists()
+    has_git = _safe_exists(repo_path / ".git")
     gh_file = probes["gh_hosts_file"]
     has_gh_auth = bool(
-        (gh_file.is_file() and gh_file.stat().st_size > 0)
+        _safe_file_nonempty(gh_file)
         or str(e.get("GH_TOKEN") or "").strip()
         or str(e.get("GITHUB_TOKEN") or "").strip()
     )
     dotnet_bin = probes["local_dotnet_bin"]
-    has_local_dotnet = dotnet_bin.is_file() or bool(shutil.which("dotnet"))
-    has_sdcard = probes["sdcard_dir"].is_dir()
-    has_local_omni_config = probes["omni_local_config"].is_file()
-    has_runtime_env_bridge = probes["runtime_env_bridge"].is_file()
+    has_termux_dotnet = _safe_is_file(dotnet_bin)
+    has_local_dotnet = has_termux_dotnet or bool(shutil.which("dotnet"))
+    has_sdcard = _safe_is_dir(probes["sdcard_dir"])
+    has_local_omni_config = _safe_is_file(probes["omni_local_config"])
+    has_runtime_env_bridge = _safe_is_file(probes["runtime_env_bridge"])
 
     override = str(e.get("PLANNER_HOST_OVERRIDE") or "").strip()
     antigravity_present = any(
@@ -110,8 +139,8 @@ def detect_host(
     )
     termux_proot = bool(
         str(e.get("PROOT_L2S_DIR") or "").strip()
-        or probes["termux_dir"].exists()
-        or (has_sdcard and dotnet_bin.is_file())
+        or _safe_exists(probes["termux_dir"])
+        or (has_sdcard and has_termux_dotnet)
     )
     ci_present = (
         str(e.get("GITHUB_ACTIONS") or "").strip().lower() == "true"
@@ -119,7 +148,7 @@ def detect_host(
     )
     ai_studio_env = any(str(e.get(k) or "").strip() for k in ("AI_STUDIO", "AISTUDIO", "GOOGLE_AI_STUDIO"))
     in_app_applet = str(repo_path).startswith("/app/applet") or str(repo_resolved).startswith("/app/applet")
-    gitless_preview_shim = (not has_git) and (repo_path / ".agents" / "preview" / "server.mjs").is_file()
+    gitless_preview_shim = (not has_git) and _safe_is_file(repo_path / ".agents" / "preview" / "server.mjs")
 
     if override:
         host_id = override
@@ -316,7 +345,7 @@ def detect_baton_state(
     bridge_summary = ""
     bridge_utc_ts = 0
     bridge_mtime = 0.0
-    if bpath is not None and bpath.is_file():
+    if bpath is not None and _safe_is_file(bpath):
         try:
             bridge_mtime = bpath.stat().st_mtime
             btext = bpath.read_text(encoding="utf-8", errors="ignore")

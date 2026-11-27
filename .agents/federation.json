@@ -71,6 +71,7 @@
           "exclude": [
             ".git",
             ".github",
+            ".gitignore",
             "package.json",
             "AGENTS.md",
             ".agents/preview",
@@ -103,6 +104,7 @@
           "exclude": [
             ".git",
             ".github",
+            ".gitignore",
             "package.json",
             "AGENTS.md",
             ".agents/preview",
