@@ -227,6 +227,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "lens_injected": False,
             "blueprint_injected": False,
             "hygiene_injected": False,
+            "qa_gate_injected": False,
             "plugin_sync_injected": False,
             "btw_injected": False,
             "task_status_polls": prev_task_polls,
@@ -503,6 +504,26 @@ def _run_pre_invocation_inner(t0: float) -> None:
         )
         if _append_within_budget(bp_first_line):
             hook_state["blueprint_injected"] = True
+
+    # Cold-Context Adversarial QA Gate cue (when enabled in profile on T2+/ship turns; suppressed in ECO_MODE)
+    from schema_migrations import resolve_adversarial_qa_config  # noqa: E402
+
+    qa_cfg = resolve_adversarial_qa_config(profile)
+    if (
+        qa_cfg.get("enabled")
+        and not eco_mode
+        and not is_btw_short
+        and not hook_state.get("qa_gate_injected")
+        and tier >= 2
+    ):
+        qa_line = (
+            f"[QA_GATE|COLD_CTX] 1-bug=1-test-first + isolated Destroyer gate (`plan_tool.py qa {{prompt|verify-contracts|gate}}`): "
+            f"CRIT={int(qa_cfg.get('max_critical', 0))},HIGH={int(qa_cfg.get('max_high', 0))},"
+            f"GEOM={int(qa_cfg.get('max_geom', 0))},EXIT={int(qa_cfg.get('max_exit_crash_new', 0))},"
+            f"P95<={float(qa_cfg.get('max_frame_p95_ms', 12.0)):.0f}ms."
+        )
+        if _append_within_budget(qa_line):
+            hook_state["qa_gate_injected"] = True
 
     # Domain lenses (1-line active-domain critique, suppressed in ECO_MODE & within bloat budget)
     if not is_btw_short and not eco_mode and not plan_ready and not hook_state.get("lens_injected") and tier >= 1:

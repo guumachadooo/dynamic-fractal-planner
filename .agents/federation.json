@@ -35,7 +35,7 @@
       ],
       "termuxPath": "/root/.gemini/antigravity/scratch/dynamic-fractal-planner",
       "termuxGlobalPluginPath": "/root/.gemini/config/plugins/dynamic-fractal-planner",
-      "ciWorkflow": ""
+      "ciWorkflow": "ReleasePlugin.yml"
     }
   },
   "mirrors": [
@@ -70,6 +70,7 @@
           "dst": ".agents/plugins/dynamic-fractal-planner",
           "exclude": [
             ".git",
+            ".github",
             "package.json",
             "AGENTS.md",
             ".agents/preview",
@@ -101,6 +102,7 @@
           "dst": ".agents/plugins/dynamic-fractal-planner",
           "exclude": [
             ".git",
+            ".github",
             "package.json",
             "AGENTS.md",
             ".agents/preview",

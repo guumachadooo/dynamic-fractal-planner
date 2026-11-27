@@ -1,0 +1,61 @@
+name: Test & Auto-Release Dynamic Fractal Planner
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run plugin test suite
+        run: python3 -B tests/run_plugin_tests.py --fast
+
+      - name: Read plugin version & publish GitHub Release if new
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - << 'EOF'
+          import json, pathlib, re, subprocess, sys
+
+          meta = json.loads(pathlib.Path("plugin.json").read_text(encoding="utf-8"))
+          ver = str(meta.get("version") or "").strip()
+          if not ver:
+              raise SystemExit("plugin.json missing version")
+          tag = f"v{ver}"
+
+          # Skip if release already exists (never overwrite prior releases)
+          chk = subprocess.run(["gh", "release", "view", tag], capture_output=True, text=True)
+          if chk.returncode == 0:
+              print(f"Release {tag} already exists; skipping.")
+              sys.exit(0)
+
+          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8") if pathlib.Path("CHANGELOG.md").is_file() else ""
+          m = re.search(rf"(?ms)^##\s*\[?v?{re.escape(ver)}\]?.*?(?=^##\s|\Z)", changelog)
+          notes = m.group(0).strip() if m else f"Automated release of Dynamic Fractal Planner {tag}."
+          notes_path = pathlib.Path("/tmp/release_notes.md")
+          notes_path.write_text(notes + "\n", encoding="utf-8")
+
+          subprocess.run(
+              [
+                  "gh", "release", "create", tag,
+                  "--title", f"Dynamic Fractal Planner {tag}",
+                  "--notes-file", str(notes_path),
+                  "--latest",
+              ],
+              check=True,
+          )
+          print(f"Published GitHub Release {tag} (Latest).")
+          EOF

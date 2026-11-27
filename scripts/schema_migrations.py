@@ -110,6 +110,23 @@ def resolve_delegation_config(profile: dict[str, Any] | None = None) -> dict[str
     return merged
 
 
+DEFAULT_ADVERSARIAL_QA_CONFIG: dict[str, Any] = {
+    "enabled": False,
+    "contracts_file": ".agents/qa/regression_contracts.json",
+    "strict_verify": True,
+    "require_cold_context_subagent": True,
+    "destroyer_model_tier": "flash",
+    "gate_command": "",
+    "max_critical": 0,
+    "max_high": 0,
+    "max_geom": 0,
+    "max_exit_crash_new": 0,
+    "max_frame_p95_ms": 12.0,
+    "max_contracts_failed": 0,
+    "require_soak_pass": True,
+}
+
+
 def resolve_blueprint_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """Merge profile `blueprint` overrides cleanly onto DEFAULT_BLUEPRINT_CONFIG."""
     merged = copy.deepcopy(DEFAULT_BLUEPRINT_CONFIG)
@@ -117,6 +134,18 @@ def resolve_blueprint_config(profile: dict[str, Any] | None = None) -> dict[str,
     if not isinstance(raw_bp, dict):
         return merged
     for key, val in raw_bp.items():
+        if val is not None:
+            merged[key] = copy.deepcopy(val)
+    return merged
+
+
+def resolve_adversarial_qa_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Merge profile `adversarial_qa` overrides cleanly onto DEFAULT_ADVERSARIAL_QA_CONFIG."""
+    merged = copy.deepcopy(DEFAULT_ADVERSARIAL_QA_CONFIG)
+    raw_qa = profile.get("adversarial_qa") if isinstance(profile, dict) else None
+    if not isinstance(raw_qa, dict):
+        return merged
+    for key, val in raw_qa.items():
         if val is not None:
             merged[key] = copy.deepcopy(val)
     return merged

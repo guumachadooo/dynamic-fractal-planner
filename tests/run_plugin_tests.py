@@ -5550,6 +5550,202 @@ class TestBlueprintArchitectureV2(unittest.TestCase):
             self.assertNotIn("ux-product", c_ref["domain_vector"])
 
 
+class TestAdversarialQaGate(unittest.TestCase):
+    def test_schema_config_validation_offline_contracts_and_tamper_resistance(self) -> None:
+        import qa_gate
+        import schema_migrations
+
+        cfg_default = schema_migrations.resolve_adversarial_qa_config({"schema_version": 5})
+        self.assertFalse(cfg_default["enabled"])
+        cfg = schema_migrations.resolve_adversarial_qa_config({"schema_version": 5, "adversarial_qa": {"enabled": True}})
+        self.assertTrue(cfg["enabled"])
+        self.assertTrue(cfg["require_cold_context_subagent"])
+        self.assertTrue(cfg["strict_verify"])
+        self.assertEqual(cfg["contracts_file"], ".agents/qa/regression_contracts.json")
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "theme.cs").write_text("public static bool EnableBlur = false;\n", encoding="utf-8")
+            (repo / "cfg.json").write_text('{"mode": "strict", "limits": {"maxMb": 2400}}\n', encoding="utf-8")
+
+            valid_doc = {
+                "version": 1,
+                "policy": "1-bug=1-permanent-automated-test-first",
+                "contracts": [
+                    {
+                        "id": "REG-001",
+                        "bug_ref": "H1",
+                        "title": "Blur disabled",
+                        "domain": "ui",
+                        "severity": "HIGH",
+                        "status": "frozen",
+                        "immutable": True,
+                        "mode": "offline",
+                        "test_ref": "tests/t.py::test_blur",
+                        "offline_checks": [
+                            {"kind": "file_contains_regex", "path": "src/theme.cs", "pattern": r"EnableBlur\s*=\s*false"},
+                        ],
+                    },
+                    {
+                        "id": "REG-002",
+                        "bug_ref": "H2",
+                        "title": "No forbidden hack",
+                        "domain": "runtime",
+                        "severity": "CRITICAL",
+                        "status": "frozen",
+                        "immutable": True,
+                        "mode": "offline",
+                        "test_ref": "tests/t.py::test_clean",
+                        "offline_checks": [
+                            {"kind": "file_forbids_regex", "path": "src/theme.cs", "pattern": r"EnableBlur\s*=\s*true"},
+                        ],
+                    },
+                    {
+                        "id": "REG-003",
+                        "bug_ref": "H3",
+                        "title": "JSON limit matches",
+                        "domain": "config",
+                        "severity": "MEDIUM",
+                        "status": "frozen",
+                        "immutable": True,
+                        "mode": "offline",
+                        "test_ref": "tests/t.py::test_json",
+                        "offline_checks": [
+                            {"kind": "json_key_equals", "path": "cfg.json", "key": "limits.maxMb", "expected": 2400},
+                        ],
+                    },
+                ],
+            }
+
+            self.assertEqual(qa_gate.validate_contracts_registry(valid_doc), [])
+            ev = qa_gate.evaluate_offline_contracts(repo, valid_doc)
+            self.assertTrue(ev["ok"], ev)
+            self.assertEqual(ev["passed"], 3)
+            self.assertEqual(ev["failed"], 0)
+
+            # Tamper: disabling a frozen contract MUST fail schema validation
+            tampered = json.loads(json.dumps(valid_doc))
+            tampered["contracts"][0]["status"] = "disabled"
+            val_bad = qa_gate.validate_contracts_registry(tampered)
+            self.assertTrue(any("disabled" in e for e in val_bad), val_bad)
+
+            # Waived skip without substantive reason fails; with waiver_reason passes validation
+            tampered["contracts"][0]["status"] = "waived"
+            self.assertTrue(len(qa_gate.validate_contracts_registry(tampered)) > 0)
+            tampered["contracts"][0]["waiver_reason"] = "Superseded by v3 architecture"
+            self.assertEqual(qa_gate.validate_contracts_registry(tampered), [])
+
+            # Break the source invariant -> offline contracts MUST fail
+            (repo / "src" / "theme.cs").write_text("public static bool EnableBlur = true;\n", encoding="utf-8")
+            ev_broken = qa_gate.evaluate_offline_contracts(repo, valid_doc)
+            self.assertFalse(ev_broken["ok"])
+            self.assertEqual(ev_broken["failed"], 2)
+
+    def test_blocking_gate_verdict_cold_prompt_cli_verify_and_pre_invocation_cue(self) -> None:
+        import qa_gate
+
+        # 1. Blocking gate ignores historical_archive but fails on live HIGH/CRITICAL/GEOM/P95/CONTRACTS
+        clean_rep = {
+            "findings": [{"severity": "CRITICAL", "origin": "historical_archive", "source": "exit_info_q2", "category": "exit_info_historical"}],
+            "q2GateSummary": {"cpuP95Ms": 7.5, "newFatalCount": 0},
+            "q3SoakSummary": {"passed": True},
+        }
+        g_ok = qa_gate.evaluate_qa_gate(clean_rep, contracts_eval={"ok": True, "failed": 0})
+        self.assertTrue(g_ok["ok"], g_ok)
+        self.assertEqual(g_ok["verdict"], "PASS")
+        self.assertIn("QA_GATE|VERDICT=PASS|", g_ok["summaryLine"])
+
+        bad_rep = {
+            "findings": [
+                {"severity": "HIGH", "source": "ui_tree_q1", "category": "ui_sibling_overlap"},
+            ],
+            "q2GateSummary": {"frameCpuP95Ms": 16.4, "exitNewFatal": 1, "totalFrames": 60},
+            "q3SoakSummary": {"cycles": 8, "passed": False},
+        }
+        g_fail = qa_gate.evaluate_qa_gate(bad_rep, contracts_eval={"ok": False, "failed": 2})
+        self.assertFalse(g_fail["ok"])
+        self.assertEqual(g_fail["verdict"], "FAIL")
+        self.assertGreaterEqual(len(g_fail["reasons"]), 5, g_fail["reasons"])
+
+        # 2. Cold-context destroyer prompt strips builder rationale & embeds 1-bug=1-test + gate line
+        built = qa_gate.build_cold_context_qa_prompt(
+            goal="Verify Audio FX sheet under 120Hz",
+            changed_files=["src/AudioSheet.cs"],
+            acceptance_criteria=["Zero overlaps", "P95 <= 12ms"],
+            profile={"schema_version": 5, "adversarial_qa": {"gate_command": "python3 -B .agents/agent/cavern_bug_hunter.py --vectors V12 --gate"}},
+            contracts_count=12,
+        )
+        self.assertTrue(built["isolated"])
+        self.assertTrue(built["stripBuilderHistory"])
+        prompt = built["prompt"]
+        self.assertIn("COLD_CONTEXT_ADVERSARIAL_QA_DESTROYER", prompt)
+        self.assertIn("1-bug=1-test", prompt)
+        self.assertIn("QA_GATE|VERDICT=", prompt)
+        self.assertIn("src/AudioSheet.cs", prompt)
+
+        # 3. CLI `plan_tool.py qa` + `verify_universal.py` enforcement + PreInvocation cue
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents").mkdir(parents=True, exist_ok=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "adversarial_qa": {"enabled": True, "cold_context_qa_subagent": True}}),
+                encoding="utf-8",
+            )
+            (repo / "app.py").write_text("SAFE_MODE = True\n", encoding="utf-8")
+
+            add_res = run_script("plan_tool.py", [
+                "--workspace", str(repo), "qa", "add-contract",
+                "--id", "REG-APP-SAFE",
+                "--bug", "B1",
+                "--title", "SAFE_MODE stays True",
+                "--domain", "runtime",
+                "--severity", "HIGH",
+                "--test-ref", "tests/test_app.py::test_safe",
+                "--file", "app.py",
+                "--must-match", r"SAFE_MODE\s*=\s*True",
+            ])
+            self.assertEqual(add_res.returncode, 0, add_res.stdout + add_res.stderr)
+            self.assertIn("REG-APP-SAFE", add_res.stdout)
+
+            st_res = run_script("plan_tool.py", ["--workspace", str(repo), "qa", "status"])
+            self.assertEqual(st_res.returncode, 0, st_res.stdout + st_res.stderr)
+            self.assertIn("QA_STATUS|enabled=True|contracts=1/1", st_res.stdout)
+
+            vc_res = run_script("plan_tool.py", ["--workspace", str(repo), "qa", "verify-contracts", "--strict"])
+            self.assertEqual(vc_res.returncode, 0, vc_res.stdout + vc_res.stderr)
+            self.assertIn("QA_CONTRACTS|PASS|total=1|offline_pass=1|fail=0", vc_res.stdout)
+
+            # verify_universal.py passes while contract holds, and FAILS when contract breaks!
+            vu_ok = run_script(
+                "verify_universal.py",
+                ["--workspace", str(repo)],
+                cwd=repo,
+                env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1", "PLANNER_ARTIFACT_DIR": art},
+            )
+            self.assertEqual(vu_ok.returncode, 0, vu_ok.stdout + vu_ok.stderr)
+
+            (repo / "app.py").write_text("SAFE_MODE = False\n", encoding="utf-8")
+            vu_fail = run_script(
+                "verify_universal.py",
+                ["--workspace", str(repo)],
+                cwd=repo,
+                env_extra={"PLANNER_RUNNING_PLUGIN_TESTS": "1", "PLANNER_ARTIFACT_DIR": art},
+            )
+            self.assertNotEqual(vu_fail.returncode, 0)
+            self.assertIn("REG-APP-SAFE", vu_fail.stdout)
+
+            # PreInvocation injects [QA_GATE|COLD_CTX] on T2+ turn
+            _, _, pre_t2 = run_hook("planner_pre_invocation.py", {
+                "workspacePaths": [str(repo)],
+                "artifactDirectoryPath": art,
+                "lastUserInput": "1. Refactor audio pipeline\n2. Add regression tests\n3. Update docs",
+                "invocationNum": 1,
+            })
+            self.assertIn("[QA_GATE|COLD_CTX]", json.dumps(pre_t2))
+
+
 def _stamp_plugin_tests_passed() -> None:
     art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
     if not art_dir or os.environ.get("PLANNER_NO_HOOK_STAMP"):

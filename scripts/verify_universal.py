@@ -1539,6 +1539,20 @@ def check_blueprint_quality(
     blueprint_engine.check_plans_hub_hygiene(repo, profile, fails, warns)
 
 
+def check_adversarial_qa_contracts(
+    repo: Path,
+    profile: dict[str, Any],
+    fails: list[str],
+    warns: list[str],
+) -> None:
+    """Validate & execute offline frozen 1-bug=1-test regression contracts via `qa_gate`."""
+    try:
+        import qa_gate  # noqa: E402
+    except Exception:
+        return
+    qa_gate.check_adversarial_qa_contracts(repo, profile, fails, warns)
+
+
 def run_static_checks(
     repo: Path,
     profile: dict[str, Any],
@@ -1566,6 +1580,7 @@ def run_static_checks(
     check_host_matrix_coverage(repo, fails, warns)
     check_build_lessons_timelessness(repo, files, fails)
     check_blueprint_quality(repo, files, profile, fails, warns)
+    check_adversarial_qa_contracts(repo, profile, fails, warns)
     check_plugin_sync_parity(repo, files, warns, scan_all=scan_all)
 
     extra_rel, pending_extra = get_pending_extra_requests(repo, profile)

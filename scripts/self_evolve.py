@@ -891,7 +891,12 @@ def _push_git_repo(
 
     committed = False
     if _run_git(repo_dir, "diff", "--cached", "--quiet").returncode != 0:
-        msg = commit_msg.strip() or f"chore(plugin): sync dynamic-fractal-planner v{target_ver} [skip ci]"
+        default_msg = (
+            f"chore(plugin): release dynamic-fractal-planner v{target_ver}"
+            if kind == "standalone"
+            else f"chore(plugin): sync dynamic-fractal-planner v{target_ver} [skip ci]"
+        )
+        msg = commit_msg.strip() or default_msg
         cm_proc = _run_git(repo_dir, "commit", "-m", msg)
         if cm_proc.returncode != 0:
             res["status"] = "error"
