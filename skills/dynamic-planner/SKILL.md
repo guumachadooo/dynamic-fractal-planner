@@ -6,12 +6,12 @@ description: >-
   turn snapshots (`undo-turn`), and 1-turn audit sign-off (`finish`).
 ---
 
-# Dynamic Fractal Planner (`dynamic-planner` v3 / Plugin v2.22.0)
+# Dynamic Fractal Planner (`dynamic-planner` v3 / Plugin v2.22.5)
 
-Scripts (`~/.gemini/config/plugins/dynamic-fractal-planner/scripts/`): `plan_tool.py` | `coherence_engine.py` | `blueprint_engine.py` | `wave_scheduler.py` | `verify_universal.py` | `log_digest.py` | `repo_map.py`
+Scripts (`~/.gemini/config/plugins/dynamic-fractal-planner/scripts/`): `plan_tool.py` | `coherence_engine.py` | `meta_governance.py` | `blueprint_engine.py` | `wave_scheduler.py` | `verify_universal.py` | `log_digest.py` | `repo_map.py`
 
-<!--AUTO:START:dfp-cli-domains:sha256=bdc4170332ac-->
-AUTO_SSOT|plugin=v2.22.0|triage_domains=agent-infra,api-backend,build-ci,core-logic,plugin-self,runtime-infra,tests-qa,ui-frontend|verify_checks=19
+<!--AUTO:START:dfp-cli-domains:sha256=0f344cd75c87-->
+AUTO_SSOT|plugin=v2.22.5|triage_domains=agent-infra,api-backend,build-ci,core-logic,plugin-self,runtime-infra,tests-qa,ui-frontend|verify_checks=20
 AUTO_CLI|`plan_tool.py`: `triage|bootstrap|migrate|docs-migrated|init|add-module|expand-step|start|done|req-verify|pause|status|next|audit|finish|handoff|recon|undo-turn|stats|diagnostics|model-mode|evolve|learn|live-diag|blueprint|wave|qa|coherence|host-classify|host-boot|host-status|host-audit`
 <!--AUTO:END:dfp-cli-domains-->
 

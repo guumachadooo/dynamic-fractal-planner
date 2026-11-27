@@ -1027,6 +1027,25 @@ def check_coherence_local(
     warns.extend(res.get("warns") or [])
 
 
+def check_meta_gov_t0_anchors(
+    repo: Path,
+    profile: dict[str, Any],
+    fails: list[str],
+    warns: list[str],
+) -> None:
+    """Run read-only T0 synthetic mutation-canary (FAIL on <100% kill) & Living Blueprint CODE_ANCHORS check."""
+    try:
+        import meta_governance  # noqa: E402
+    except Exception:
+        return
+    canary = meta_governance.run_t0_mutation_canary(repo)
+    if not canary.get("ok"):
+        fails.append(f"META_GOV|T0 mutation-canary failed ({canary.get('caught')}/{canary.get('total')}).")
+    anc = meta_governance.verify_living_anchors(repo, profile=profile)
+    for dr in anc.get("drifted") or []:
+        warns.append(f"LIVING_ANCHOR_DRIFT|{dr['id']}|missing={','.join(dr['missing'][:4])}")
+
+
 VERIFY_CHECKS: list[dict[str, Any]] = []
 
 
@@ -1147,6 +1166,11 @@ def _vc_plugin_sync_parity(ctx: dict[str, Any]) -> None:
 @verify_check("coherence_local", scope="static", cost_ms=20)
 def _vc_coherence_local(ctx: dict[str, Any]) -> None:
     check_coherence_local(ctx["repo"], ctx["profile"], ctx["fails"], ctx["warns"])
+
+
+@verify_check("meta_gov_t0_anchors", scope="static", cost_ms=20)
+def _vc_meta_gov_t0_anchors(ctx: dict[str, Any]) -> None:
+    check_meta_gov_t0_anchors(ctx["repo"], ctx["profile"], ctx["fails"], ctx["warns"])
 
 
 def run_static_checks(

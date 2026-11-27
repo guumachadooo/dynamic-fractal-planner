@@ -259,6 +259,31 @@ def record_telemetry(event: str, meta: dict[str, Any] | None = None) -> None:
         pass
 
 
+def record_rule_telemetry(
+    rule_id: str,
+    *,
+    tier: str = "",
+    hits: int = 1,
+    fp_overrides: int = 0,
+    hook_ms: float = 0.0,
+    target: str = "",
+    target_exists: bool = True,
+) -> None:
+    """Append observe-only `rule_obs` metrics row to `.metrics.jsonl` (W56.3.1, zero side-effects)."""
+    meta: dict[str, Any] = {
+        "rule": str(rule_id or "unknown")[:48],
+        "hits": int(hits),
+        "fp_overrides": int(fp_overrides),
+        "hook_ms": round(float(hook_ms), 2),
+        "target_exists": bool(target_exists),
+    }
+    if tier:
+        meta["tier"] = str(tier).upper()[:4]
+    if target:
+        meta["target"] = str(target)[:120]
+    record_telemetry("rule_obs", meta)
+
+
 _CONTROL_WORDS = frozenset({
     "if", "for", "foreach", "while", "switch", "catch", "using", "lock",
     "return", "throw", "new", "sizeof", "typeof", "nameof", "await",

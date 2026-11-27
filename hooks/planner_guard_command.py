@@ -43,7 +43,7 @@ def reply(
     if decision in ("deny", "force_ask") and payload is not None:
         try:
             _ensure_paths()
-            from planner_state import get_paths, load_json  # noqa: E402
+            from planner_state import get_paths, load_json, record_rule_telemetry  # noqa: E402
             from plugin_diagnostics import record_guard_deny_if_burst  # noqa: E402
 
             _, _, _, hook_file = get_paths(payload)
@@ -55,6 +55,7 @@ def reply(
             else:
                 rule_sig = head
             record_guard_deny_if_burst("planner_guard_command.py", rule_sig, reason, hook_file, hook_state, repo=repo)
+            record_rule_telemetry(rule_sig or "cmd_guard", hits=1, fp_overrides=0, target_exists=True)
         except Exception:
             pass
 

@@ -279,6 +279,11 @@ def render_coherence_hub(repo: Path, *, local_only: bool = True, dep_entries: li
     for alias, info in sorted((fleet.get("repos") or {}).items()):
         if info.get("mounted"):
             lines.append(f"REPO|{alias}|plugin=v{info.get('plugin_ver') or '?'}({info.get('plugin_sha') or '-'})|profile=v{info.get('profile_schema')}/v{info.get('profile_plugin_ver') or '?'}|strict={str(bool(info.get('host_matrix_strict'))).lower()}|fed={info.get('fed_sha') or '-'}")
+    import meta_governance as _mg  # noqa: E402
+    wf_rows = _mg.parse_wontfix_registry(repo / COHERENCE_HUB_REL)
+    anc = _mg.verify_living_anchors(repo)
+    lines.extend(["", "## 5. CONSTITUTION_AND_META_GOV", f"CONSTITUTION|T0=immutable_canary|T1=ssot_parity|T2=observe_telemetry|anchors={anc['total_anchors']}(drifted={anc['drifted_count']})|plane2_cap={_mg.PLANE2_MAX_PER_WEEK}/wk"])
+    lines.extend(f"WONTFIX|{r['id']}|{r['reason']}|owner={r['owner']}|expires_ver={r['expires_ver']}" for r in wf_rows)
     return "\n".join(lines[:150]) + "\n"
 
 
@@ -379,17 +384,12 @@ def deprecate_surface(repo: Path, *, dep_id: str, stage: str, path: str, replace
 
 
 def build_cold_audit_prompt(repo: Path) -> str:
-    res = run_coherence_check(repo, local_only=False)
-    return (
-        "PLANE2_COLD_COHERENCE_AUDIT|Zero drafting history. Inspect `COHERENCE_HUB.md`, `domains.json`, "
-        "`verify_universal.py:@verify_check`, `host_matrix.json`, `federation.json`, & `<!--AUTO-->` doc parity. "
-        f"Current local/fleet snapshot: `{res['summary']}` | fails={len(res['fails'])} | warns={len(res['warns'])}. "
-        "Emit ONLY factual drift findings `[DRIFT|SSOT|STALE|GAP] @ path` + minimal atomic fix."
-    )
+    import meta_governance  # noqa: E402
+    return meta_governance.build_plane2_meta_audit_prompt(repo, trigger="manual_prompt")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Zero-Static Ecosystem Coherence Engine (DFP v2.22.0).")
+    parser = argparse.ArgumentParser(description="Zero-Static Ecosystem Coherence & Meta-Governance Engine (DFP v2.22.5).")
     parser.add_argument("--workspace", default=None)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_chk = sub.add_parser("check")
@@ -399,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
     for fl in ("--docs", "--hub", "--fleet", "--json"):
         p_sync.add_argument(fl, action="store_true")
     sub.add_parser("audit").add_argument("--json", action="store_true")
+    sub.add_parser("gov-audit").add_argument("--json", action="store_true")
+    sub.add_parser("canary").add_argument("--json", action="store_true")
     p_dep = sub.add_parser("deprecate")
     for fl in ("--id", "--path", "--replacement", "--owner", "--expires-ver"):
         p_dep.add_argument(fl, required=True)
@@ -413,6 +415,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd in ("check", "audit"):
         res = run_coherence_check(repo, local_only=bool(getattr(args, "local", False)) if args.cmd == "check" else False)
         print(json.dumps(res, indent=2, ensure_ascii=False) if args.json else "\n".join([res["summary"], *(f"  [WARN] {w}" for w in res["warns"]), *(f"  [FAIL] {f}" for f in res["fails"])]))
+        return 0 if res["ok"] else 1
+    if args.cmd == "gov-audit":
+        import meta_governance  # noqa: E402
+        res = meta_governance.run_gov_audit(repo)
+        print(json.dumps(res, indent=2, ensure_ascii=False) if args.json else "\n".join([res["summary"], *(f"  [WARN] {w}" for w in res["warns"]), *(f"  [FAIL] {f}" for f in res["fails"])]))
+        return 0 if res["ok"] else 1
+    if args.cmd == "canary":
+        import meta_governance  # noqa: E402
+        res = meta_governance.run_t0_mutation_canary(repo)
+        print(json.dumps(res, indent=2, ensure_ascii=False) if args.json else f"T0_CANARY|{'OK' if res['ok'] else 'FAIL'}|{res['caught']}/{res['total']}|kill_rate={res['kill_rate']:.2f}|ms={res['elapsed_ms']}")
         return 0 if res["ok"] else 1
     if args.cmd == "sync":
         res = sync_coherence(repo, docs=(args.docs or not args.hub), hub=(args.hub or not args.docs), local_only=(not args.fleet))

@@ -1241,7 +1241,7 @@ def main() -> None:
 
     p_coh = sub.add_parser(
         "coherence",
-        help="Zero-Static Ecosystem Coherence Engine (check|sync|audit|deprecate|fleet|prompt).",
+        help="Zero-Static Ecosystem Coherence & Meta-Governance Engine (check|sync|audit|gov-audit|canary|deprecate|fleet|prompt).",
     )
     p_coh.add_argument("extra_args", nargs=argparse.REMAINDER)
 

@@ -45,6 +45,10 @@ def _status_bucket(status: str) -> str:
     st = (status or "").strip().upper()
     if st.startswith("DONE") or st.startswith("COMPLETE"):
         return "done"
+    if st.startswith("OBSERVING"):
+        return "observing"
+    if st.startswith("DRIFTED"):
+        return "drifted"
     if st.startswith("SUPERSEDED"):
         return "superseded"
     if st.startswith("DEFERRED"):
@@ -455,11 +459,21 @@ def compact_done_blueprints(
         if gov["superseded_by"]:
             note_bits.append("superseded_by=" + gov["superseded_by"][0][:80])
         note = (" ; ".join(note_bits) or "-").replace("|", "/")
-        new_records.append({
+        import meta_governance as _mg  # noqa: E402
+        anc_specs, fit_specs = _mg.extract_living_anchors_from_text(txt)
+        anc_str = "; ".join(anc_specs).replace("|", "/")[:240] if anc_specs else ""
+        fit_str = " && ".join(fit_specs).replace("|", "/")[:180] if fit_specs else ""
+        rec_item = {
             "id": it["id"], "status": it["status"], "tier": it["tier"], "score": str(it["score"]),
             "archived_on": now_date, "sha256": sha, "file": arc_name, "value": val,
             "winner": win, "note": note, "src_path": str(src),
-        })
+        }
+        if anc_str:
+            rec_item["living"] = "OBSERVING"
+            rec_item["anchors"] = anc_str
+        if fit_str:
+            rec_item["fitness"] = fit_str
+        new_records.append(rec_item)
 
     tar_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_tar = tar_path.with_suffix(".tmp.tar.gz")
@@ -492,10 +506,17 @@ def compact_done_blueprints(
     ]
     for bp_id in sorted(by_id):
         e = by_id[bp_id]
+        extra_bits = ""
+        if e.get("living"):
+            extra_bits += f"|living={e['living']}"
+        if e.get("anchors"):
+            extra_bits += f"|anchors={e['anchors']}"
+        if e.get("fitness"):
+            extra_bits += f"|fitness={e['fitness']}"
         ledger_lines.append(
             f"BP_ARCHIVED|id={bp_id}|status={e.get('status', 'DONE')}|tier={e.get('tier', 'T3')}|"
             f"score={e.get('score', '100')}|archived_on={e.get('archived_on', now_date)}|sha256={e.get('sha256', '-')}|"
-            f"file={e.get('file', bp_id + '.md')}|note={e.get('note', '-')}|value={e.get('value', '-')}"
+            f"file={e.get('file', bp_id + '.md')}|note={e.get('note', '-')}|value={e.get('value', '-')}{extra_bits}"
         )
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_path.write_text("\n".join(ledger_lines) + "\n", encoding="utf-8")

@@ -7114,6 +7114,169 @@ class TestW56_2_ZeroStaticCoherence(unittest.TestCase):
             self.assertLess(len(ss_msg), 1800)
 
 
+class TestW56_3_ReflexiveMetaGovernance(unittest.TestCase):
+    def test_t0_mutation_canary_and_zero_hit_safety_survival(self) -> None:
+        import meta_governance  # noqa: E402
+
+        canary = meta_governance.run_t0_mutation_canary(PLUGIN_ROOT)
+        self.assertTrue(canary["ok"], canary)
+        self.assertEqual(canary["kill_rate"], 1.0)
+        self.assertEqual(canary["fails"], 0)
+        self.assertGreaterEqual(canary["total"], 6)
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / "src").mkdir()
+            (repo / "src" / "live_mod.py").write_text("def active_symbol():\n    return 1\n", encoding="utf-8")
+            metrics_p = repo / ".metrics.jsonl"
+            rows = [
+                # T0 zero-hit rule w/ extreme FP & missing target -> MUST NEVER be proposed for pruning
+                {"ts": 1000, "ev": "rule_obs", "rule": "secrets_and_conflicts", "tier": "T0", "hits": 0, "fp_overrides": 25, "epoch": "e1", "target": "src/missing.py:gone"},
+                {"ts": 2000, "ev": "rule_obs", "rule": "secrets_and_conflicts", "tier": "T0", "hits": 0, "fp_overrides": 25, "epoch": "e2", "target": "src/missing.py:gone"},
+                {"ts": 3000, "ev": "rule_obs", "rule": "secrets_and_conflicts", "tier": "T0", "hits": 0, "fp_overrides": 25, "epoch": "e3", "target": "src/missing.py:gone"},
+                # T2 0-hit rule w/ LIVE target -> MUST NOT be blindly pruned
+                {"ts": 1000, "ev": "rule_obs", "rule": "style_zero_hit_live", "tier": "T2", "hits": 0, "fp_overrides": 0, "epoch": "e1", "target": "src/live_mod.py:active_symbol"},
+                {"ts": 2000, "ev": "rule_obs", "rule": "style_zero_hit_live", "tier": "T2", "hits": 0, "fp_overrides": 0, "epoch": "e2", "target": "src/live_mod.py:active_symbol"},
+                {"ts": 3000, "ev": "rule_obs", "rule": "style_zero_hit_live", "tier": "T2", "hits": 0, "fp_overrides": 0, "epoch": "e3", "target": "src/live_mod.py:active_symbol"},
+                # T2 rule w/ DEAD AST target over 3 epochs -> PRUNED proposal
+                {"ts": 1000, "ev": "rule_obs", "rule": "dead_ast_rule", "tier": "T2", "hits": 1, "fp_overrides": 0, "epoch": "e1", "target": "src/live_mod.py:deleted_fn"},
+                {"ts": 2000, "ev": "rule_obs", "rule": "dead_ast_rule", "tier": "T2", "hits": 1, "fp_overrides": 0, "epoch": "e2", "target": "src/live_mod.py:deleted_fn"},
+                {"ts": 3000, "ev": "rule_obs", "rule": "dead_ast_rule", "tier": "T2", "hits": 1, "fp_overrides": 0, "epoch": "e3", "target": "src/live_mod.py:deleted_fn"},
+                # T2 rule w/ FP > 10% over 3 epochs -> PROBATION proposal
+                {"ts": 1000, "ev": "rule_obs", "rule": "noisy_heuristic", "tier": "T2", "hits": 5, "fp_overrides": 1, "epoch": "e1", "target": "src/live_mod.py:active_symbol"},
+                {"ts": 2000, "ev": "rule_obs", "rule": "noisy_heuristic", "tier": "T2", "hits": 5, "fp_overrides": 1, "epoch": "e2", "target": "src/live_mod.py:active_symbol"},
+                {"ts": 3000, "ev": "rule_obs", "rule": "noisy_heuristic", "tier": "T2", "hits": 5, "fp_overrides": 1, "epoch": "e3", "target": "src/live_mod.py:active_symbol"},
+            ]
+            metrics_p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+            summary = meta_governance.summarize_rule_metrics(metrics_p, repo)
+            props = meta_governance.evaluate_rule_lifecycle_proposals(summary, repo)
+            by_rule = {p["rule"]: p for p in props}
+            self.assertNotIn("secrets_and_conflicts", by_rule)
+            self.assertNotIn("style_zero_hit_live", by_rule)
+            self.assertEqual(by_rule["dead_ast_rule"]["proposed_stage"], "PRUNED")
+            self.assertEqual(by_rule["noisy_heuristic"]["proposed_stage"], "PROBATION")
+
+    def test_living_blueprint_code_anchors_compaction_drift_and_readonly_gov_audit(self) -> None:
+        import blueprint_hub  # noqa: E402
+        import coherence_engine  # noqa: E402
+        import meta_governance  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / ".agents" / "docs" / "blueprints").mkdir(parents=True)
+            (repo / ".agents" / "docs" / "archive").mkdir(parents=True)
+            (repo / "src").mkdir()
+            target_py = repo / "src" / "engine.py"
+            target_py.write_text("def compute_signal():\n    return 42\n", encoding="utf-8")
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "plugin_version": "2.22.5"}),
+                encoding="utf-8",
+            )
+            bp_file = repo / ".agents" / "docs" / "blueprints" / "BP_LIVING_DEMO.md"
+            bp_file.write_text(
+                "# Living Demo\n"
+                "BP_META|id=BP_LIVING_DEMO|format=mini|domain_vec=software:1.0|door=2-way|tier=T1|status=DONE\n"
+                "VALUE|Verify living CODE_ANCHORS survival across compaction with <=50ms overhead.\n"
+                "NON_GOAL|Zero runtime overhead.\n"
+                "CANDIDATE|A|Static docs|Manual doc updates.\n"
+                "REJECTED_BECAUSE|A|Drifts silently after >=1 refactor.\n"
+                "WINNER|AST living CODE_ANCHORS.\n"
+                "KILL|K1|Drift|anchor_missing >= 1|per commit|Flag DRIFTED.\n"
+                "QAS|Q1|Check symbol|Repo|Symbol exists|missing == 0|python3 -B -c 'print(1)'\n"
+                "CODE_ANCHORS|src/engine.py:compute_signal\n"
+                "FITNESS|python3 -B -c 'import src.engine'\n",
+                encoding="utf-8",
+            )
+
+            # 1) Compact DONE blueprint -> ledger preserves living=OBSERVING + CODE_ANCHORS + FITNESS
+            comp = blueprint_hub.compact_done_blueprints(repo, apply=True, sync_hub=False)
+            self.assertTrue(comp["applied"])
+            self.assertFalse(bp_file.exists())
+            ledger_txt = (repo / ".agents" / "docs" / "archive" / "BLUEPRINTS_DONE_LEDGER.md").read_text(encoding="utf-8")
+            self.assertIn("living=OBSERVING", ledger_txt)
+            self.assertIn("anchors=src/engine.py:compute_signal", ledger_txt)
+
+            # 2) Sync coherence hub, snapshot mtimes, and verify gov-audit is strictly read-only & OK
+            import hashlib
+            coherence_engine.sync_coherence(repo, docs=False, hub=True, local_only=True)
+            snap_before = {
+                str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in sorted(repo.rglob("*")) if p.is_file()
+            }
+            audit_ok = meta_governance.run_gov_audit(repo)
+            snap_after = {
+                str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in sorted(repo.rglob("*")) if p.is_file()
+            }
+            self.assertEqual(snap_before, snap_after, "gov-audit MUST be strictly read-only (verify_mutations == 0)")
+            self.assertTrue(audit_ok["ok"], audit_ok)
+            self.assertEqual(audit_ok["t0_pruned"], 0)
+            self.assertEqual(audit_ok["living_anchors"]["total_anchors"], 1)
+            self.assertEqual(audit_ok["living_anchors"]["drifted_count"], 0)
+
+            # 3) Rename anchored symbol -> Living Blueprint drift caught immediately without mutating files
+            target_py.write_text("def compute_signal_v2():\n    return 42\n", encoding="utf-8")
+            audit_drift = meta_governance.run_gov_audit(repo)
+            self.assertEqual(audit_drift["living_anchors"]["drifted_count"], 1)
+            self.assertTrue(any("LIVING_ANCHOR_DRIFT|BP_LIVING_DEMO" in w for w in audit_drift["warns"]))
+
+    def test_plane2_meta_auditor_triggers_weekly_budget_and_cli(self) -> None:
+        import meta_governance  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / ".agents" / "docs").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(
+                json.dumps({"schema_version": 5, "plugin_version": "2.22.5"}),
+                encoding="utf-8",
+            )
+            metrics_p = repo / ".metrics.jsonl"
+            diag_p = repo / "anomalies.jsonl"
+            now = time.time()
+
+            # 1) Doc/bloat-only anomaly MUST NOT fire Plane-2 (KILL|K5)
+            diag_p.write_text(
+                "\n".join(json.dumps({"ts": int(now), "kind": "injection_bloat", "hook": "pre", "sig": "b", "detail": "x"}) for _ in range(5)) + "\n",
+                encoding="utf-8",
+            )
+            p2_bloat = meta_governance.evaluate_plane2_trigger(repo, metrics_file=metrics_p, diag_file=diag_p, now_ts=now)
+            self.assertFalse(p2_bloat["should_fire"])
+
+            # 2) >=2 guard anomalies fire Plane-2 when weekly budget < 4
+            diag_p.write_text(
+                json.dumps({"ts": int(now), "kind": "guard_deny_burst", "hook": "g", "sig": "s1", "detail": "d1"}) + "\n"
+                + json.dumps({"ts": int(now), "kind": "stop_gate_loop", "hook": "s", "sig": "s2", "detail": "d2"}) + "\n",
+                encoding="utf-8",
+            )
+            p2_fire = meta_governance.evaluate_plane2_trigger(repo, metrics_file=metrics_p, diag_file=diag_p, now_ts=now)
+            self.assertTrue(p2_fire["should_fire"])
+            self.assertIn("guard_anomalies(2)", p2_fire["triggers"])
+
+            # 3) 4 plane2_audit events in 7d exhaust budget -> blocks auto-fire (<=4/wk cap)
+            metrics_p.write_text(
+                "\n".join(json.dumps({"ts": int(now - i * 3600), "ev": "plane2_audit"}) for i in range(4)) + "\n",
+                encoding="utf-8",
+            )
+            p2_cap = meta_governance.evaluate_plane2_trigger(repo, metrics_file=metrics_p, diag_file=diag_p, now_ts=now)
+            self.assertTrue(p2_cap["budget_exhausted"])
+            self.assertFalse(p2_cap["should_fire"])
+
+            # 4) Cold-Context prompt mandates Plane-1 ratchet + T0-T2 or timed WONTFIX
+            prompt = meta_governance.build_plane2_meta_audit_prompt(repo, metrics_file=metrics_p, diag_file=diag_p)
+            self.assertIn("PLANE2_COLD_META_GOV_AUDIT", prompt)
+            self.assertIn("T0", prompt)
+            self.assertIn("WONTFIX", prompt)
+
+            # 5) CLI `plan_tool.py coherence gov-audit` and `canary` exit 0
+            r_gov = run_script("plan_tool.py", ["--workspace", str(PLUGIN_ROOT), "coherence", "gov-audit"])
+            self.assertEqual(r_gov.returncode, 0, r_gov.stdout + r_gov.stderr)
+            self.assertIn("GOV_AUDIT|OK|", r_gov.stdout)
+            r_can = run_script("plan_tool.py", ["--workspace", str(PLUGIN_ROOT), "coherence", "canary"])
+            self.assertEqual(r_can.returncode, 0, r_can.stdout + r_can.stderr)
+            self.assertIn("T0_CANARY|OK|", r_can.stdout)
+
+
 def _stamp_plugin_tests_passed() -> None:
     art_dir = (os.environ.get("PLANNER_ARTIFACT_DIR") or os.environ.get("CAVERN_ARTIFACT_DIR") or "").strip()
     if not art_dir or os.environ.get("PLANNER_NO_HOOK_STAMP"):

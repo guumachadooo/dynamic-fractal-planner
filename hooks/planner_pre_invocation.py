@@ -246,6 +246,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             "hygiene_injected": False,
             "qa_gate_injected": False,
             "wave_orch_injected": False,
+            "plane2_audit_injected": False,
             "plugin_sync_injected": False,
             "btw_injected": False,
             "task_status_polls": prev_task_polls,
@@ -555,6 +556,27 @@ def _run_pre_invocation_inner(t0: float) -> None:
         )
         if _append_within_budget(wo_line):
             hook_state["wave_orch_injected"] = True
+
+    # Event-triggered Plane-2 Cold-Context pro[L3] Meta-Governance Auditor (<=4/wk, 0 chars when idle)
+    if (
+        tier >= 2
+        and not eco_mode
+        and not is_btw_short
+        and not hook_state.get("plane2_audit_injected")
+    ):
+        try:
+            import meta_governance  # noqa: E402
+
+            p2 = meta_governance.evaluate_plane2_trigger(repo, profile=profile)
+            if p2.get("should_fire"):
+                p2_line = (
+                    f"[PLANE2_META_AUDIT|pro[L3]|triggers={','.join(p2['triggers'][:2])}|budget={p2['used_7d']}/{p2['max_per_week']}] "
+                    "Run `plan_tool.py coherence prompt` -> ratchet Plane-1 + T0-T2 or timed WONTFIX(owner+expires_ver)."
+                )
+                if _append_within_budget(p2_line):
+                    hook_state["plane2_audit_injected"] = True
+        except Exception:
+            pass
 
     # Domain lenses (1-line active-domain critique, suppressed in ECO_MODE & within bloat budget)
     if not is_btw_short and not eco_mode and not plan_ready and not hook_state.get("lens_injected") and tier >= 1:
