@@ -28,11 +28,9 @@
           "libonnxruntime.so"
         ],
         "tabNames": [
-          "player",
-          "room",
-          "studio",
-          "stems",
-          "settings"
+          "library",
+          "sound",
+          "export"
         ]
       }
     },
