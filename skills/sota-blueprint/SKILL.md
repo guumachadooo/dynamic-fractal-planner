@@ -7,13 +7,13 @@ description: >-
   and deterministic 0-100 Popperian rubric verification (>=85/100).
 ---
 
-# Universal SOTA Blueprint Playbook (`sota-blueprint` / Plugin v2.22.0)
+# Universal SOTA Blueprint Playbook (`sota-blueprint` / Plugin v2.25.0)
 
 > STYLE|lossless symbolic telegraphic EN ONLY (`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`).
 > CLI|`python3 -B ~/.gemini/config/plugins/dynamic-fractal-planner/scripts/plan_tool.py blueprint <cmd>`
 
-<!--AUTO:START:sota-blueprint-domains:sha256=b9aa7bd67fe3-->
-AUTO_SSOT|plugin=v2.24.0|blueprint_domains=ai-ml,biz-org,data-bi,dsp-hw,infra-ops,security,software,ux-product|formats=mini,compact,full|ssot=scripts/domains.json
+<!--AUTO:START:sota-blueprint-domains:sha256=107ae2388706-->
+AUTO_SSOT|plugin=v2.25.0|blueprint_domains=ai-ml,biz-org,data-bi,dsp-hw,infra-ops,security,software,ux-product|formats=mini,compact,full|ssot=scripts/domains.json
 <!--AUTO:END:sota-blueprint-domains-->
 
 ## Tiered Blueprint Formats (Right-Sized Ceremony & Token-Diet)
@@ -51,7 +51,7 @@ AUTO_SSOT|plugin=v2.24.0|blueprint_domains=ai-ml,biz-org,data-bi,dsp-hw,infra-op
 - On `1-way`/`full`, rank unknowns by `VoI = P(fail) * BlastRadius` (`SPIKE|S1|...`).
 - Define `BUDGET|` (latency/mem/cost/degraded floor), `PLANES|` (`full`), & `QAS|` 6-tuples (`QAS|id|stim|env|resp|numeric_bound+unit|executable_oracle_cmd` — dummy oracles like `echo ok`/`pass`/`manual` are rejected).
 - **Anti-Waterfall DSM Split & Dual-Mode Wave DAG:** Detail `### H1 Atomic Slices` (`SLICE|`) plus companion `SLICE_DAG|<id>|deps=<ids|none>|writes=<globs|RO>|reads=<globs|none>|locks=<lks|none>|tier=<L0..L3>` + optional `DAG_POLICY|default_mode=seq|max_width_termux=2|max_width_local=4|barrier=epoch` (NEVER bloat `SLICE|` lines; keep `### H2+ Outcome Stubs` as 1L outcome+gate stubs ONLY `<=25%`).
-- **Dual-Mode Conflict-Free Execution (`blueprint schedule`):** Run `plan_tool.py blueprint schedule <bp> --mode <seq|parallel> [--emit-workflow <artifact>/scratch/wf_<bp>.py|--emit-prompts]` (`seq` = 1 wave/epoch; `parallel` = Coffman-Graham min-epoch packing respecting authoring locks vs barrier-deferred `proot_build`/`ledgers`, Termux `max_width<=2`, `[LEASE:...]` D1/D2 auto-bind, dirty-safe Epoch Barrier rollback, & `O(1)` `<=12L`/epoch root ctx).
+- **Dual-Mode Conflict-Free Execution (`wave {schedule|fanout|stage1-3}`):** Run `plan_tool.py wave schedule <bp> --mode <seq|parallel> --emit-workflow <artifact>/scratch/wf_<bp>.py` (or `wave fanout` / `wave stage1-3`; `seq` = 1 wave/epoch; `parallel` = flat zero-captain `flash_lite`/`flash` cubicles w/ `is_termux_proot` `<=2` cap, `[LEASE:...]` + dead-PID reap, atomic parent rollback, HMAC-sealed 1-verify-owner Epoch Barrier, & `O(1)` `<=600B` receipts, triggered on `[WAVE_ORCH|MAX_PAR]`).
 
 ### Stage 5 — Deterministic Anti-Gaming Popperian Rubric Gate (`score >= 85/100`)
 - Run `plan_tool.py blueprint lint .agents/docs/blueprints/BP_<SLUG>.md --strict`.

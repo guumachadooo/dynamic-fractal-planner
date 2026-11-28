@@ -137,7 +137,7 @@ def _run_pre_invocation_inner(t0: float) -> None:
             from wave_scheduler import bind_lease_conversation, extract_lease_tag  # noqa: E402
 
             if (ltag := extract_lease_tag(last_input)):
-                bind_lease_conversation(
+                lease_args = (
                     repo,
                     conv_id,
                     ltag["bp_id"],
@@ -146,6 +146,13 @@ def _run_pre_invocation_inner(t0: float) -> None:
                     ltag["nonce"],
                     ltag["sub_globs"] or None,
                 )
+                if "mode" in ltag and ltag["mode"] is not None:
+                    try:
+                        bind_lease_conversation(*lease_args, mode=ltag["mode"])
+                    except TypeError:
+                        bind_lease_conversation(*lease_args)
+                else:
+                    bind_lease_conversation(*lease_args)
         except Exception:
             pass
     p_hash = prompt_hash(last_input)
@@ -629,14 +636,14 @@ def _run_pre_invocation_inner(t0: float) -> None:
             hook_state["qa_gate_injected"] = True
 
     if (
-        triage.get("wave_exec_mode") == "parallel_max"
+        triage.get("wave_exec_mode") in ("parallel_max", "horizontal_cubicle")
         and not eco_mode
         and not is_btw_short
         and not hook_state.get("wave_orch_injected")
     ):
         wo_line = (
-            "[WAVE_ORCH|MAX_PAR] Run `plan_tool.py blueprint schedule <BP> --mode parallel --emit-workflow` -> "
-            "exec via 1 `run_workflow` (or D0->D1 Wave-Captain->D2 Leaf w/ `[LEASE:]`) -> O(1) root ctx + 1-verify-owner epoch barrier."
+            "[WAVE_ORCH|MAX_PAR] Run `plan_tool.py wave {schedule|fanout|stage1-3}` -> "
+            "flat 1-slice cubicles (`flash_lite`/`flash`, `[LEASE:]`, Termux<=2, 1-verify-owner, O(1) root ctx)."
         )
         if _append_within_budget(wo_line, session_key="wave_orch"):
             hook_state["wave_orch_injected"] = True

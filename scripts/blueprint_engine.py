@@ -257,6 +257,12 @@ def _build_subagent_topology(
     }
 
 
+_SEC_NON_SEC_RE = re.compile(
+    r"\b(?:token[- _]?(?:budget|diet|tax|overhead|cap|cost|saving)s?|zero[- _]?(?:coordinator[- _]?)?token|isolated\s+(?:cubicle|subagent|solver|context|worker)s?)\b",
+    re.IGNORECASE,
+)
+
+
 def _classify_blueprint_core(prompt: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """Pure blueprint-domain classifier without triage re-entry (used by `classify_scope_and_tier`)."""
     text = (prompt or "").strip()
@@ -266,7 +272,8 @@ def _classify_blueprint_core(prompt: str, profile: dict[str, Any] | None = None)
     raw_scores: dict[str, float] = {}
     matched_kws: dict[str, list[str]] = {}
     for dom, spec in DOMAIN_PROFILES.items():
-        hits = [kw for kw in spec["keywords"] if _kw_match(lower, kw)]
+        dom_text = _SEC_NON_SEC_RE.sub(" ", lower) if dom == "security" else lower
+        hits = [kw for kw in spec["keywords"] if _kw_match(dom_text, kw)]
         if hits:
             raw_scores[dom] = float(len(hits))
             matched_kws[dom] = hits

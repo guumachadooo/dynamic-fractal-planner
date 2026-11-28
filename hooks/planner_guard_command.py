@@ -1131,14 +1131,23 @@ def main() -> None:
         try:
             from wave_scheduler import is_parallel_wave_worker  # noqa: E402
 
-            conv_id = str(payload.get("conversationId") or "").strip()
+            conv_id = str(payload.get("conversationId") or payload.get("conversation_id") or "").strip()
             if (w_info := is_parallel_wave_worker(repo, conv_id)):
                 heavy_pat = re.compile(
                     r"(?:(?:/root/\.dotnet/)?dotnet\s+(?:build|test|publish|pack|run)\b|"
-                    r"(?:run_plugin_tests|verify_universal|run_w46_unit_tests|run_audio_ground_truth)\.py\b|"
+                    r"(?:run_plugin_tests|verify_universal|run_w46_unit_tests|run_audio_ground_truth|check_android_cs)\.py\b|"
+                    r"\bpytest\b|"
+                    r"omni_agent\.py\s+(?:[^\n\"']*\s+)?ship\b|"
                     r"git\s+(?:-C\s+\S+\s+)?(?:push|commit)\b)",
                     re.I,
                 )
+                if isinstance(w_info, (tuple, list)) and len(w_info) >= 3:
+                    role_lbl, epoch_lbl = str(w_info[1]), str(w_info[2])
+                elif isinstance(w_info, dict):
+                    role_lbl = str(w_info.get("role") or w_info.get("mode") or "worker")
+                    epoch_lbl = str(w_info.get("epoch") or w_info.get("wave") or "active")
+                else:
+                    role_lbl, epoch_lbl = "worker", "active"
                 for seg in segments:
                     _, rest = strip_env_prefix(seg)
                     hm = heavy_pat.search(rest)
@@ -1146,7 +1155,7 @@ def main() -> None:
                     if hm or ship_hit:
                         what = hm.group(0) if hm else str(ship_hit["kind"])
                         deny(
-                            f"LEASE CMD DENY|Parallel wave `{w_info[2]}` ({w_info[1]}) cannot run `{what}` directly; "
+                            f"LEASE CMD DENY|Parallel wave `{epoch_lbl}` ({role_lbl}) cannot run `{what}` directly; "
                             "Epoch Barrier runs verification & git sequentially ONCE.",
                             payload=payload,
                             repo=repo,

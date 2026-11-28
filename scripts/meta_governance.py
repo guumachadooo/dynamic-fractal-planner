@@ -99,6 +99,10 @@ GUARD_RULE_TIERS: dict[str, str] = {
     "blueprint_first_gate": "T1",
     "plan_gate": "T1",
     "extra_requests_gate": "T1",
+    "workflow_explicit_model": "T0",
+    "workflow_direct_heavy_subprocess": "T0",
+    "workflow_unbounded_parallel": "T1",
+    "flat_cubicle_no_nest": "T1",
     "blast_radius_guard": "T2",
     "read_budget_guard": "T2",
     "polling_guard": "T2",
@@ -237,6 +241,23 @@ def run_t0_mutation_canary(repo: Path | None = None) -> dict[str, Any]:
         ok = bool(denied and "TOKEN_RATCHET|DOC_BLOAT" in denied) and (allowed is None)
         return ok, f"denied={bool(denied)},allowed={allowed is None}"
 
+    def _p_workflow_ast_guard() -> tuple[bool, str]:
+        import planner_guard_delegation as pgd  # noqa: E402
+
+        cfg = {"enabled": True, "enforce_google_only": True, "require_explicit_model": True}
+        s_missing_model = "agent(prompt='find files')\n"
+        s_shell_true = "import subprocess\nsubprocess.run(['echo', 'hi'], shell=True)\n"
+        s_parallel_heavy = (
+            "def worker():\n"
+            "    return 'dotnet build'\n"
+            "parallel(worker, lambda: agent(prompt='check', model='flash_lite'))\n"
+        )
+        d1 = pgd._check_run_workflow({"Script": s_missing_model}, cfg, repo=None)
+        d2 = pgd._check_run_workflow({"Script": s_shell_true}, cfg, repo=None)
+        d3 = pgd._check_run_workflow({"Script": s_parallel_heavy}, cfg, repo=None)
+        ok = bool(d1 and d2 and d3)
+        return ok, f"missing_model={bool(d1)},shell_true={bool(d2)},parallel_heavy={bool(d3)}"
+
     _run("T0-SECRETS-TOKEN", _p_secret)
     _run("T0-MERGE-CONFLICT", _p_conflict)
     _run("T0-ENV-KEYFILE", _p_env_keyfile)
@@ -244,6 +265,7 @@ def run_t0_mutation_canary(repo: Path | None = None) -> dict[str, Any]:
     _run("T0-QA-CONTRACT-BLOCK", _p_qa_gate)
     _run("T0-ZERO-HIT-NO-DECAY", _p_t0_no_decay)
     _run("T0-TOKEN-BUDGET-GUARD", _p_token_budget_guard)
+    _run("T0-WORKFLOW-AST-GUARD", _p_workflow_ast_guard)
 
     caught_n = sum(1 for p in probes if p["caught"])
     total_n = len(probes)

@@ -90,6 +90,13 @@ DEFAULT_DELEGATION_CONFIG: dict[str, Any] = {
             "verify_all",
             "ledgers",
         ],
+        "flat_workflow": True,
+        "forbid_nested_captain_in_workflow": True,
+        "max_cubicle_receipt_bytes": 600,
+        "default_ro_model": "flash_lite",
+        "default_write_model": "flash",
+        "require_explicit_workflow_model": True,
+        "enforce_termux_width_guard": True,
     },
 }
 

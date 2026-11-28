@@ -169,8 +169,8 @@ def _default_deprecated_entries(repo: Path) -> list[dict[str, str]]:
         return []
     return [
         {"id": "legacy-live-phone-bridge", "stage": "TOMBSTONE", "path": ".agents/scripts/live_phone_bridge.py", "replacement": "omni_agent.py cavernize-cmd", "owner": "cavern", "expires_ver": "2.22.0"},
-        {"id": "flight-recorder-recover-alias", "stage": "GRACE", "path": "cli:flight_recorder.py recover", "replacement": "flight_recorder.py resume", "owner": "cavern", "expires_ver": "2.25.0"},
-        {"id": "legacy-error-learner-wrapper", "stage": "WARN", "path": ".agents/scripts/error_learner.py", "replacement": "plan_tool.py learn", "owner": "dfp", "expires_ver": "2.25.0"},
+        {"id": "flight-recorder-recover-alias", "stage": "GRACE", "path": "cli:flight_recorder.py recover", "replacement": "flight_recorder.py resume", "owner": "cavern", "expires_ver": "2.28.0"},
+        {"id": "legacy-error-learner-wrapper", "stage": "GRACE", "path": ".agents/scripts/error_learner.py", "replacement": "plan_tool.py learn", "owner": "dfp", "expires_ver": "2.28.0"},
     ]
 
 

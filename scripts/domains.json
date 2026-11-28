@@ -153,7 +153,8 @@
         "api", "backend", "frontend", "microservice", "monolith", "sdk", "cli", "plugin",
         "database", "schema", "cache", "queue", "event", "webhook", "graphql", "rest",
         "parser", "compiler", "state machine", "concurrency", "idempoten", "architecture",
-        "refactor", "modular", "split", "partial", "linter", "rubric", "blueprint"
+        "refactor", "modular", "split", "partial", "linter", "rubric", "blueprint",
+        "orchestration", "subagent", "workflow", "token budget"
       ],
       "lens": "Enforce explicit contracts, idempotency, bounded latency (p95/p99), backward-compatible schema migration & failure isolation.",
       "zwicky_axes": [
@@ -192,9 +193,13 @@
     },
     "security": {
       "keywords": [
-        "auth", "oauth", "oidc", "jwt", "hmac", "aes", "crypto", "encrypt", "secret", "key",
-        "keystore", "tee", "strongbox", "biometric", "permission", "selinux", "w^x", "sandbox",
-        "zero-trust", "stride", "threat", "abuse", "rate-limit", "isolation", "ipc", "token"
+        "auth", "oauth", "oidc", "jwt", "hmac", "aes", "crypto", "encrypt", "secret",
+        "auth token", "access token", "bearer token", "session token", "csrf token",
+        "capability token", "api token", "api key", "secret key", "signing key",
+        "private key", "public key", "encryption key", "ssh key", "process isolation",
+        "sandbox isolation", "keystore", "tee", "strongbox", "biometric", "permission",
+        "selinux", "w^x", "sandbox", "zero-trust", "stride", "threat", "abuse",
+        "rate-limit", "ipc"
       ],
       "lens": "Apply STRIDE across trust boundaries, fail-closed auth/crypto, least privilege, secret redaction & attacker cost-asymmetry.",
       "zwicky_axes": [
@@ -221,7 +226,8 @@
       "keywords": [
         "ci", "cd", "github actions", "docker", "kubernetes", "cloudflare", "worker", "deploy",
         "release", "ota", "observability", "telemetry", "logging", "monitoring", "alert",
-        "backup", "rollback", "daemon", "service", "foreground", "oom", "ram", "memory"
+        "backup", "rollback", "daemon", "service", "foreground", "oom", "ram", "memory",
+        "orchestration", "fan-out", "fanout", "quota"
       ],
       "lens": "Design for unattended recovery, idempotent deploy/rollback, OOM/quota ceilings, zero-blind-retry backoff & structured observability.",
       "zwicky_axes": [

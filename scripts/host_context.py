@@ -184,6 +184,7 @@ def detect_host(
         "reason": reason,
         "is_cloud": host_id == "ai-studio-cloud",
         "is_antigravity": host_id.startswith("antigravity"),
+        "is_termux_proot": termux_proot,
         "capabilities": {
             "has_git": has_git,
             "has_git_cli": has_git_cli,
@@ -193,6 +194,7 @@ def detect_host(
             "has_sdcard": has_sdcard,
             "has_local_omni_config": has_local_omni_config,
             "has_runtime_env_bridge": has_runtime_env_bridge,
+            "is_termux_proot": termux_proot,
         },
     }
 

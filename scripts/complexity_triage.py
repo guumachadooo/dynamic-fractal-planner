@@ -431,6 +431,12 @@ def detect_blueprint_opt_out(text: str) -> bool:
     return any(pat.search(scoring) for pat in _BLUEPRINT_OPT_OUT_PATTERNS)
 
 
+_WAVE_HORIZ_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:horizontal\w*|agentes?\s+horizontais|cubicles?|fan-?out|zero[- ]?coord\w*|zero[- ]?token\w*|flat\s+workflows?|pre-?slic\w*|atomic\s+slices?)\b",
+        re.I,
+    ),
+)
 _WAVE_PAR_MAX_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:menor\s+quantidade|m[ií]nim[ao]s?\s+(?:contextos?|epochs?|ondas?|waves?)|menor\s+n[uú]mero)\b[^\n.;!?]{0,65}\b(?:waves?|ondas?|contextos?|etapas?|epochs?|paralel\w*)\b", re.I),
     re.compile(r"\b(?:maior\s+quantidade|m[aá]xim[ao]|todas?\s+as)\b[^\n.;!?]{0,45}\b(?:waves?|ondas?)\b[^\n.;!?]{0,45}\b(?:paralel\w*|um\s+(?:[uú]nico\s+)?contexto)\b", re.I),
@@ -443,10 +449,12 @@ _WAVE_SEQ_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def detect_wave_exec_mode(text: str) -> str:
-    """Detect user preference for max-parallel min-epoch (`parallel_max`) vs 1-by-1 (`sequential`) wave execution."""
+    """Detect user preference for horizontal cubicle (`horizontal_cubicle`), max-parallel (`parallel_max`), or 1-by-1 (`sequential`) wave execution."""
     scoring = _strip_long_quotes(text or "").strip()
     if not scoring or len(scoring) < 6:
         return ""
+    if any(p.search(scoring) for p in _WAVE_HORIZ_PATTERNS):
+        return "horizontal_cubicle"
     if any(p.search(scoring) for p in _WAVE_PAR_MAX_PATTERNS):
         return "parallel_max"
     if any(p.search(scoring) for p in _WAVE_SEQ_PATTERNS):

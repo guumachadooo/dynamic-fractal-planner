@@ -6,12 +6,12 @@ description: >-
   turn snapshots (`undo-turn`), and 1-turn audit sign-off (`finish`).
 ---
 
-# Dynamic Fractal Planner (`dynamic-planner` v3 / Plugin v2.23.0)
+# Dynamic Fractal Planner (`dynamic-planner` v3 / Plugin v2.25.0)
 
 Scripts (`~/.gemini/config/plugins/dynamic-fractal-planner/scripts/`): `plan_tool.py` | `coherence_engine.py` | `meta_governance.py` | `fitness_ratchet.py` | `blueprint_engine.py` | `wave_scheduler.py` | `verify_universal.py` | `log_digest.py` | `repo_map.py`
 
-<!--AUTO:START:dfp-cli-domains:sha256=1940332422f8-->
-AUTO_SSOT|plugin=v2.24.0|triage_domains=agent-infra,api-backend,build-ci,core-logic,plugin-self,runtime-infra,tests-qa,ui-frontend|verify_checks=22
+<!--AUTO:START:dfp-cli-domains:sha256=b30d2c113f73-->
+AUTO_SSOT|plugin=v2.25.0|triage_domains=agent-infra,api-backend,build-ci,core-logic,plugin-self,runtime-infra,tests-qa,ui-frontend|verify_checks=22
 AUTO_CLI|`plan_tool.py`: `triage|bootstrap|migrate|docs-migrated|init|add-module|expand-step|start|done|req-verify|pause|status|next|audit|finish|handoff|recon|undo-turn|stats|diagnostics|model-mode|evolve|learn|live-diag|blueprint|wave|qa|coherence|token-audit|closeout|host-classify|host-boot|host-status|host-audit`
 <!--AUTO:END:dfp-cli-domains-->
 
@@ -31,13 +31,13 @@ AUTO_CLI|`plan_tool.py`: `triage|bootstrap|migrate|docs-migrated|init|add-module
 - Token Diet: `repo_map.py --workspace .` (`/tmp` cache) | `read_file` `<=250L` slice | archive docs `>150L` -> explicit `StartLine&EndLine <=120L` | `log_digest.py <log> [--errors-only]`.
 - Doc/Plan Style: ALL `plan_tool.py` args (`--goal`, `--req`, `--evidence`, `--summary`, `--next`) && agent memory docs -> lossless symbolic telegraphic EN (`!articles/copulas/filler`, ops `-> | && || ! w/ w/o`, verbatim `path:sym`, invariants).
 - External API Docs (MCP): Unknown external APIs/SDKs/flags -> consult `Context7` (`resolve-library-id`->`query-docs`) \|\| `Google Developer Knowledge` (`search_documents`/`answer_query`) BEFORE guessing.
-- Key CLI ops: `triage --prompt "..."` | `bootstrap [--embed-plugin]` | `evolve {classify|sync|sync-plugin|sync-all --apply --push}` | `blueprint {classify|init|lint|score|status|list|handoff|schedule}` | `wave {schedule|epoch-begin|epoch-barrier|lease|checkpoint}` (playbook: `skills/sota-blueprint/SKILL.md`) | `init` | `start` | `expand-step` | `add-module` | `done` | `req-verify` | `finish --evidence "..."` | `recon {start|stop|status}` | `model-mode {set|get|list|clear}` | `docs-migrated` | `diag [--clear]` | `undo-turn [--dry-run]` | `handoff [--roadmap --wave --archive] --summary "..." --next "..."` | `stats`.
+- Key CLI ops: `triage --prompt "..."` | `bootstrap [--embed-plugin]` | `evolve {classify|sync|sync-plugin|sync-all --apply --push}` | `blueprint {classify|init|lint|score|status|list|handoff|schedule}` | `wave {schedule|fanout|stage1-3|epoch-begin|epoch-barrier|lease|checkpoint}` (playbook: `skills/sota-blueprint/SKILL.md`) | `init` | `start` | `expand-step` | `add-module` | `done` | `req-verify` | `finish --evidence "..."` | `recon {start|stop|status}` | `model-mode {set|get|list|clear}` | `docs-migrated` | `diag [--clear]` | `undo-turn [--dry-run]` | `handoff [--roadmap --wave --archive] --summary "..." --next "..."` | `stats`.
 - Verify pre-stop: `verify_universal.py [--build] [--full] --git-stat` (static `wiring_gate` + `key_parity_rules.ref_regex` + `diff_rules.path_prefixes` + multi-layer `build_rules` shadow cascade w/ global diag dedup; `Stop` runs silent static checks on `needs_verify && !needs_build`).
 
 ## Thin-Coordinator Delegation & Model Routing (v5)
 - **Adaptive Cubicle Pace (`pace=turbo|eco|normal`):** Default `turbo` fans out parallel isolated subagent cubicles across independent slices; `eco` still uses parallel cubicles whenever net-token-saving (isolated leaf ctx < parent replay bloat); `normal` uses standard adaptive routing.
 - **Zero-Quota Bidirectional Sync & Auto-History:** `SessionStart` runs zero-quota bidirectional `global<->embedded` higher-version plugin auto-sync (never downgrades); host `PROJECT_HISTORY.md` updates/syncs automatically alongside version/handoff ledgers.
-- **Thin Coordinator (T2/T3 & `/goal`):** Main chat orchestrates ONLY — keep context small; delegate bulk reads, multi-module edits, log digests, & sequential PRoot builds/tests to max safe parallel `invoke_subagent` / `run_workflow` / `swarm` (`<=20L` symbolic EN replies).
+- **Thin Coordinator & Flat `run_workflow` (T2/T3 & `/goal`):** Main chat orchestrates ONLY — keep context small; delegate bulk reads, disjoint edits, & sequential PRoot ops to flat 1-slice `run_workflow` cubicles (`wave {schedule|fanout|stage1-3}`, `<=600B` receipts, Termux `<=2` PPK cap, AST `model=`/`shell=False` guarded, `<=20L` replies).
 - **Single Verify Owner (`1-verify-owner`) & Anti-Polling (`!poll`):** Assign ONE verify owner per wave for builds/tests; docs/`flash_lite` subagents are FORBIDDEN from running heavy build/test suites. NEVER poll via `schedule`, repeat `manage_task(status|list)` (<90s), repeat `ps aux | grep` (<120s), or `while/for+sleep` `gh run list|view` loops (`planner_guard_polling.py` + `planner_guard_command.py` block them; bare `run_plugin_tests.py` auto-rewrites to `--fast`) — use reactive wakeup (`NotificationTimeoutSeconds` + empty reply) or blocking `gh run watch --exit-status --compact`.
 - **Subagent Context & Output Diet:** Subagents start fresh (0 parent ctx; `!swarm fork`). Prefer fresh 1-shot subagents per slice (`!reuse` after heavy logs or unrelated tasks; `send_message` ONLY for tiny stateful follow-ups `<=2` turns) && `!cmd-echo` (pass concise symbolic goal + target path/CLI verb ONLY — never paste long bash pipelines for subagent to echo back).
 - **Nested Sub-Subagents (`delegation.sub_subagent`):** When `allow_nesting:true` (default), subagents may spawn nested `invoke_subagent flash_lite`/`flash` || `swarm` `gemini-*-medium` (`gemini-4-hydrogen-medium` w/ `allow_medium_tier:true`) / `gemini-*-low` on non-complex parallel/bulk slices whenever isolating work saves net tokens (`default_model:"flash_lite"`, `swarm_medium_model:"gemini-4-hydrogen-medium"`).

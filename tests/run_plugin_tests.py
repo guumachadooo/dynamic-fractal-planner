@@ -5894,10 +5894,12 @@ class TestFractalParallelWaveOrchestration(unittest.TestCase):
                 prompts = wave_scheduler.emit_subagent_prompts(sched)
             wf_src = wf_p.read_text(encoding="utf-8")
             ast.parse(wf_src)
-            self.assertIn("PLANNER_ARTIFACT_DIR=", wf_src)
+            self.assertIn("PLANNER_ARTIFACT_DIR", wf_src)
+            self.assertIn("run_bounded_parallel", wf_src)
+            self.assertIn("_run_plan_cli_seq", wf_src)
             self.assertIn("pipeline(SCHEDULE[\"epochs\"]", wf_src)
-            self.assertIn("D1_CAPTAIN|model=", prompts)
-            self.assertIn("EnableSubagentTools=true", prompts)
+            self.assertIn("CUBICLE|id=", prompts)
+            self.assertIn("EnableSubagentTools=false", prompts)
 
     def test_lease_autobind_guards_scriptpath_and_dirty_rollback(self) -> None:
         import wave_scheduler
@@ -7899,6 +7901,265 @@ class TestV224TokenOverheadGovernor(unittest.TestCase):
             self.assertLessEqual(len(lines), 6, f"Expected <=6L closeout receipt, got:\n{r_cls.stdout}")
             self.assertIn("CLOSEOUT|OK|", r_cls.stdout)
             self.assertTrue((repo / ".agents" / "docs" / "HANDOFF.md").is_file())
+
+
+class TestW58HorizontalCubicleOrchestration(unittest.TestCase):
+    """W58 Horizontal Fine-Grain Cubicle Orchestration, AST guard, sealed barriers & classifier fixes."""
+
+    def test_termux_proot_fallback_and_host_override_precedence(self) -> None:
+        import host_context
+        import wave_scheduler
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            fake_termux = repo / "termux_marker"
+            fake_termux.mkdir()
+            probes = {
+                "gh_hosts_file": repo / "missing_gh",
+                "local_dotnet_bin": repo / "missing_dotnet",
+                "sdcard_dir": repo / "missing_sdcard",
+                "omni_local_config": repo / "missing_omni",
+                "runtime_env_bridge": repo / "missing_bridge",
+                "termux_dir": fake_termux,
+            }
+            info = host_context.detect_host(repo, env={}, probe_paths=probes)
+            self.assertEqual(info["host_id"], "local-ide")
+            self.assertTrue(info["is_termux_proot"])
+            self.assertTrue(info["capabilities"]["is_termux_proot"])
+
+            with unittest.mock.patch.object(wave_scheduler, "detect_host", return_value=info):
+                self.assertTrue(wave_scheduler.is_termux_constrained(repo))
+
+            ovr_info = {
+                "host_id": "antigravity-local",
+                "reason": "env:PLANNER_HOST_OVERRIDE",
+                "is_termux_proot": True,
+                "capabilities": {"is_termux_proot": True},
+            }
+            with unittest.mock.patch.object(wave_scheduler, "detect_host", return_value=ovr_info):
+                self.assertFalse(wave_scheduler.is_termux_constrained(repo))
+
+    def test_preslice_decompose_and_legacy_tier_inference(self) -> None:
+        import wave_scheduler
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            py_f = repo / "big.py"
+            py_lines = []
+            for idx in range(1, 15):
+                py_lines.append(f"def fn_{idx}(x: int) -> int:")
+                py_lines.extend([f"    v_{j} = x + {j}" for j in range(18)])
+                py_lines.append("    return v_0")
+            py_f.write_text("\n".join(py_lines) + "\n", encoding="utf-8")
+
+            js_f = repo / "cfg.json"
+            js_f.write_text("{\n" + ",\n".join(f'  "k{i}": {i}' for i in range(260)) + "\n}\n", encoding="utf-8")
+
+            py_slices = wave_scheduler.preslice_wave_inputs(repo, [], ["big.py"], max_slice_lines=120, max_chunks_per_file=6)
+            js_slices = wave_scheduler.preslice_wave_inputs(repo, [], ["cfg.json"], max_slice_lines=120, max_chunks_per_file=6)
+            self.assertGreaterEqual(len(py_slices), 2)
+            self.assertTrue(any(s["symbols"] for s in py_slices))
+            self.assertGreaterEqual(len(js_slices), 2)
+            self.assertEqual(js_slices[-1]["end_line"], 262)
+
+            ro_meta = {"writes": [], "reads": ["big.py", "cfg.json"], "locks": [], "tier": "L0"}
+            ro_cubs = wave_scheduler.decompose_wave_to_cubicles(
+                {"id": "W_RO", "scope": "Inspect big files", "io": "findings", "probe": ""}, ro_meta, repo,
+            )
+            self.assertGreaterEqual(len(ro_cubs), 2)
+            self.assertTrue(all(c["tier"] == "L0" and c["model"] == "flash_lite" and c["mode"] == "flat" for c in ro_cubs))
+
+            wr_meta = {"writes": ["a.cs", "b.cs"], "reads": [], "locks": [], "tier": "L1"}
+            wr_cubs = wave_scheduler.decompose_wave_to_cubicles(
+                {"id": "W_WR", "scope": "Update coupled files", "io": "ok", "probe": ""}, wr_meta, repo,
+            )
+            self.assertEqual(len(wr_cubs), 1)
+            self.assertEqual(wr_cubs[0]["writes"], ["a.cs", "b.cs"])
+            self.assertEqual(wr_cubs[0]["model"], "flash")
+
+            pro_meta = {"writes": ["sec.py"], "reads": [], "locks": [], "tier": "L3"}
+            pro_cubs = wave_scheduler.decompose_wave_to_cubicles(
+                {"id": "W_PRO", "scope": "[L3] security hardening", "io": "ok", "probe": ""}, pro_meta, repo,
+            )
+            self.assertEqual(pro_cubs[0]["model"], "pro")
+
+            self.assertEqual(wave_scheduler.infer_legacy_wave_meta({"id": "W0", "scope": "Audit notes", "io": "", "probe": "", "bullets": []})["tier"], "L0")
+            self.assertEqual(wave_scheduler.infer_legacy_wave_meta({"id": "W1", "scope": "Edit foo.py", "io": "", "probe": "", "bullets": []})["tier"], "L1")
+            self.assertEqual(wave_scheduler.infer_legacy_wave_meta({"id": "W2", "scope": "Edit a.py and b.py", "io": "", "probe": "", "bullets": []})["tier"], "L2")
+            self.assertEqual(wave_scheduler.infer_legacy_wave_meta({"id": "W3", "scope": "Deep DSP architecture", "io": "", "probe": "", "bullets": []})["tier"], "L3")
+
+    def test_emit_fanout_and_stage13_compile_and_ast_allow(self) -> None:
+        import ast
+        import planner_guard_delegation as pgd
+        import schema_migrations as sm
+        import wave_scheduler
+
+        cfg = sm.resolve_delegation_config(None)
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            (repo / "README.md").write_text("# Demo\n", encoding="utf-8")
+            (repo / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+            bp = repo / "BP_T.md"
+            bp.write_text(
+                "\n".join([
+                    "BP_META|id=BP_T|format=full|domain_vec=software:1.00|door=1-way|tier=T3|status=ACTIVE",
+                    "## 6. Rolling-Wave DSM Graph",
+                    "### H1 Atomic Slices",
+                    "SLICE|W1|Update tests/run_plugin_tests.py|ok|python3 -B .agents/plugins/dynamic-fractal-planner/tests/run_plugin_tests.py --fast",
+                    "SLICE_DAG|W1|deps=none|writes=tests/run_plugin_tests.py|tier=L2",
+                ]),
+                encoding="utf-8",
+            )
+            with _patched_env({"PLANNER_HOST_OVERRIDE": "antigravity-termux", "PLANNER_LEASE_DIR": str(repo / ".leases")}):
+                sch = wave_scheduler.schedule_blueprint(bp, repo, mode="parallel")
+                wf_s = wave_scheduler.emit_workflow_script(sch, bp, repo, Path(art) / "scratch" / "wf_s.py", artifact_dir=Path(art))
+                fo = wave_scheduler.compile_fanout_schedule(repo, targets=["README.md", "AGENTS.md"], task="Inspect", writes=["RO"], tier="L0")
+                wf_f = wave_scheduler.emit_fanout_workflow(fo, repo, Path(art) / "scratch" / "wf_f.py", artifact_dir=Path(art))
+                s13 = wave_scheduler.compile_stage13_workflow("W59 Bug Hunter v3", repo, out_path=Path(art) / "scratch" / "wf_s13.py", artifact_dir=Path(art))
+                wf_13 = Path(s13["workflow_path"])
+
+                for p in (wf_s, wf_f, wf_13):
+                    src = p.read_text(encoding="utf-8")
+                    compile(src, str(p), "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+                    self.assertNotIn("call_tool(", src)
+                    self.assertNotIn(": false", src)
+                    self.assertIsNone(pgd._check_run_workflow({"ScriptPath": str(p)}, cfg, repo=repo), f"AST denied {p.name}")
+
+    def test_single_writer_ro_flat_leases_dead_pid_reap_and_sealed_barrier(self) -> None:
+        import wave_scheduler
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art, tempfile.TemporaryDirectory() as ldir:
+            repo = Path(td)
+            init_git_repo(repo)
+            (repo / ".agents").mkdir(parents=True, exist_ok=True)
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps({"schema_version": 5, "planner_mode": "lean"}), encoding="utf-8")
+            (repo / "w1.py").write_text("W1 = 1\n", encoding="utf-8")
+            (repo / "ro.py").write_text("RO = 1\n", encoding="utf-8")
+            (repo / "s1.py").write_text("S1 = 1\n", encoding="utf-8")
+            (repo / "s2.py").write_text("S2 = 1\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
+
+            env_x = {"PLANNER_LEASE_DIR": ldir}
+            with _patched_env(env_x):
+                # 1) Dead PID lease is auto-reaped by _locked_lease_store
+                wave_scheduler.epoch_begin(repo, "BP_DEAD", "E0", [{"id": "WD", "writes": ["w1.py"], "locks": []}], nonces={"WD": "d000"}, owner_pid=99999999)
+                with wave_scheduler._locked_lease_store(repo) as st:
+                    self.assertEqual(st.get("leases"), {})
+
+                # 2) 1-writer + 1-RO epoch activates leases; RO worker cannot write; flat worker cannot nest
+                eb = wave_scheduler.epoch_begin(
+                    repo, "BP_L", "E1",
+                    [{"id": "W1", "writes": ["w1.py"], "locks": [], "mode": "flat"}, {"id": "WRO", "writes": [], "locks": [], "mode": "flat"}],
+                    nonces={"W1": "n1", "WRO": "n2"}, owner_pid=os.getpid(), probes=["python3 -c 'print(1)'"],
+                )
+                self.assertTrue(wave_scheduler.has_active_parallel_leases(repo))
+                self.assertTrue(wave_scheduler.bind_lease_conversation(repo, "cid-w1", "BP_L", "E1", "W1", "n1", mode="flat"))
+                self.assertTrue(wave_scheduler.bind_lease_conversation(repo, "cid-ro", "BP_L", "E1", "WRO", "n2", mode="flat"))
+                self.assertTrue(wave_scheduler.is_flat_lease_worker(repo, "cid-w1"))
+                self.assertIsNotNone(wave_scheduler.check_file_lease(repo, "cid-ro", "ro.py"))
+                self.assertIn("Read-only", wave_scheduler.check_file_lease(repo, "cid-ro", "ro.py"))
+
+                _, _, nest_deny = run_hook(
+                    "planner_guard_delegation.py",
+                    {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "conversationId": "cid-w1", "toolCall": {"name": "invoke_subagent", "args": {"Model": "flash", "Role": "X", "Prompt": "Y"}}},
+                    env_extra=env_x,
+                )
+                self.assertEqual(nest_deny["decision"], "deny")
+                self.assertIn("flat_cubicle_no_nest", nest_deny["reason"])
+
+                # 3) Tampered probes rejected by sealed epoch_barrier & needs_verify remains True
+                (repo / "w1.py").write_text("W1 = 2\n", encoding="utf-8")
+                bar_tamper = wave_scheduler.epoch_barrier(
+                    repo, "BP_L", "E1", [{"slice_id": "W1", "status": "ok"}],
+                    probes=["python3 -c 'print(\"PWNED\")'"], run_probes=True, artifact_dir=Path(art),
+                )
+                self.assertFalse(bar_tamper["probes_ok"])
+                self.assertEqual(bar_tamper.get("tamper_error"), "PROBE_SIG_MISMATCH")
+                hs = json.loads((Path(art) / "scratch" / ".hook_state.json").read_text(encoding="utf-8"))
+                self.assertTrue(hs["needs_verify"])
+
+                # 4) Split parent wave rolls back ALL sibling edits when one sibling fails
+                wave_scheduler.epoch_begin(
+                    repo, "BP_SIB", "E1",
+                    [{"id": "WPAR.c1", "parent_id": "WPAR", "writes": ["s1.py"]}, {"id": "WPAR.c2", "parent_id": "WPAR", "writes": ["s2.py"]}],
+                    nonces={"WPAR.c1": "a1", "WPAR.c2": "a2"}, owner_pid=os.getpid(),
+                )
+                (repo / "s1.py").write_text("S1 = 9\n", encoding="utf-8")
+                (repo / "s2.py").write_text("S2 = BROKEN\n", encoding="utf-8")
+                bar_sib = wave_scheduler.epoch_barrier(
+                    repo, "BP_SIB", "E1",
+                    [{"slice_id": "WPAR.c1", "status": "ok"}, {"slice_id": "WPAR.c2", "status": "failed"}],
+                    run_probes=False, artifact_dir=Path(art),
+                )
+                self.assertIn("s1.py", bar_sib["rolled_back"])
+                self.assertIn("s2.py", bar_sib["rolled_back"])
+                self.assertEqual((repo / "s1.py").read_text(encoding="utf-8"), "S1 = 1\n")
+                self.assertEqual((repo / "s2.py").read_text(encoding="utf-8"), "S2 = 1\n")
+
+    def test_workflow_ast_auditor_blocks_bypasses_and_allows_safe_bounded(self) -> None:
+        import planner_guard_delegation as pgd
+        import schema_migrations as sm
+
+        cfg = sm.resolve_delegation_config(None)
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            with _patched_env({"PLANNER_HOST_OVERRIDE": "antigravity-termux"}):
+                bad_cases = {
+                    "missing_model": 'await agent("hi", schema={"type":"string"})',
+                    "negated_pro": 'await agent("no security, FORBIDDEN: architecture", schema={"type":"string"}, model="pro")',
+                    "kwargs_agent": 'kw={"model":"flash"}; await agent("hi", schema={"type":"string"}, **kw)',
+                    "eval_call": 'eval("1+1"); await agent("hi", schema={"type":"string"}, model="flash")',
+                    "shell_true": 'import subprocess\nsubprocess.run("ls", shell=True)\nawait agent("hi", schema={"type":"string"}, model="flash")',
+                    "os_system": 'import os\nos.system("id")\nawait agent("hi", schema={"type":"string"}, model="flash")',
+                    "termux_over_2": 'items=[1,2,3,4]\nawait parallel(items, lambda x: agent("hi", schema={"type":"string"}, model="flash"))',
+                    "multihop_gather": 'import asyncio\ndef leaf(): return "git push origin master"\ndef wrap(): return leaf()\nawait asyncio.gather(agent(wrap(), schema={"type":"string"}, model="flash"))',
+                }
+                for name, src in bad_cases.items():
+                    hit = pgd._check_run_workflow({"Script": src}, cfg, repo=repo)
+                    self.assertIsNotNone(hit, f"Expected AST deny for {name}")
+
+                good_src = "\n".join([
+                    "import subprocess, sys",
+                    "PLAN_CLI = '/tmp/plan_tool.py'",
+                    "subprocess.run([sys.executable, '-B', PLAN_CLI, 'status'], shell=False, check=True)",
+                    "MAX_CONCURRENCY = 2",
+                    "async def run_bounded_parallel(items, fn, max_width=MAX_CONCURRENCY):",
+                    "    w = max(1, int(max_width or 1))",
+                    "    for i in range(0, len(items), w):",
+                    "        await parallel(items[i : i + w], fn)",
+                    "await run_bounded_parallel([1, 2, 3, 4], lambda x: agent(f't{x}', schema={'type': 'string'}, model='flash'))",
+                ])
+                self.assertIsNone(pgd._check_run_workflow({"Script": good_src}, cfg, repo=repo))
+
+    def test_domains_classifier_horizontal_triage_and_8_probe_canary(self) -> None:
+        import blueprint_engine
+        import complexity_triage
+        import meta_governance
+
+        clf_orch = blueprint_engine.classify_blueprint_request("W58 zero-coordinator-token horizontal subagent orchestration", repo_root=PLUGIN_ROOT)
+        self.assertEqual(clf_orch["domain_vector"].get("security", 0.0), 0.0, clf_orch)
+        clf_sec = blueprint_engine.classify_blueprint_request("Enforce HMAC bearer auth token rotation across API", repo_root=PLUGIN_ROOT)
+        self.assertGreater(clf_sec["domain_vector"].get("security", 0.0), 0.0, clf_sec)
+
+        self.assertEqual(complexity_triage.detect_wave_exec_mode("Pode trabalhar com os agentes horizontais"), "horizontal_cubicle")
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as art:
+            repo = Path(td)
+            (repo / ".agents").mkdir(parents=True)
+            (repo / ".agents" / "planner_profile.json").write_text(json.dumps({"schema_version": 5, "planner_mode": "lean"}), encoding="utf-8")
+            _, _, pre_h = run_hook(
+                "planner_pre_invocation.py",
+                {"workspacePaths": [str(repo)], "artifactDirectoryPath": art, "lastUserInput": "Pode trabalhar com agentes horizontais cubicles", "invocationNum": 1},
+            )
+            txt_h = json.dumps(pre_h)
+            self.assertIn("[WAVE_ORCH|MAX_PAR]", txt_h)
+            self.assertIn("stage1-3", txt_h)
+
+        canary = meta_governance.run_t0_mutation_canary()
+        self.assertTrue(canary["ok"], canary)
+        self.assertEqual(canary["total"], 8)
+        self.assertEqual(canary["kill_rate"], 1.0)
+        self.assertIn("T0-WORKFLOW-AST-GUARD", [p["id"] for p in canary["probes"]])
 
 
 def _stamp_plugin_tests_passed() -> None:
